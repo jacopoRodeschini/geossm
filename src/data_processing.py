@@ -2,7 +2,6 @@
 @author: Jacopo - Tommaso
 @title: 
 """
-
 import numpy as np
 from scipy.spatial.distance import cdist
 from patsy import ModelDesc, dmatrices, build_design_matrices
@@ -10,32 +9,59 @@ import geopandas as geopd
 import pandas as pd
 import warnings
 
-# %%
-
-
 class DesignMatrices:
 
     def __init__(self, y: np.array, X: np.array, formula: str,
                  csr, geometry, timestamps):
 
-        # main attribute
-        self.y = y
-        self.X = X
-        self.formula = formula
-        self.geometry = geometry
-        self.timestamps = timestamps
+        self.y = y # target variables, np.array [N x T]
+        self.X = X # covariates, np.array [N x P x T] 
+        self.formula = formula # formula string
+        self.crs = csr # coordinate reference system
+        self.geometry = geometry # obervations geometries
+        self.timestamps = timestamps # observations timestamps
 
-        self.N, self.b, self.T = X.shape
+        self.N, self.b, self.T = X.shape # number of points, number of covariates, number of timestamps
+        self.terms = ModelDesc.from_formula(formula)
 
-    def _parse_formula(self, formula: str):
+    def __str__(self):
+        description = """Design Matrices object ----------------------
+formula: {formula}
+Time name: {time_name}
 
-        terms = ModelDesc.from_formula(formula)
+# Space
+- Crs: {crs_name}
+- Geometry type: {ptType}
+- Geometry name: {geo_name} 
+- Number of points: {N} (centroid)
+- Box: {box}
+- Dist: min={dmin}, median={dmed}, max={dmax}
 
-        return terms
+# Time
+- Number of timestamp: {T} 
+- Timestamp: min={tmin}, max={tmax}
 
+# Design matrix 
+y: {y_shape}
+y name : {y_name}
 
-# %%
-
+X: {x_shape}
+X name: {x_name}
+----------------------------------
+""".format(formula=self.formula, time_name=self.time_col_name,
+           crs_name=self.crs.name, ptType=np.unique(self.geometry_type), geo_name=self.df.geometry.name, N=self.N, box=self.box,
+           dmin=np.round(self.distance.min(), 2),
+           dmed=np.round(np.median(self.distance), 2),
+           dmax=np.round(self.distance.max(), 2),
+           T=self.T, tmin=self.df[self.time_col_name].min(), tmax=self.df[self.time_col_name].max(),
+           y_shape=self.y.shape,
+           y_name=self._y_design_info.column_names,
+           x_shape=self.X.shape,
+           x_name=self._x_design_info.column_names
+           )
+        
+        return description
+        
 class data_preparation:
 
     def __init__(self, geodf: geopd.GeoDataFrame, formula: str):
@@ -94,43 +120,7 @@ class data_preparation:
 
         # Get the points of the response variable and distace
         self.points, self.distance = self._getPoints(
-            self.df, self.geometry_id, self.time_col_name)
-        
-    def __str__(self):
-        return """Grid object ----------------------
-formula: {formula}
-Time name: {time_name}
-
-# Space
-- Crs: {crs_name}
-- Geometry type: {ptType}
-- Geometry name: {geo_name} 
-- Number of points: {N} (centroid)
-- Box: {box}
-- Dist: min={dmin}, median={dmed}, max={dmax}
-
-# Time
-- Number of timestamp: {T} 
-- Timestamp: min={tmin}, max={tmax}
-
-# Design matrix 
-y: {y_shape}
-y name : {y_name}
-
-X: {x_shape}
-X name: {x_name}
-----------------------------------
-""".format(formula=self.formula, time_name=self.time_col_name,
-           crs_name=self.crs.name, ptType=np.unique(self.geometry_type), geo_name=self.df.geometry.name, N=self.N, box=self.box,
-           dmin=np.round(self.distance.min(), 2),
-           dmed=np.round(np.median(self.distance), 2),
-           dmax=np.round(self.distance.max(), 2),
-           T=self.T, tmin=self.df[self.time_col_name].min(), tmax=self.df[self.time_col_name].max(),
-           y_shape=self.y.shape,
-           y_name=self._y_design_info.column_names,
-           x_shape=self.X.shape,
-           x_name=self._x_design_info.column_names
-           )
+            self.df, self.geometry_id, self.time_col_name)   
 
     def _computedesignMatrix(self, df, geometry_id, time_col_name, response_name, formula=None, terms=None):
 
@@ -142,8 +132,6 @@ X name: {x_name}
             msg += "Formula or terms must be provided"
 
         # sort the dataset by time
-        # df[geometry_id] = df[geometry_id].astype('category')
-        # sdf[time_col_name] = df[time_col_name].astype('category')
         df = df.sort_values([time_col_name, geometry_id])
 
         # take just the unique row
@@ -299,68 +287,3 @@ X name: {x_name}
             flag = False
 
         return flag, msg
-
-    def write(self, filename, mode='a'):
-        # write the class into a file
-        s = "OBSERVATION GRID \n"
-        s += self.__str__()
-
-        with open(filename, mode) as f:
-            f.write(s)
-
-    def getObservarion(self):
-        return self.y
-
-    def getPoints(self):
-        return self.points
-
-    def getDistance(self):
-        return self.distance
-
-    def getDesignMatrix(self):
-        if (self.y is not None) and (self.X is not None):
-            return self.y, self._y_info.column_names, self.X, self._x_info.column_names
-        elif (self.y is None):
-            return self.X, self._x_info.column_names
-        else:
-            print("Error")
-            return
-
-    def isValid(self):
-        # Boolean test to check if the grid obj is valid
-
-        # Check if the distance matrx is computed
-        if self.distance is None:
-            return False
-
-    @ property
-    def dataset(self):
-        return self._dataset
-
-    def __repr__(self):
-        return self.__str__()
-
-    def __eq__(self, o):
-        return True
-
-"""
-class gridList:
-    def __init__(self):
-        self.list = []
-        
-    def append(self, grid):
-        
-        if not type(grid) grid:
-            return "The grid neet to be a gridd object"
-        
-        self.list.append(grid)
-
-"""
-
-# %%
-"""
-class _DesingMatrices_geossm(DesingMatrices):
-    
-    def __init__(args*):
-        super.__init__(self, args*)
-"""
