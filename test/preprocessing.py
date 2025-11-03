@@ -1,7 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.data_processing import data_preparation
+from src.data_preparation import DataPreparation as dp
 import geopandas as geopd
 import pandas as pd
 from shapely.geometry import Point
@@ -18,7 +18,7 @@ gdf = geopd.GeoDataFrame(data, crs="EPSG:4326")
 
 formula = 'target ~ feature1 + feature2'
 
-design_matrices = data_preparation(gdf, formula)
+design_matrices = dp(gdf, formula)
 
 assert design_matrices.y.shape == (3,)
 assert design_matrices.X.shape == (3, 3)  # Including intercept
