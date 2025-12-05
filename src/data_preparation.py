@@ -12,13 +12,15 @@ import warnings
 class DesignMatrices:
 
     def __init__(self, y: np.array, X: np.array, formula: str,
-                 csr, geometry, timestamps):
+                 csr, geometry, timestamps, time_col_name='Time'):
 
         self.y = y # target variables, np.array [N x T]
         self.X = X # covariates, np.array [N x P x T] 
         self.formula = formula # formula string
         self.crs = csr # coordinate reference system
         self.geometry = geometry # obervations geometries
+        self.geometry_id = 'geometry_id' # geometry id column name
+        self.time_col_name = time_col_name # time column name
         self.timestamps = timestamps # observations timestamps
 
         self.N, self.b, self.T = X.shape # number of points, number of covariates, number of timestamps

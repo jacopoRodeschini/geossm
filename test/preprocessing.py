@@ -1,7 +1,7 @@
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from src.data_preparation import DataPreparation as dp
+from src.data_preparation import data_preparation as dp
 import geopandas as geopd
 import pandas as pd
 from shapely.geometry import Point
