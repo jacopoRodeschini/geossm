@@ -575,15 +575,6 @@ class spdeAppoxCov(Matern):
 
         return self._compute_precision_spde(rescale)
 
-    def loglikelihood(self, yTrue, rescale=None, s2=None):
-        """Compute the log-likelihood function starting from the precision matrix"""
-
-        # compute Sigma true
-        Q = self.precision(rescale, s2)
-
-        # compute the normla pdf (loglikelihhod)
-        return utils.logpdfQ(yTrue, Q)
-
     def plot_mesh(self, ax, alpha_vertex=1, alpha_triangle=0.5, alpha_border=0.5):
 
         # Convert the vertex array to a numpy array
@@ -848,56 +839,3 @@ class spdeAppoxCov(Matern):
             # Recompute mass and stiffness matrices if needed
         if self._mass is None or self._stiff is None:
             self._mass, self._stiff = self._compute_mass_stiff()
-
-
-# % SAR approximation
-
-# # In the geo lattrice model, the Q function is build by considering the SAR model.
-# # See the Nyckca 2015 (L = rho, theta = ks)
-
-# # get the hidden lattice
-# hlattice = self.grid_latent
-# hsize = self.qsize
-# offset = self.qpoints[0] if self.lattice == 'regular' else np.nan
-# rho = L
-# ks = theta
-
-# # Create the sparse B matrix
-# main_diag = (4 + ks**2) * np.ones(hsize)   # main diagional
-# side_diag = -1 * np.ones(hsize-1)       # up/down main diagonal
-# up_down_diag = -1 * np.ones(hsize-offset)    # Periodic up/down element
-
-# B = sp.diags_array([main_diag, side_diag, side_diag, up_down_diag, up_down_diag],
-#                    offsets=[0, -1, 1, -offset, offset], shape=(hsize, hsize), format='csc')
-
-# if justB:
-#     return B
-# else:
-#     # create the sparse precision matrix
-#     invQ = (1/rho) * (B.T @ B)
-
-#     # compute the covariance matrix and logdet
-
-#     factor = cholesky(invQ)     # compute the sparse cholenky
-#     logdetInvQ = factor.logdet()    # compute the logdet
-#     # cov = factor.solve_A(np.eye(N)) # compute the inverse matrix
-
-#     # fix later (really time consuming -> use sparse cholensky solve_A)
-#     if cov == True:
-#         # TODO: FIX INVERSION
-#         Q = np.linalg.solve(invQ.toarray(), np.eye(hsize))
-#         return Q, invQ.toarray(), logdetInvQ
-
-#     else:
-#         return invQ.toarray(), logdetInvQ
-
-
-# % Circular embedding approximation CE
-
-# % La vecchia approx.
-
-class netApproxCov():
-
-    def precision(self, d, dist='Euclidean'):
-
-        return Matern(d)
