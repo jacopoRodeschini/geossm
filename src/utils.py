@@ -1,3 +1,7 @@
+"""
+General utility functions for GEOSSM.
+"""
+
 import numpy as np
 import datetime
 

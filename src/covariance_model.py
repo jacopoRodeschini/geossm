@@ -1,11 +1,5 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
-Created on Fri Oct  4 14:35:01 2024
-
-@author: jacopo
-@ title: create the spatial covariance class to model the spatial covariance for
-the spatial process
+Add general description here.
 """
 import scipy.spatial
 from scipy.spatial import Delaunay

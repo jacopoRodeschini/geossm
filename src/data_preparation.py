@@ -1,19 +1,29 @@
 """
-@author: Jacopo - Tommaso
-@title: 
+Data preparation module for GEOSSM.
+
+This module provides functionality to prepare spatial-temporal datasets
+for modeling, including design matrix construction and dataset validation.
+
+DesignMatrices class encapsulates the design matrices and related metadata.
+
+DataPreparation class handles the preparation of the DesignMatrices object.
+
 """
 import numpy as np
 from scipy.spatial.distance import cdist
-from patsy import ModelDesc, dmatrices, build_design_matrices
+from patsy import ModelDesc, dmatrices
 import geopandas as geopd
 import pandas as pd
-import warnings
 
 class DesignMatrices:
 
     def __init__(self, y: np.array, X: np.array, formula: str,
                  csr, geometry, timestamps, time_col_name='Time'):
-
+        """
+        Design Matrices for spatial-temporal modeling.
+        Construct while inittialized.
+        Supposed to be return from data_preparation class.
+        """
         self.y = y # target variables, np.array [N x T]
         self.X = X # covariates, np.array [N x P x T] 
         self.formula = formula # formula string
@@ -22,7 +32,6 @@ class DesignMatrices:
         self.geometry_id = 'geometry_id' # geometry id column name
         self.time_col_name = time_col_name # time column name
         self.timestamps = timestamps # observations timestamps
-
         self.N, self.b, self.T = X.shape # number of points, number of covariates, number of timestamps
         self.terms = ModelDesc.from_formula(formula)
 
@@ -67,6 +76,20 @@ X name: {x_name}
 class data_preparation:
 
     def __init__(self, geodf: geopd.GeoDataFrame, formula: str):
+        """
+        Prepare the spatial-temporal dataset for modeling.
+        Parameters
+        ----------
+        geodf : geopandas.GeoDataFrame
+            Input spatial-temporal dataset with geometry and time columns.
+        formula : str
+            Patsy formula string for design matrix construction.
+        Returns
+        -------
+        DesignMatrices
+            An object containing the design matrices and related metadata.
+        
+        """
 
         self.geodf = geodf
         self.formula = formula
