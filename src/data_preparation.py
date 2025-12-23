@@ -60,19 +60,20 @@ X: {x_shape}
 X name: {x_name}
 ----------------------------------
 """.format(formula=self.formula, time_name=self.time_col_name,
-           crs_name=self.crs.name, ptType=np.unique(self.geometry_type), geo_name=self.df.geometry.name, N=self.N, box=self.box,
+           crs_name=self.crs.name, ptType=np.unique(self.geometry_type), geo_name=self.geodf.geometry.name, N=self.N, box=self.box,
            dmin=np.round(self.distance.min(), 2),
            dmed=np.round(np.median(self.distance), 2),
            dmax=np.round(self.distance.max(), 2),
-           T=self.T, tmin=self.df[self.time_col_name].min(), tmax=self.df[self.time_col_name].max(),
+           T=self.T, tmin=self.geodf[self.time_col_name].min(), tmax=self.geodf[self.time_col_name].max(),
            y_shape=self.y.shape,
            y_name=self._y_design_info.column_names,
            x_shape=self.X.shape,
            x_name=self._x_design_info.column_names
            )
-        
+
         return description
-        
+
+
 class data_preparation:
 
     def __init__(self, geodf: geopd.GeoDataFrame, formula: str):
@@ -94,60 +95,89 @@ class data_preparation:
         self.geodf = geodf
         self.formula = formula
 
-        self._check()
-        y, X, crs, geometry, timestamps=self._build()
+        if self._check(self.geodf, dtype):
+            self.design_matrices = self._build()
 
-        return DesignMatrices(y, X, formula, crs, geometry, timestamps)
+    def __call__(self):
+        return self.design_matrices
 
-    def _check(self):
+    def get(self):
+        return self.__call__()
+
+    def _check(self, geodf, dtype):
         # Do preliminary check of the dataset
-        flag, msg = self._checkSpatialDataset(self.geodf)
+        flag, msg, self.geometry_id = self._checkSpatialDataset(geodf)
         if not flag:
             raise ValueError(msg)
-        
-        flag, msg, self.time_col_name = self._checkTimeDataset(self.geodf)
+
+        flag, msg, self.time_col_name = self._checkTimeDataset(geodf)
         if not flag:
             raise ValueError(msg)
-        
+
         # check formula (NOW NOT IMPLEMENTED) [return true]
         flag, msg, self.response_name = self._checkFormula(self.formula)
         if not flag:
             raise ValueError(msg)
-        
+
         # Check the time column (timestmap / delta / complete - NAN)
         flag, msg = self._checkTimeColumn(
-            self.geodf, self.response_name, self.geometry_id, self.time_col_name)
+            geodf, self.response_name, self.geometry_id, self.time_col_name)
 
         if not flag:
             raise ValueError(msg)
 
-    def _build(self):
-        
-        # Create unique code (categorical) to idendify a point (from geometry)
-        self.geometry_id = 'geometry_id'
-        ct = pd.Categorical(self.geodf['geometry'],
-                            categories=self.geodf.geometry.unique())
-        self.geodf[self.geometry_id] = ct.codes
+        # check the geometry
+        flag, msg, self.geometry = self._check_geometry(self.geodf)
+        if not flag:
+            raise ValueError(msg)
 
-        # Create new dataset & compute the designed matrix
-        self.df, self.idPoint, self.y, self._y_design_info, self.X, self._x_design_info, self.N, self.T = self._computedesignMatrix(
+        # convert to dytype object
+        numeric_col = self._numeric_column(self.geodf)
+        self.geodf[numeric_col] = self.geodf[numeric_col].apply(
+            lambda col: pd.to_numeric(col, errors='coerce')).astype(dtype)
+
+        return True
+
+    def _check_geometry(self, geodf):
+
+        geom_type = pd.unique(self.geodf.geometry.geom_type)
+
+        msg = ""
+        flag = True
+        if len(geom_type) > 1:
+            msg = "Shoud be onlt one geometru type"
+            flag = False
+
+        return flag, msg, geom_type
+
+    def _numeric_column(self, geodf):
+        # check numeric value to dtype
+        numeric_col = [
+            col for col in geodf.columns if pd.api.types.is_numeric_dtype(geodf[col])]
+
+        return numeric_col
+
+    def _build(self):
+
+        # Create new dataset & compute the designed matrix (spatiotemporal matrix)
+
+        self.geodf, self.idPoint, self.y, self._y_design_info, self.X, self._x_design_info, self.N, self.T, self.timestamps = self._computedesignMatrix(
             self.geodf, self.geometry_id, self.time_col_name, self.response_name, self.formula)
-        
+
         # Objcet geometry metrics attributes
-        self.box = self.df.total_bounds
-        self.geometry_type = self.df.geom_type
-        self.crs = self.df.crs
+        self.box = self.geodf.total_bounds
+        self.geometry_type = self.geodf.geom_type
+        self.crs = self.geodf.crs
 
         # Design matrix
-        self.eigvals = 0.00
-        self.condition_number = 0.00
         self.intercept = True  # default
 
         # Get the points of the response variable and distace
-        self.points, self.distance = self._getPoints(
-            self.df, self.geometry_id, self.time_col_name)   
+        self.points = self._getPoints(self.geodf, self.geometry_id)
 
-    def _computedesignMatrix(self, df, geometry_id, time_col_name, response_name, formula=None, terms=None):
+        return DesignMatrices(self.y, self.X, self.formula, self.crs, self.geometry, self.timestamps)
+
+    def _computedesignMatrix(self, geodf, geometry_id, time_col_name, response_name, formula=None, terms=None):
 
         flag = True
         msg = ""
@@ -157,38 +187,38 @@ class data_preparation:
             msg += "Formula or terms must be provided"
 
         # sort the dataset by time
-        df = df.sort_values([time_col_name, geometry_id])
+        geodf = geodf.sort_values([time_col_name, geometry_id])
 
         # take just the unique row
-        df = df.drop_duplicates(subset=[geometry_id, time_col_name])
+        geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
 
         # Create new dataset starting from formula
         if formula is not None:
 
-            time = np.unique(df[time_col_name])
+            time = np.unique(geodf[time_col_name])
             T = time.shape[0]
 
             # TODO: not all point measure the variable (remove this point)
             # Check the ID statin with measure always nan (and merge same sites)
 
             group_cols = [geometry_id]
-            stp = df.groupby(group_cols, observed=True).agg({
+            stp = geodf.groupby(group_cols, observed=True).agg({
                 response_name: lambda x: np.nansum(x)
             }).reset_index()
 
             idS = stp[stp[response_name] > 0].index
 
-            df = df[df.geometry_id.isin(idS)]
+            geodf = geodf[geodf.geometry_id.isin(idS)]
 
             # check the number of point available
-            point = df.geometry.unique()
+            point = geodf.geometry.unique()
             N = point.shape[0]
 
             # Convert Nan to inf (this becouse the dmatrices remove nan -> we have to keep this values)
-            df.loc[df[response_name].isna(), response_name] = np.inf
+            geodf.loc[geodf[response_name].isna(), response_name] = np.inf
 
             ytemp, Xtemp = dmatrices(
-                formula, data=df, NA_action='raise', return_type='matrix')
+                formula, data=geodf, NA_action='raise', return_type='matrix')
 
             # replace inf with nan
             ytemp[np.isinf(ytemp)] = np.nan
@@ -203,7 +233,7 @@ class data_preparation:
             for i in range(0, Xtemp.shape[1]):
                 Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
 
-            return df, point, y, ytemp.design_info, Xbeta, Xtemp.design_info, N, T
+            return geodf, point, y, ytemp.design_info, Xbeta, Xtemp.design_info, N, T, time
 
     def _checkFormula(self, formula):
 
@@ -215,7 +245,7 @@ class data_preparation:
 
         return True, msg, m.lhs_termlist[0].name()
 
-    def _checkTimeColumn(self, df, response_name, geometry_id, time_col_name):
+    def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name):
 
         # Check foreach geometry_id the timeseries lenght, start/end date, the delta time.
         flag = True
@@ -223,17 +253,17 @@ class data_preparation:
 
         return flag, msg
 
-    def _checkTimeDataset(self, df):
+    def _checkTimeDataset(self, geodf):
         msg = ""
         flag = True
         time_col_name = None
 
         # check if time is in dataset
-        if not 'Time' in df:
+        if not 'Time' in geodf:
 
             # check other columns with datatime dtype
             time_col = [
-                col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col])]
+                col for col in geodf.columns if pd.api.types.is_datetime64_any_dtype(geodf[col])]
 
             if len(time_col) == 0:
                 msg += "The 'Time' column not found \n"
@@ -250,21 +280,16 @@ class data_preparation:
 
         return flag, msg, time_col_name
 
-    def _getPoints(self, df, geometry_id, time_col_name):
+    def _getPoints(self, geodf, geometry_id):
 
         # pojected geometry to_crs() for accurete results
-        uni, idx = np.unique(df[geometry_id], return_index=True)
+        uni, idx = np.unique(geodf[geometry_id], return_index=True)
 
         # Extract the centroid by the geometry
-        centroid = df.iloc[idx].geometry.centroid
+        centroid = geodf.iloc[idx].geometry.centroid
 
         # Create a point vector (x, y)
-        pts = np.stack((centroid.x, centroid.y), axis=1)
-
-        # Compute the distance
-        dist = self._computeDistance(pts)
-
-        return pts, dist
+        return np.stack((centroid.x, centroid.y), axis=1)
 
     def _computeDistance(self, points, pt=None, distance='euclidean'):
 
@@ -276,39 +301,45 @@ class data_preparation:
             # Compute distance between matrix and points
             return cdist(points, pt, distance)
 
-    def _checkSpatialDataset(self, df):
+    def _checkSpatialDataset(self, geodf):
 
         msg = ""
         flag = True
 
         # Check the type of the dataset obj
-        if type(df) != geopd.geodataframe.GeoDataFrame:
+        if type(geodf) != geopd.geodataframe.GeoDataFrame:
             msg += "Type of dataset must be geopandas.geodataframe see: (lint to doc) \n"
             flag = False
 
         # Check the crs[already done]
-        if df.crs == None:
+        if geodf.crs == None:
             msg += "Dataset CRS not found: (lint to doc) \n"
             flag = False
 
         # Check valid geometry [All line must be valid]
-        mask = df.is_valid
+        mask = geodf.is_valid
         if not mask.all():
             msg += "Check the rows geometry: (.is_valid) \n"
             flag = False
 
         # Rename geometry
-        if not ('geometry' in df):
+        if not ('geometry' in geodf):
             msg += "Rename the column with the geometry 'geometry' \n"
             flag = False
 
-        df.set_geometry("geometry")
+        geodf.set_geometry("geometry")
+
+        # Create unique code (categorical) to idendify a point (from geometry)
+        geometry_id = 'geometry_id'
+        ct = pd.Categorical(geodf['geometry'],
+                            categories=geodf.geometry.unique())
+        geodf[geometry_id] = ct.codes
 
         # Check the geometry type (now just single resolution)
-        mask = np.unique(df.geom_type)
+        mask = np.unique(geodf.geom_type)
         if not mask.shape == (1,):
             msg += "Just one spatial geometry is supported. Currently found geometries {maks} \n".format(
                 maks=mask)
             flag = False
 
-        return flag, msg
+        return flag, msg, geometry_id
