@@ -1,17 +1,41 @@
-# GEOSSM
-> Geostatistics with State Space Model
+<p align="center">
+  <img src="docs/logo.png" alt="GEOSSM Logo" width="220"/>
+</p>
 
-**GEOSSM** is a Python package designed to apply state space models to spatially and temporally referenced data. It is tailored for geostatistical workflows and takes as input a `GeoDataFrame` from the `geopandas` library.
+# GEOSSM
+> **Geo**statistics with **S**tate **S**pace **M**odels
+
+**GEOSSM** is a Python package designed to apply **state space models** to **spatially and temporally referenced data**.  
+It is tailored for modern **geostatistical workflows** and natively operates on `GeoDataFrame` objects from the `geopandas` library.
+
+The package is designed with scalability and modularity in mind, making it suitable for large spatial and spatiotemporal datasets.
+
+---
 
 ## 🔍 Key Features
 - Seamless integration with `geopandas` for spatial data handling
-- Modular design for preprocessing, design matrix construction, and model fitting
-- Support for spatial and spatiotemporal modeling using state space frameworks
+- State space modeling framework for spatial and spatiotemporal processes
+- Modular pipeline:
+  - data preprocessing
+  - design matrix construction
+  - model specification and fitting
+- Designed for extensibility and research-oriented experimentation
+
+---
 
 ## 📦 Input Format
-- Accepts `geopandas.GeoDataFrame` as input
-- Compatible with common geospatial formats (e.g., Shapefiles, GeoJSON)
+- Accepts `geopandas.GeoDataFrame` as the primary input
+- Compatible with common geospatial formats:
+  - Shapefiles
+  - GeoJSON
+  - GeoPackage
+- Supports spatial and temporal indexing through geometry and time columns
 
-## 📚 Coming Soon
-- Full documentation
-- Example notebooks tutorials and use cases
+---
+
+## 🚀 Installation
+*Coming soon.*
+
+The package will be installable via:
+```bash
+pip install geossm
