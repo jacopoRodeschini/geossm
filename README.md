@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="GEOSSM Logo" width="220"/>
+  <img src="docs/logo.svgz" alt="GEOSSM Logo" width="220"/>
 </p>
 
 # GEOSSM
