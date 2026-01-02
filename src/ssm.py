@@ -33,12 +33,43 @@ class StateSpaceModel:
         self._p = None
         self._q = None
         self._b = None 
+        self.k_params = None
+
+        self.endog = np.asarray(endog)
+        self.exog = np.asarray(exog) if exog is not None else None
+        self.ss_model = ss_model  # the JAX computation engine (StateSpaceModel)
+        self.k_states = k_states
+
+        # bookkeeping
+        self.nobs = int(self.endog.size)
+        self.k_params = None  # set once you choose a parameterization
+        self.param_names = None
+
 
         self.set(F, H, Q, R, x0, Sigma0, Xbeta, beta)
 
         # define the filtered attribute ? 
 
-    def set(self, F, H, Q, R, x0, Sigma0, Xbeta, beta):
+    def __call__(self, y_t):
+        """
+        Docstring for __call__
+        
+        :param self: Run the estimation of the state == fitler + smoother
+        :param y_t: Observed dataset
+        """
+        self.estimate(y_t)
+   
+    def start_params(self) -> np.ndarray:
+        """Return a reasonable starting parameter vector.
+
+        TODO: implement heuristics for beta, and variance parameters.
+        """
+        # Placeholder: return zeros-sized vector (implement properly)
+        if self.k_params is None:
+            raise NotImplementedError("k_params not set — define parameterization first")
+        return np.zeros(self.k_params)
+ 
+    def update(self, F, H, Q, R, x0, Sigma0, Xbeta, beta):
         """
         Set model parameters.
         """
@@ -164,19 +195,9 @@ class StateSpaceModel:
             msg += f"beta vector must be ({b},) current shape is {self.beta.shape} \n"
             flag = False
 
-        
         return flag, msg
-
-
-    def __call__(self, y_t):
-        """
-        Docstring for __call__
-        
-        :param self: Run the estimation of the state == fitler + smoother
-        :param y_t: Observed dataset
-        """
-        self.estimate(y_t)
     
+    @jit
     def estimate(self, y_t) -> tuple:
 
         # run the filter
@@ -212,8 +233,7 @@ class StateSpaceModel:
         )
 
         return results
-
-   
+ 
     @jit
     def filter(self, y_t) -> tuple:
         """
@@ -474,7 +494,137 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
     
-   
+    @jit
+    def sim(self, Xbeta, seed = 1234) -> jnp.ndarray:
+    
+        #def sim(keys, R, F, H, Q, x0, Sigma0, Xbeta, beta):
+        """
+        Simulates a time series from the state-space model using JAX and a Python for-loop.
+        This version does NOT use JIT compilation and is therefore slower.
+
+        Args:
+            key: is a JAX PRNGKey strem object (next methods).
+            ... other model parameters.
+
+        Returns:
+            y_t : (p, T) JAX array of simulated observations
+            x_t : (q, T+1) JAX array of simulated state vectors [x_0, ..., x_T]
+        """
+        # Get dimensions from input shapes
+        T = Xbeta.shape[2]
+        p = self.p
+        q = self.q
+        
+        # Initialize PRNGKey stream
+        keys = jax.random.PRNGKey(seed)
+        keys = jax.random.split(keys, num=2*T + 1)  # enough keys for all random draws
+
+        # Pre-compute Cholesky decompositions
+        chol_R = jnp.linalg.cholesky(self.R)
+        chol_Q = jnp.linalg.cholesky(self.Q)
+        chol_Sigma0 = jnp.linalg.cholesky(self.Sigma0)
+
+        # --- Initial State (t=0) ---
+        initial_noise = jax.random.normal(keys.next(), shape=(q,))
+        x_current = self.x0 + chol_Sigma0 @ initial_noise  # This is state x_0
+
+        # --- Simulation using a Python for-loop ---
+        # Since JAX arrays are immutable, we build Python lists of the results
+        # and stack them into a single array at the end.
+        x_history = [x_current]
+        y_history = []
+
+        # Loop T times to generate T observations (y_0, ..., y_{T-1})
+        for t in range(T):
+            # 1. Generate the observation y_t based on the current state x_t
+            # Note: The original code had a slight lookahead (y_{t-1} from x_t).
+            # This version uses the more standard y_t from x_t.
+            obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
+            mean_reg = Xbeta[:, :, t] @ self.beta
+            y_t = mean_reg + self.H @ x_current + obs_noise
+            y_history.append(y_t)
+
+            # 2. Evolve the state to the next step: x_{t+1} from x_t
+            process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
+            x_next = self.F @ x_current + process_noise
+
+            # 3. Store the new state and update the current state for the next loop iteration
+            x_history.append(x_next)
+            x_current = x_next
+
+        # --- Final Assembly ---
+        # Convert the lists of arrays into single JAX arrays with the correct shape.
+        # jnp.stack(..., axis=1) is equivalent to np.array(...).T
+        final_y_t = jnp.stack(y_history, axis=1)
+        final_x_t = jnp.stack(x_history, axis=1)
+
+        return final_y_t, final_x_t
+    
+    @jit
+    def predict(self, start=None, end=None, exog=None, dynamic=False):
+        """Compute predicted (fitted) values or forecasts.
+
+        Must return a numpy array of fitted/forecasted `endog` values.
+        TODO: use self.ss_model.computeExpectedValues / smoother outputs.
+        """
+        raise NotImplementedError("predict: implement using the StateSpaceModel prediction pipeline")
+
+    @jit
+    def get_prediction(self, start=None, end=None, exog=None, dynamic=False):
+        """Return a prediction results object with mean, se_mean and conf_int.
+
+        Implement a small container or return a tuple; statsmodels has its
+        own PredictionResults class — you may mirror that API.
+        """
+        raise NotImplementedError("get_prediction: implement to return prediction results")
+
+        def loglike(self, params: np.ndarray) -> float:
+        """Return (negative) log-likelihood for optimization.
+
+        Steps to implement:
+        - call `untransform_params` to obtain natural parameters
+        - `self.update(natural_params)` to apply them into `self.ss_model`
+        - run `self.ss_model.filter(y)` to get `loglik`
+        - return a Python float (statsmodels expects a float)
+        """
+        # Defensive placeholder
+        params = np.asarray(params)
+        natural = self.untransform_params(params)
+        # ensure model is present
+        if self.ss_model is None:
+            raise NotImplementedError("loglike: no internal StateSpaceModel available — provide one or implement update to construct it")
+
+        # TODO: call update(...) to set models' parameters
+        # self.update(natural)
+
+        # TODO: call filter and extract log-likelihood (ensure conversion to float)
+        # res = self.ss_model.filter(self.endog)
+        # llf = res[-2]  # depends on filter return signature
+        # return float(llf)
+        raise NotImplementedError("loglike: implement likelihood evaluation using StateSpaceModel.filter")
+
+    def loglikeobs(self, params: jnp.ndarray):
+        """Return array of per-observation log-likelihood contributions.
+
+        Optional; useful for some statistics. Implement if needed.
+        """
+        raise NotImplementedError("loglikeobs: implement if per-observation contributions are needed")
+
+    def score(self, params: jnp.ndarray):
+        """Gradient (score) of the log-likelihood. Optional but useful.
+
+        Can compute via numerical differentiation of `loglike` or derive
+        analytically. Statsmodels will compute numerical derivatives if
+        this is not provided.
+        """
+        raise NotImplementedError("score: implement analytic or numeric gradient")
+
+    def hessian(self, params: jnp.ndarray):
+        """Hessian (observed information). Optional — statsmodels can
+        approximate it numerically if missing.
+        """
+        raise NotImplementedError("hessian: implement if you can provide an analytic Hessian")
+
     # propoerty  
     @property
     def T(self):
@@ -546,6 +696,25 @@ class StateSpaceModel:
         return (self.p, self.q, self.T)
    
 
+    def summary(self, print_output: bool = True) -> Optional[str]:
+        """Return or print a short summary with key shapes and metrics."""
+        shp = {
+            "x_filtered": tuple(self.x_filtered.shape),
+            "P_filtered": tuple(self.P_filtered.shape),
+            "x_smoothed": tuple(self.x_smoothed.shape),
+            "P_smoothed": tuple(self.P_smoothed.shape),
+        }
+        s = (
+            f"SSMResults summary:\n"
+            f"  model: {self.model.__class__.__name__}\n"
+            f"  loglik: {float(self.loglik):.6g}\n"
+            f"  time_filter: {self.time_filter:.4f}s, time_smoother: {self.time_smoother:.4f}s\n"
+            f"  shapes: {shp}\n"
+        )
+        if print_output:
+            print(s)
+            return None
+        return s
      
     def __str__(self):
         """String representation of the model."""
@@ -565,8 +734,6 @@ class StateSpaceModel:
                 f"State dimension: {self.q}\n"
                 f"H: {self.H.shape}\nR: {self.R.shape}\n"
                 f"F: {self.F.shape}\nQ: {self.Q.shape}\n")
-
-
 
     def __repr__(self):
             self.__str__()

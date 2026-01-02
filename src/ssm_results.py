@@ -148,49 +148,6 @@ class SSMResults(MLEResults):
             "time_smoother": self.time_smoother,
         }
 
-    def summary(self, print_output: bool = True) -> Optional[str]:
-        """Return or print a short summary with key shapes and metrics."""
-        shp = {
-            "x_filtered": tuple(self.x_filtered.shape),
-            "P_filtered": tuple(self.P_filtered.shape),
-            "x_smoothed": tuple(self.x_smoothed.shape),
-            "P_smoothed": tuple(self.P_smoothed.shape),
-        }
-        s = (
-            f"SSMResults summary:\n"
-            f"  model: {self.model.__class__.__name__}\n"
-            f"  loglik: {float(self.loglik):.6g}\n"
-            f"  time_filter: {self.time_filter:.4f}s, time_smoother: {self.time_smoother:.4f}s\n"
-            f"  shapes: {shp}\n"
-        )
-        if print_output:
-            print(s)
-            return None
-        return s
-
-    def as_statsmodels(self):
-        """Return a lightweight adapter object with a few attributes familiar from statsmodels.
-
-        This is NOT a full drop-in replacement for statsmodels' results classes, but it
-        provides `.smoothed_state`, `.filtered_state`, `.smoothed_state_cov`, and `.llf`.
-        If you need full compatibility, subclassing statsmodels' `MLEModelResults`
-        would be necessary and depends on the exact statsmodels version.
-        """
-
-        class _Adapter:
-            pass
-
-        a = _Adapter()
-        a.smoothed_state = np.array(self.x_smoothed)
-        # statsmodels uses shape (k_states, nobs)
-        a.filtered_state = np.array(self.x_filtered)
-        a.smoothed_state_cov = np.array(self.P_smoothed)
-        a.filtered_state_cov = np.array(self.P_filtered)
-        a.llf = float(self.loglik)
-        a.model = getattr(self.model, "__class__", None)
-        return a
-
-
     # Compute residuals
     def _compute_error(self):
         # Convert to numpy arrays for diagnostics
