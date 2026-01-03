@@ -11,7 +11,7 @@ import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
-
+import jax
 
 # %% import and check the version
 # pip install -e geossm
@@ -27,6 +27,7 @@ print("Load from: ", geossm.__file__)
 
 if geossm.__file__:
     from geossm.ssm import StateSpaceModel as ssm
+    from geossm.utils import KeyStream
 
 
 # create the paametrisetim matrix
@@ -99,3 +100,45 @@ ax.set_xlabel('Time')
 ax.set_ylabel('Value')
 ax.legend()
 plt.show()
+
+
+# %% Simulate with proper seed
+
+# the strem provide the method
+# next() to return the next keys to be used
+
+seed = jax.random.PRNGKey(1234)
+
+stream = KeyStream(seed)
+y_sim, x_t = model.sim(stream)
+
+
+# user defined stream using jax API
+class mystream(KeyStream):
+    def __init__(self):
+        self._key = jax.random.PRNGKey(1)
+
+    def next(self,):
+        new_key, _ = jax.random.split(self._key)
+        return new_key
+
+
+stream = mystream()
+y_sim, x_t = model.sim(stream, Xbeta)
+
+# plot one time-series
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(y_sim[0, :], label='Simulated observation (y)')
+ax.plot(x_t[0, :], ':', label='Simulated state (x)')
+ax.set_title('Simulated Time Series')
+ax.set_xlabel('Time')
+ax.set_ylabel('Value')
+ax.legend()
+plt.show()
+
+
+# %% Filter
+
+# %% Smooth
+
+# %% Estimate

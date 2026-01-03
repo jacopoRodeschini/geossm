@@ -615,7 +615,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    def sim(self, Xbeta=None, seed=1234) -> jnp.ndarray:
+    def sim(self, seed=1234, Xbeta=None) -> jnp.ndarray:
 
         # def sim(keys, R, F, H, Q, x0, Sigma0, Xbeta, beta):
         """
@@ -644,11 +644,14 @@ class StateSpaceModel:
                 raise ValueError(
                     f"Xbeta second dimension must be {self.b}, got {Xbeta.shape[1]}")
 
-        # Initialize PRNGKey stream
-        main_key = jax.random.PRNGKey(seed)
-        seed, main_key = jax.random.split(main_key)
+        if isinstance(seed, KeyStream):
+            keys = seed
+        else:
+            # Initialize PRNGKey stream
+            main_key = jax.random.PRNGKey(seed)
+            seed, main_key = jax.random.split(main_key)
 
-        keys = KeyStream(seed)
+            keys = KeyStream(seed)
 
         # Call the simulation kernel
         y_t_sim, x_t_sim = _sim_kernelJAX(
