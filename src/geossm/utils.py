@@ -4,6 +4,29 @@ General utility functions for GEOSSM.
 
 import numpy as np
 import datetime
+import jax
+
+# %% [Utils] key stream
+
+class KeyStream:
+    """A simple helper class to manage JAX random keys."""
+
+    def __init__(self, seed):
+        self._key = seed
+
+    def next(self, num=None):
+        """Gets a new key, updating the internal state."""
+        # Unce use the key is update
+
+        if num is None:
+            new_key, self._key = jax.random.split(self._key)
+        else:
+            keys = jax.random.split(self._key, num=num+1)
+            new_key = keys[:-1]
+            self._key = keys[-1]
+
+        return new_key
+    
 
 # % Compute the block diagonal 3D
 
