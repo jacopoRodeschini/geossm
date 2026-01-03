@@ -162,6 +162,25 @@ class SSMResults(MLEResults):
         else:
             self._err = None
 
+    def summary(self, print_output=True):
+        shp = {
+            "x_filtered": tuple(self.x_filtered.shape),
+            "P_filtered": tuple(self.P_filtered.shape),
+            "x_smoothed": tuple(self.x_smoothed.shape),
+            "P_smoothed": tuple(self.P_smoothed.shape),
+        }
+        s = (
+            f"SSMResults summary:\n"
+            f"  model: {self.model.__class__.__name__}\n"
+            f"  loglik: {float(self.loglik):.6g}\n"
+            f"  time_filter: {self.time_filter:.4f}s, time_smoother: {self.time_smoother:.4f}s\n"
+            f"  shapes: {shp}\n"
+        )
+        if print_output:
+            print(s)
+            return None
+        return s
+
     @property
     def residuals(self):
         """Returns residuals (y_obs - y_hat)."""
