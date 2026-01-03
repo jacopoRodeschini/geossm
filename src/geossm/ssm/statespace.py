@@ -2,13 +2,70 @@
 State Space Models Module
 """
 
+from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import solve
 from jax import jit
 import time
-from .statespace_results import SSMResults
+from geossm.ssm.statespace_results import SSMResults
+from geossm.utils import KeyStream
 import numpy as np
+
+
+# %% JAX kernel functions for SSM
+def _sim_kernelJAX(keys, Xbeta, R, F, H, Q, x0, Sigma0, beta, T, p, q):
+    """
+    JIT-compiled kernel for simulating a time series from the state-space model using JAX.
+    This version uses jax.lax.scan for efficient looping.
+
+    Args:
+        keys: JAX PRNGKey stream object.
+        ... other model parameters.
+    Returns:
+        y_t : (p, T) JAX array of simulated observations
+        x_t : (q, T+1) JAX array of simulated state vectors
+    """
+    # Pre-compute Cholesky decompositions
+    chol_R = jnp.linalg.cholesky(R)
+    chol_Q = jnp.linalg.cholesky(Q)
+    chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
+
+    # --- Initial State (t=0) ---
+    initial_noise = jax.random.normal(keys.next(), shape=(q,))
+    x_current = x0 + chol_Sigma0 @ initial_noise  # This is state x_0
+
+    # --- Simulation using a Python for-loop ---
+    # Since JAX arrays are immutable, we build Python lists of the results
+    # and stack them into a single array at the end.
+    x_history = [x_current]
+    y_history = []
+
+    # Loop T times to generate T observations (y_0, ..., y_{T-1})
+    for t in range(T):
+        # 1. Generate the observation y_t based on the current state x_t
+        # Note: The original code had a slight lookahead (y_{t-1} from x_t).
+        # This version uses the more standard y_t from x_t.
+        obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
+        mean_reg = Xbeta[:, :, t] @ beta
+        y_t = mean_reg + H @ x_current + obs_noise
+        y_history.append(y_t)
+
+        # 2. Evolve the state to the next step: x_{t+1} from x_t
+        process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
+        x_next = F @ x_current + process_noise
+
+        # 3. Store the new state and update the current state for the next loop iteration
+        x_history.append(x_next)
+        x_current = x_next
+
+    # --- Final Assembly ---
+    # Convert the lists of arrays into single JAX arrays with the correct shape.
+    # jnp.stack(..., axis=1) is equivalent to np.array(...).T
+    final_y_t = jnp.stack(y_history, axis=1)
+    final_x_t = jnp.stack(x_history, axis=1)
+
+    return final_y_t, final_x_t
 
 
 # %%
@@ -17,7 +74,7 @@ class StateSpaceModel:
     A class representing a State Space Model with Kalman filtering capabilities.
     """
 
-    def __init__(self, F, H, Q, R, x0, Sigma0, Xbeta, beta, dtype=jnp.float32):
+    def __init__(self, F, H, Q, R, x0=None, Sigma0=None, Xbeta=None, beta=None, dtype=jnp.float32):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
@@ -37,6 +94,18 @@ class StateSpaceModel:
         self._q = None  # number of state equation
         self._b = None  # number of regression coefficent
 
+        # Set the initial state starting values if not provided
+        if x0 is None:
+            x0 = np.zeros(F.shape[0])
+        if Sigma0 is None:
+            Sigma0 = np.eye(F.shape[0])
+
+        # Set default Xbeta and beta if not provided
+        if Xbeta is None:
+            Xbeta = np.zeros((H.shape[0], 1, 1))
+        if beta is None:
+            beta = np.zeros(Xbeta.shape[1])
+
         self.set(F, H, Q, R, x0, Sigma0, Xbeta, beta)
 
         # define the filtered attribute ?
@@ -50,7 +119,7 @@ class StateSpaceModel:
         """
         self.estimate(y_t)
 
-    def set(self, F, H, Q, R, x0, Sigma0, Xbeta, beta):
+    def set(self, F=None, H=None, Q=None, R=None, x0=None, Sigma0=None, Xbeta=None, beta=None):
         """
         Set model parameters and matrices.
         @ return: None
@@ -546,8 +615,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    @jit
-    def sim(self, Xbeta, seed=1234) -> jnp.ndarray:
+    def sim(self, Xbeta=None, seed=1234) -> jnp.ndarray:
 
         # def sim(keys, R, F, H, Q, x0, Sigma0, Xbeta, beta):
         """
@@ -563,55 +631,30 @@ class StateSpaceModel:
             x_t : (q, T+1) JAX array of simulated state vectors [x_0, ..., x_T]
         """
         # Get dimensions from input shapes
-        T = Xbeta.shape[2]
-        p = self.p
-        q = self.q
+        if Xbeta is None:
+            Xbeta = self.Xbeta
+            T = self.T
+        else:
+            T = Xbeta.shape[2]
+            # check Xbeta shape compatibility
+            if Xbeta.shape[0] != self.p:
+                raise ValueError(
+                    f"Xbeta first dimension must be {self.p}, got {Xbeta.shape[0]}")
+            if Xbeta.shape[1] != self.b:
+                raise ValueError(
+                    f"Xbeta second dimension must be {self.b}, got {Xbeta.shape[1]}")
 
         # Initialize PRNGKey stream
-        keys = jax.random.PRNGKey(seed)
-        # enough keys for all random draws
-        keys = jax.random.split(keys, num=2*T + 1)
+        main_key = jax.random.PRNGKey(seed)
+        seed, main_key = jax.random.split(main_key)
 
-        # Pre-compute Cholesky decompositions
-        chol_R = jnp.linalg.cholesky(self.R)
-        chol_Q = jnp.linalg.cholesky(self.Q)
-        chol_Sigma0 = jnp.linalg.cholesky(self.Sigma0)
+        keys = KeyStream(seed)
 
-        # --- Initial State (t=0) ---
-        initial_noise = jax.random.normal(keys.next(), shape=(q,))
-        x_current = self.x0 + chol_Sigma0 @ initial_noise  # This is state x_0
+        # Call the simulation kernel
+        y_t_sim, x_t_sim = _sim_kernelJAX(
+            keys, Xbeta, self.R, self.F, self.H, self.Q, self.x0, self.Sigma0, self.beta, T, self.p, self.q)
 
-        # --- Simulation using a Python for-loop ---
-        # Since JAX arrays are immutable, we build Python lists of the results
-        # and stack them into a single array at the end.
-        x_history = [x_current]
-        y_history = []
-
-        # Loop T times to generate T observations (y_0, ..., y_{T-1})
-        for t in range(T):
-            # 1. Generate the observation y_t based on the current state x_t
-            # Note: The original code had a slight lookahead (y_{t-1} from x_t).
-            # This version uses the more standard y_t from x_t.
-            obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
-            mean_reg = Xbeta[:, :, t] @ self.beta
-            y_t = mean_reg + self.H @ x_current + obs_noise
-            y_history.append(y_t)
-
-            # 2. Evolve the state to the next step: x_{t+1} from x_t
-            process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
-            x_next = self.F @ x_current + process_noise
-
-            # 3. Store the new state and update the current state for the next loop iteration
-            x_history.append(x_next)
-            x_current = x_next
-
-        # --- Final Assembly ---
-        # Convert the lists of arrays into single JAX arrays with the correct shape.
-        # jnp.stack(..., axis=1) is equivalent to np.array(...).T
-        final_y_t = jnp.stack(y_history, axis=1)
-        final_x_t = jnp.stack(x_history, axis=1)
-
-        return final_y_t, final_x_t
+        return y_t_sim, x_t_sim
 
     @jit
     def predict(self, start=None, end=None, exog=None, dynamic=False):
@@ -750,44 +793,29 @@ class StateSpaceModel:
     def shape(self):
         return (self.p, self.q, self.T)
 
-    def summary(self, print_output: bool = True) -> Optional[str]:
+    def summary(self, print_output: bool = True) -> str:
         """Return or print a short summary with key shapes and metrics."""
-        shp = {
-            "x_filtered": tuple(self.x_filtered.shape),
-            "P_filtered": tuple(self.P_filtered.shape),
-            "x_smoothed": tuple(self.x_smoothed.shape),
-            "P_smoothed": tuple(self.P_smoothed.shape),
-        }
-        s = (
-            f"SSMResults summary:\n"
-            f"  model: {self.model.__class__.__name__}\n"
-            f"  loglik: {float(self.loglik):.6g}\n"
-            f"  time_filter: {self.time_filter:.4f}s, time_smoother: {self.time_smoother:.4f}s\n"
-            f"  shapes: {shp}\n"
-        )
-        if print_output:
-            print(s)
-            return None
-        return s
+        st = "\nState Space Model Summary \n"
+
+        st += "------------------------------------ \n"
+        st += "State Space formulas:\n"
+        st += f"y(t) = X {getattr(self.Xbeta, 'shape', None)} beta + H {self.H.shape} x(t) + e(t) ~N(0, R {self.R.shape}) \n"
+        st += f"x(t) = F {self.F.shape} x(t-1) + u(t) ~N(0, Q {self.Q.shape}) \n \n"
+
+        return st
 
     def __str__(self):
         """String representation of the model."""
 
-        # st += "#################################################### \n"
-        # st += "State Space formulas:\n"
-        # st += f"y(t) = X beta + H x(t) + e(t) ~N(0, R) \n"
-        # st += f"x(t) = F x(t-1) + u(t) ~N(0, Q) \n \n"
-
-        # st += f"Is estimated (filter): {self.isfiltered} \n"
-        # st += f"Is estimated (smoothed): {self.issmoothed} \n"
-        # st += f"Log-likelihod: {self.get_logLikelihood()}"
-
-        # st += "Observation formula: \n"
-
         return (f"SSM with {self.p} observation variables over {self.T} time steps.\n"
                 f"State dimension: {self.q}\n"
                 f"H: {self.H.shape}\nR: {self.R.shape}\n"
-                f"F: {self.F.shape}\nQ: {self.Q.shape}\n")
+                f"F: {self.F.shape}\nQ: {self.Q.shape}\n"
+                f"Xbeta: {getattr(self.Xbeta, 'shape', None)}\n"
+                f"beta: {getattr(self.beta, 'shape', None)}\n"
+                f"x0: {self.x0.shape}\n"
+                f"Sigma0: {self.Sigma0.shape}\n"
+                )
 
     def __repr__(self):
         self.__str__()
