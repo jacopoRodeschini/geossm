@@ -332,7 +332,7 @@ class StateSpaceModel:
         :param self: Run the estimation of the state == fitler + smoother
         :param y_t: Observed dataset
         """
-        self.estimate(y_t)
+        return self.smoother(y_t)
 
     def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None):
         """
@@ -724,36 +724,67 @@ class StateSpaceModel:
     def y_t(self):
         """Returns the observation matrix."""
         return self._y_t
-
+    
     @property
     def Xbeta(self):
         """Returns the observation matrix H."""
         return self._Xbeta
 
+    @Xbeta.setter
+    def Xbeta(self, value):
+        """Sete the Xbeta matrix."""
+        self.set(Xbeta=value)
+     
     @property
     def beta(self):
         """Returns the observation matrix H."""
         return self._beta
+
+    @beta.setter
+    def beta(self, value):
+        """Sete the beta matrix."""
+        self.set(beta=value)
 
     @property
     def H(self):
         """Returns the observation matrix H."""
         return self._H
 
+    @H.setter
+    def H(self, value):
+        """Sete the H matrix."""
+        self.set(H=value)
+
     @property
     def R(self):
         """Returns the measurement noise covariance R."""
         return self._R
 
+    @R.setter
+    def R(self, value):
+        """Sete the R matrix."""
+        self.set(R=value)
+    
     @property
     def F(self):
         """Returns the state transition matrix F."""
         return self._F
 
+    @F.setter
+    def F(self, value):
+        """Sete the F matrix."""
+        self.set(F=value)   
+
     @property
     def Q(self):
         """Returns the process noise covariance Q."""
         return self._Q
+
+    @Q.setter
+    def Q(self, value):         
+        """Sete the Q matrix."""
+        self.set(Q=value)   
+
 
     @property
     def x0(self):
@@ -769,6 +800,97 @@ class StateSpaceModel:
     def shape(self):
         return (self.p, self.q, self.T)
 
+    # ----------------- Pickle support -----------------
+    def __getstate__(self):
+        """Return a serializable state for pickling.
+
+        Convert JAX arrays to NumPy arrays and store basic metadata.
+        """
+        def to_np(x):
+            if x is None:
+                return None
+            try:
+                return np.array(x)
+            except Exception:
+                return x
+
+        state = {
+            'F': to_np(self._F),
+            'H': to_np(self._H),
+            'Q': to_np(self._Q),
+            'R': to_np(self._R),
+            'x0': to_np(self._x0),
+            'Sigma0': to_np(self._Sigma0),
+            'Xbeta': to_np(self._Xbeta),
+            'beta': to_np(self._beta),
+            'T': self._T,
+            'p': self._p,
+            'q': self._q,
+            'b': self._b,
+            # store dtype name for robust restoration
+            'dtype': getattr(self.dtype, 'name', str(self.dtype)),
+        }
+        return state
+
+    def __setstate__(self, state):
+        """Restore object state from pickled state.
+
+        Arrays are converted back to JAX arrays with the original dtype.
+        """
+        # Restore dtype first
+        dt_name = state.get('dtype', None)
+        try:
+            self.dtype = jnp.dtype(dt_name) if dt_name is not None else jnp.float32
+        except Exception:
+            # fallback
+            try:
+                self.dtype = getattr(jnp, dt_name)
+            except Exception:
+                self.dtype = jnp.float32
+
+        def to_jax(x):
+            if x is None:
+                return None
+            try:
+                return jnp.asarray(x, dtype=self.dtype)
+            except Exception:
+                return x
+
+        # Restore arrays and metadata
+        self._F = to_jax(state.get('F', None))
+        self._H = to_jax(state.get('H', None))
+        self._Q = to_jax(state.get('Q', None))
+        self._R = to_jax(state.get('R', None))
+        self._x0 = to_jax(state.get('x0', None))
+        self._Sigma0 = to_jax(state.get('Sigma0', None))
+        self._Xbeta = to_jax(state.get('Xbeta', None))
+        self._beta = to_jax(state.get('beta', None))
+
+        self._T = state.get('T', None)
+        self._p = state.get('p', None)
+        self._q = state.get('q', None)
+        self._b = state.get('b', None)
+
+        # Ensure other attributes exist with sensible defaults
+        if not hasattr(self, 'dtype'):
+            self.dtype = jnp.float32
+        if not hasattr(self, '_F'):
+            self._F = None
+        if not hasattr(self, '_H'):
+            self._H = None
+        if not hasattr(self, '_Q'):
+            self._Q = None
+        if not hasattr(self, '_R'):
+            self._R = None
+        if not hasattr(self, '_x0'):
+            self._x0 = None
+        if not hasattr(self, '_Sigma0'):
+            self._Sigma0 = None
+        if not hasattr(self, '_Xbeta'):
+            self._Xbeta = None
+        if not hasattr(self, '_beta'):
+            self._beta = None
+
     def summary(self, print_output: bool = True) -> str:
         """Return or print a short summary with key shapes and metrics."""
         st = "\nState Space Model Summary \n"
@@ -783,17 +905,9 @@ class StateSpaceModel:
     def __str__(self):
         """String representation of the model."""
 
-        return (f"SSM with {self.p} observation variables over {self.T} time steps.\n"
-                f"State dimension: {self.q}\n"
-                f"H: {self.H.shape}\nR: {self.R.shape}\n"
-                f"F: {self.F.shape}\nQ: {self.Q.shape}\n"
-                f"Xbeta: {getattr(self.Xbeta, 'shape', None)}\n"
-                f"beta: {getattr(self.beta, 'shape', None)}\n"
-                f"x0: {self.x0.shape}\n"
-                f"Sigma0: {self.Sigma0.shape}\n"
-                )
+        return self.summary(print_output=True)
 
     def __repr__(self):
-        self.__str__()
+        return self.__str__()
 
 

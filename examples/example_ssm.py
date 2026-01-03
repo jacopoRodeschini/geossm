@@ -9,6 +9,8 @@ Created on Fri Jan  2 23:41:43 2026
 import numpy as np
 import matplotlib.pyplot as plt
 import jax
+import pickle
+
 
 # %% import and check the version
 # pip install -e geossm
@@ -52,6 +54,18 @@ beta = np.ones(b)
 # %% Build the model
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta,
             x0=None, Sigma0=None, dtype=np.float32)
+
+# %% save the model using pickale
+filename = "model.pkl"
+
+with open(filename, 'wb') as file:
+    pickle.dump(model, file)
+
+
+# load the model
+with open(filename, 'rb') as file:
+    mymodel = pickle.load(file)
+    print(mymodel)
 
 
 # %% print the model
