@@ -28,7 +28,7 @@ class KeyStream:
         return new_key
     
 
-# % Compute the block diagonal 3D
+# %% Compute the block diagonal 3D
 
 def block_diag_3D(*arrs):
     """
