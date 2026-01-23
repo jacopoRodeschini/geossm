@@ -1,34 +1,26 @@
 """
 Add general description here.
 """
-import scipy.spatial
+
 from scipy.spatial import Delaunay
 from scipy.spatial.distance import cdist
 import mfem.ser as mfem
 
 import numpy as np
-import matplotlib.tri as tri
 import matplotlib.pyplot as plt
 import scipy.sparse as sp
 import scipy as sc
 import gstools as gs
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
 
 import warnings
 
-from scipy.spatial import ConvexHull
-
-import platform
-import psutil
-import datetime
-
-from scipy.sparse.linalg import splu
-
 from gstools.covmodel import Matern
 
-# % SPDE approximation of the Matern cov function
+# %% SPDE approximation of the Matern cov function using Finite Element Method
+# Implemented using MFEM library
 
-class spdeAppoxCov(Matern):
+class spdeAppoxCov_pyfem(Matern):
+
     r"""The SPDE approximation of the Matérn covariance model.
 
     Notes
@@ -49,7 +41,7 @@ class spdeAppoxCov(Matern):
                  mesh=None, uniformRef=True, add_boundary=False,
                  boundary_poly=None, boundary_step=None, outer_index=None, level=1,
                  mesh_geotype='triangularized', mesh_geoshape='TRIANGLE',
-                 mesh_boundary_type=None, nu=1, s2=1, rescale=0.1):
+                 s2=1, rescale=0.1):
 
         # update the geo matern parameter
         # self._nu = nu         # smoothness
@@ -793,6 +785,650 @@ class spdeAppoxCov(Matern):
         return np.array(bdr_vertex)
 
     # % property: stiff and mass matrix
+
+    @property
+    def stiff(self):
+        return self._stiff
+
+    @property
+    def mass(self):
+        return self._mass
+
+    def __getstate__(self):
+        # Create a dictionary of the object's state excluding non-picklable attributes
+        state = self.__dict__.copy()
+        # Exclude the attributes that can't be pickled
+        excluded_attrs = ['_mesh', '_fespace', '_mass', '_stiff']
+        for attr in excluded_attrs:
+            if attr in state:
+                del state[attr]
+        return state
+
+    def __setstate__(self, state):
+        # Restore the object's state
+        self.__dict__.update(state)
+        # Reinitialize the attributes that were excluded from pickling
+        self._mesh = None
+        self._fespace = None
+        self._mass = None
+        self._stiff = None
+        # Rebuild the mesh and finite element space if needed
+        if 'mesh' in state and state['mesh'] is not None:
+            self.mesh = state['mesh']
+        else:
+            self.mesh, self._inner_points, self._boundary_points = self._build_mesh(
+                self.points, triangles=self.triangle,
+                add_boundary=self.add_boundary, boundary_poly=self.boundary_poly,
+                boundary_step=self.boundary_step, outer_index=self.outer_index,
+                level=self.level)
+
+            # Recompute mass and stiffness matrices if needed
+        if self._mass is None or self._stiff is None:
+            self._mass, self._stiff = self._compute_mass_stiff()
+
+# %%
+class spdeAppoxCov(Matern):
+    r"""The SPDE approximation of the Matérn covariance model.
+
+    Notes
+    -----
+    This model is given by the following correlation function
+
+    Using Neumann boundary conditions
+
+    References
+   ----------
+   .. [Rasmussen2003] Rasmussen, C. E.,
+          "Gaussian processes in machine learning." Summer school on
+          machine learning. Springer, Berlin, Heidelberg, (2003)
+
+
+    """
+
+    def __init__(self, mesh_io: meshio, inner, latlon=True, geo_scale=gs.DEGREE_SCALE,
+                 domain: Polygon = None, s2=1, rescale=0.1):
+
+        # update the geo matern parameter
+        # self._nu = nu         # smoothness
+        # self._s2 = s2         # Marginal variance of the observed process
+
+        # already store inside the matern superclass class
+        # self.rescale = rescale  # Rescale paramter
+        # self.nu = nu
+        # self.s2 = s2
+
+        # set the domain polygon
+        self._domain = domain
+
+        # mesh handler
+        self._mesh = None  # internal representation of the mesh (mfem class)
+        self._vertex = None
+        self._triangles = None
+        self._fespace = None  # (See the mesh setter)
+        self._mass = None
+        self._stiff = None
+
+        # assign the mesh (trigger the  mesh @property)
+        self.inner = inner  # inner indices of the vertices of the mesh
+        self.mesh = mesh_io  # update the internal mesh
+
+        # build the super __init__ (covModel of gstool)
+        super().__init__(dim=2, var=s2, len_scale=1.0, nugget=0.0, anis=1.0,
+                         angles=0.0, integral_scale=None, rescale=rescale, latlon=latlon,
+                         geo_scale=geo_scale, temporal=False, spatial_dim=2,
+                         var_raw=None, hankel_kw=None)
+
+    @property
+    def mesh(self):
+        # get the internal mesh representatin
+        return self._mesh
+
+    @property
+    def meshio(self):
+        # get the internal I/O mesh representatin
+        return self._mesh_io
+
+    @mesh.setter
+    def mesh(self, mesh_io: meshio):
+        
+        # seve the I/O mesh representation
+        self._mesh_io = mesh_io 
+
+        # Set the private attibute
+        self._vertex = self._mesh_io.points[:, [0, 1]]  # R2
+        self._triangles = self._mesh_io.cells_dict["triangle"]
+
+        # build internal mesh
+        self._mesh = self._build_mesh(self._vertex, self._triangles)
+        
+        
+
+        self._inner_points, 
+        self._outer_points
+
+        # Create the finite element space (wich cannot be buld outside the class)
+        self._fespace = self._build_feSpace()
+
+        # Compute the stiff and mass matrix (just private matrix)
+        # once the finite element is build -> compute the mass and stiff matrix
+        self._mass, self._stiff = self._compute_mass_stiff()
+
+        return self.shape
+
+    # create internal mesh representation (pyfem class)
+
+    def _build_mesh(self, vertex, triangles, inner):
+
+        # Define the MFEM mesh with vertices and triangular elements
+        # 2D mesh, n_points vertices, len(triangles) elements, boundery element, space
+        mesh = mfem.Mesh(2, len(vertex), len(triangles), 0, 2)
+
+        # add vertices and triangles
+        mesh = self._add_element2mesh(mesh, vertex, triangles)
+
+        # mark the bounday edges
+        mesh = self._fix_boundary(mesh, vertex, triangles)
+
+        # Finalize the boundary elements
+        # Finalize mesh generation (Finalize the construction of a triangular Mesh)
+        # # mesh.FinalizeTriMesh(1)  # 1 means it is linear order mesh
+
+        mesh.FinalizeTopology()
+        mesh.Finalize()
+
+        return mesh
+
+    def _add_element2mesh(self, mesh, vertex, triangles):
+        # add vertices and trinagles
+
+        # Add vertices to the mesh (inner & outer & boundary)
+        vertex = np.asarray(vertex, dtype=float)
+        for i in range(len(vertex)):
+            # ids = number of vertices in the mesh -1
+            mesh.AddVertex(vertex[i, 0], vertex[i, 1])
+
+        # Add triangular elements to the mesh
+        for tri in triangles:
+            mesh.AddTriangle(tri[0], tri[1], tri[2])
+
+        return mesh
+
+    def _fix_boundary(self, mesh, vertex, triangles):
+
+        # Find edges connecting boundary points
+        # not needed for the computation but for the viasulisation
+
+        boundary_edges = self._get_boundary_edges(triangles)
+
+        # Add boundary edges to the mesh ()
+        for edge in boundary_edges:
+            mesh.AddBdrSegment(edge[0], edge[1])  # Add edge by vertex IDs
+
+        return mesh
+
+    def _get_boundary_edges(self, triangles):
+        """
+        Compute the boundary edges (edges belonging to only one triangle)
+
+        Parameters
+        ----------
+        triangles : (n_triangles, 3) ndarray of int
+            Each row gives the vertex indices of one triangle.
+
+        Returns
+        -------
+        boundary_edges : (n_boundary_edges, 2) ndarray of int
+            Each row gives the sorted vertex indices of a boundary edge.
+        """
+
+        # outer_indices = np.nonzero(~inner)[0]  # Indices of outer points
+        # outer_edges = set()  # Store unique boundary edges
+
+        # for tri in triangles:
+        #     # For each triangle, add its edges
+        #     for i, j in [(0, 1), (1, 2), (2, 0)]:
+        #         edge = tuple(sorted((tri[i], tri[j])))
+        #         if edge[0] in outer_indices and edge[1] in outer_indices:
+        #             # Only add edges between boundary points
+        #             outer_edges.add(edge)
+        # Generate all edges for all triangles
+        edges = np.vstack([
+            triangles[:, [0, 1]],
+            triangles[:, [1, 2]],
+            triangles[:, [2, 0]]
+        ])
+
+        # Sort vertex indices in each edge to make orientation consistent
+        edges = np.sort(edges, axis=1)
+
+        # Find unique edges and their counts
+        edges_unique, counts = np.unique(edges, axis=0, return_counts=True)
+
+        # Boundary edges appear only once
+        boundary_edges = edges_unique[counts == 1]
+
+        return boundary_edges
+
+    def _build_feSpace(self):
+
+        # Create a finite element space
+        # Define a finite element space on the mesh. Here we use vector finite
+        # elements, i.e. dim copies of a scalar finite element space. The vector
+        # dimension is specified by the last argument of the FiniteElementSpace
+        # constructor.
+        # Order 1 finite elements
+        fec = mfem.H1_FECollection(1, self.mesh.Dimension())
+        fespace = mfem.FiniteElementSpace(self.mesh, fec)
+
+        return fespace
+
+    def _compute_basis(self, phy_points=None, thr=1e-5):
+        # @Points = physical point
+
+        # Create the list of pysical points
+        if phy_points is None:
+            phy_points = np.asarray(
+                self.vertex, dtype=np.float64)  # total grid points
+        else:
+            phy_points = np.asarray(phy_points, dtype=np.float64)
+
+        npoint = phy_points.shape[0]
+
+        # The shape functions or finite element functions define the behavior of the
+        # finite element solution. These functions are piecewise polynomials that are
+        # defined on the reference element but describe the field you are trying to solve
+
+        # 1) Find the element of the mesh that contains the physical point p
+        # This becouse the map function are locally defined
+        # 2) Map the physical point to the reference space (TrasformBack).
+        # 3) Evaluate the shape functions at the reference point.
+
+        # Find the id of the elements on the mesh [pysical domain] that contain the
+        # given points, and their corresponding reference coordinates.
+        # This method is not 100 percent reliable, i.e. it is not guaranteed to
+        # find a point, even if it lies inside a mesh element.
+        count, elem_ids, int_points = self.mesh.FindPoints(phy_points)
+        nbasis = self.GetVSize
+
+        # Termporary vector
+        phys_point = mfem.Vector(self.mesh.Dimension())
+        shape_vals = mfem.Vector(self.fespace.GetNDofs())
+
+        # integrator point in the reference domain
+        ref_point = mfem.IntegrationPoint()
+
+        H = np.zeros((npoint, nbasis))
+        notfindInx = []
+        for i in range(len(elem_ids)):
+            ids = elem_ids[i]
+
+            # -1 = points not found in the reference domain
+            if ids != -1:
+
+                # Get the element map function (pysical domain to reference domain)
+                phys_point.Assign(phy_points[i, :])
+                tran = self.mesh.GetElementTransformation(ids)
+
+                # Compute the basis func in the pyhisical space
+                # CalcPhysShape(tran, phys_point)
+
+                # Map the point in the reference domain
+                tran._TransformBack(phys_point, ref_point)
+
+                # Get the functional element assosicate with the element ids
+                # Shape basis function
+                fe = self.fespace.GetFE(ids)
+
+                # Dof = number of shape functions (save value in shape_vals)
+                fe.CalcShape(ref_point, shape_vals)
+
+                # Get the local-to-global DOF mapping for this element
+                # Returns indices of degrees of freedom for the i'th element.
+                col_indices = self.fespace.GetElementVDofs(ids)
+
+                H[i, col_indices] = shape_vals.GetDataArray()
+
+            else:
+                notfindInx.append(i)
+
+        # Create the sparse matrix [p x n] of the basis function (evaluate in the
+        # reference domain)
+
+        # check the thr and put 0 (numerical stability)
+        H[H <= 1e-8] = 0
+        H = sp.csr_matrix(H)
+
+        # Check the "parition of unity" rule
+        # H.sum(axis=1)
+        # if len(notfindInx) != 0:
+        #     s = "The following point index need to be removed because can't be find in the latent domain \n"
+        #     s += "See the MFEM FindPoints function documentatios \n"
+        #     s += f"Index {notfindInx} \n"
+        #     warnings.warn(s)
+
+        notfindInx = np.asarray(notfindInx)
+        return count, notfindInx, H
+
+    def getBasis(self, phy_points=None):
+        count, notfindInx, H = self._compute_basis(phy_points)
+        return count, notfindInx, H
+
+    def _compute_mass_stiff(self):
+        # Compute the mass and stiff matrix (static matrix -> computed just one time)
+
+        # Get the Mass (C matrix in RUE-LINGDEN) and Stiffness matrix (G in RUE)
+        # Initialize BilinearForms to represent mass and stiffness matrices
+
+        # Define the constant coefficient '1' for integration (scalar)
+        one = mfem.ConstantCoefficient(1.0)
+
+        # DomainLFIntegrator  -- SPACE (H1, L2) -- (phi,phi)
+        # This become the inner product with <phi, 1> where phi are the basis function
+        # defined in the finte element (FE) space
+        # 1) Create the linear form for the mass matrix C
+        # 2) Add a domain integrator for the inner product <phi, 1>
+        # 3) This integrator computes the inner product between the basis function
+        # and the constant scalar 1 over each element.
+
+        c = mfem.LinearForm(self.fespace)
+        c.AddDomainIntegrator(mfem.DomainLFIntegrator(one))
+        c.Assemble()
+
+        # Therefore, be careful not to access after the matrix is freed.
+        # [n x 1] since LinearForm results in a vector rather than a full matrix
+        temp = c.GetDataArray()
+        mass = sp.diags(temp, offsets=0, shape=(
+            self.nvertex, self.nvertex), format="csr")
+
+        # 1) Create the bilinear form for the stiff matrix (with the one coefficient)
+        # 2) Add a diffusion integrator to compute <Grad(phi_i), Grad(phi_j)>
+        # The coefficient for the diffusion term. The default is 1.0, meaning we
+        # compute the standard internal product
+        g = mfem.BilinearForm(self.fespace)
+        g.AddDomainIntegrator(mfem.DiffusionIntegrator())
+        g.Assemble()
+
+        # Finalize to convert the assembled form to a sparse matrix
+        g.Finalize()
+
+        # Get the stiffness sparse matrix
+        spmat = g.SpMat()
+
+        # GetIArray, GetJArray, and GetDataArray. These methods give NumPy array of CSR
+        # matrix data.
+
+        i = spmat.GetIArray()       # Row pointers (cumulative sums of non-zero elements per row)
+        j = spmat.GetJArray()       # get index of j (column)
+        dt = spmat.GetDataArray()   # Non zero values of the sparse matrix
+
+        # Get the number of degrees of freedom (number of rows/columns in the matrix)
+        n_dofs = self.fespace.GetNDofs()
+
+        # Build the stifness sparse matrix G using the CSR format
+        stiff = sp.csr_matrix(
+            (dt, j, i), shape=(n_dofs, n_dofs), copy=True)
+
+        return mass, stiff
+
+    def cor(self, h):
+        """Matérn normalized correlation function."""
+        # h = distance
+        # h = np.asarray(np.abs(h), dtype=np.double)
+        # for nu > 20 we just use the gaussian model
+
+        return None
+
+    def _compute_precision_spde(self, rescale=None):
+        """
+        @rescale = rescale factor
+        Compute the precision matrix (Q, sparse) of the process y with marginal variance
+        sigma2(k) = sigma2_spde
+
+        """
+
+        # update the geo parameter
+        # self._update_geo_parameter(rescale)
+        if rescale is not None:
+            self.rescale = self.rescale  # Rescale factor (k)
+
+        # Compute the inverse of the mass matrix
+        Cinv = sp.diags(1/self.mass.diagonal(), offsets=0, shape=(
+            self.nvertex, self.nvertex), format="csr")
+
+        # Compute the K matrix
+        k = self.rescale
+        K = (k**2) * self.mass + self.stiff
+
+        # Compute the precision matrix of the process y
+        Q = self.sigma2k * (K @ Cinv @ K)
+
+        return Q
+
+    def precision(self, rescale=None):
+        """
+        Compute the precision matrix (Q, sparse) for spatial process z with marginal variance
+        sigma2_process
+
+        """
+
+        return self._compute_precision_spde(rescale)
+
+    def logpdfQ(self, yTrue, rescale=None, s2=None):
+        """Compute the log-likelihood function starting from the precision matrix"""
+
+        # compute Sigma true
+        Q = self.precision(rescale, s2)
+
+        # compute the normla pdf (loglikelihhod)
+        return logpdfQ(yTrue, Q)
+
+    def plot_mesh(self, ax=None, figsize=(10, 8), title="Title",
+                  alpha_vertex=1,
+                  alpha_triangle=0.5,
+                  alpha_border=0.5):
+
+        # Convert the vertex array to a numpy array
+        vertex = self._vertex
+        triangles = self._triangles
+
+        triang = mtri.Triangulation(vertex[:, 0], vertex[:, 1], triangles)
+
+        # Collect all triangles (elements)
+        # inner_triangles = []
+        # for i in range(self.nelement):
+        #     tri = self.mesh.GetElement(i).GetVerticesArray()
+        #     inner_triangles.append(tri)
+        # inner_triangles = np.array(inner_triangles)
+
+        # Collect all boundary edges
+        outer_edges = []
+        for i in range(self.nbElement):
+            bElem = self.mesh.GetBdrElement(i).GetVerticesArray()
+            outer_edges.append(bElem)
+
+        boundary_edge = np.array(outer_edges)
+
+        # Plot the mesh
+        # fig, ax = plt.subplots()
+
+        # Handle the 'ax' argument
+        if ax is None:
+            fig, ax = plt.subplots(figsize=figsize)
+            new_fig_created = True
+        else:
+            fig = ax.figure  # Get the figure from the provided axes
+            new_fig_created = False
+
+        ax.triplot(triang, 'k-', lw=0.3, alpha=0.5, label='All Mesh Edges')
+
+        # Plot the interior vertices
+        ax.plot(self.inner_points[:, 0], self.inner_points[:, 1],
+                'xm', label='Interior Vertices', alpha=alpha_vertex)
+
+        # Plot the boundary vertices
+        ax.plot(self._outer_points[:, 0], self._outer_points[:, 1],
+                'x', color='black', label='Boundary Vertices', alpha=alpha_border)
+
+        # Plot the boundary edges as dashed lines
+        for edge in boundary_edge:
+            x_coords = vertex[edge, 0]
+            y_coords = vertex[edge, 1]
+            ax.plot(x_coords, y_coords, '--r', alpha=alpha_border)
+
+        # Add a legend
+        ax.legend()
+
+        # Display the plot
+        ax.set_title(title)
+        ax.set_xlabel("X-coordinate")
+        ax.set_ylabel("Y-coordinate")
+        ax.legend(loc='best')
+        ax.grid(True, linestyle=':', alpha=0.6)
+        # plt.show()
+        return ax
+
+    # %% property:: spatial process
+
+    @property
+    def emp_range(self):
+        """Return the empirical range paramiter  """
+        return np.sqrt(8*self.nu) / self.rescale
+
+    @property
+    def sigma2k(self):
+        """
+        Return the marginal variance of the standardise approximate spatial SPDE process
+        Variance of the aproximate field x(u). Eq. 2 and Eq. 9
+        """
+        return sc.special.gamma(1) / (sc.special.gamma(2) * 4*np.pi * (self.rescale**2))
+
+    @property
+    def nvertex(self):
+        """Get the number of vertex of the discretisation"""
+        return self.mesh.GetNV()
+
+    @property
+    def nelement(self):
+        """Get the number of discretisation elements (like the number of triangle)"""
+        return self.mesh.GetNE()
+
+    # Property for vertex array (mesh.GetVertexArray())
+    @property
+    def vertex(self):
+        """Get the vertex array"""
+        return np.array(self.mesh.GetVertexArray())
+
+    @property
+    def inner_points(self):
+        """Return the point of the grid"""
+        return self._inner_points
+
+    @property
+    def n_inner_points(self):
+        """Return the point of the grid"""
+        return self.inner_points.shape[0]
+
+    @property
+    def outer_points(self):
+        """Return the boundary point of the grid"""
+        return self._outer_points
+
+    @property
+    def n_outer_points(self):
+        """Return the number of the boundary point of the grid"""
+        return self._outer_points.shape[0]
+
+    @property
+    def totpoints(self):
+        """Return the total point (inner + boundary) of the grid (same as vertex)"""
+        return self.vertex
+
+    @property
+    def n_totpoints(self):
+        """Return the total point number of the grid"""
+        return self.nvertex
+
+    # %% property:: FE SPACE (fespace)
+
+    @property
+    def fespace(self):
+        """Return the finite elment space"""
+        return self._fespace
+
+    # Property for the space dimension (fespace.GetVDim())
+    @property
+    def fespace_dim(self):
+        return self._fespace.GetVDim()
+
+    # Property for number of local degrees of freedom (fespace.GetNDofs())
+    @property
+    def ndofs(self):
+        return self._fespace.GetNDofs()
+
+    # Property for number of vector DOFs (fespace.GetVSize())
+    @property
+    def GetVSize(self):
+        return self._fespace.GetVSize()
+
+    # %% property:: MESH
+
+    # Property for number of vertices (mesh.GetNV())
+
+    @property
+    def shape(self):
+        return (self.nvertex, self.nelement)
+
+    def get_distance(self, points=None):
+        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+
+        return cdist(self.vertex, self.vertex) if points is None else cdist(points, self.vertex)
+
+    @property
+    def distance(self):
+        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+
+        return self.get_distance()
+
+    # Property for bounding box (mesh.GetBoundingBox())
+
+    @property
+    def box(self):
+        return self.mesh.GetBoundingBox()
+
+    @property
+    def domain(self):
+        return self._domain
+
+    # Property for number of boundary elements (mesh.GetNBE())
+    @property
+    def nbElement(self):
+        return self.mesh.GetNBE()
+
+    @property
+    def nbEdges(self):
+        return self.mesh.GetNEdges()
+
+    @property
+    def geoshape(self):
+        return self.mesh.GetElementGeometry(0)
+
+    @property
+    def getBoundaryEdge(self):
+        boundaryEdge = []
+        for i in range(self.nbElement):
+            boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
+
+        return np.array(boundaryEdge)
+
+    @property
+    def boundary_vertex(self, boolean=True):
+        bdr_vertex = []
+        for i in range(self.mesh.GetNBE()):
+            bdr_vertex.append(self.mesh.GetBdrElement(i).GetVerticesArray())
+
+        return np.array(bdr_vertex)
+
+    # %% property: stiff and mass matrix
 
     @property
     def stiff(self):
