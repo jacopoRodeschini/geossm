@@ -101,7 +101,7 @@ Xbeta = np.random.normal(1, 2, size=(p, b, 100))
 y_sim, x_sim = model.sim(seed=1234, Xbeta=Xbeta)
 
 print("Simulate response y:", y_sim.shape)
-print("Simulate stete x:", x_t.shape)
+print("Simulate stete x:", x_sim.shape)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
