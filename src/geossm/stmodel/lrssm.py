@@ -240,3 +240,72 @@ def start_params(self) -> np.ndarray:
         if self.k_params is None:
             raise NotImplementedError("k_params not set — define parameterization first")
         return np.zeros(self.k_params)
+
+
+
+    @jit
+    def predict(self, start=None, end=None, exog=None, dynamic=False):
+        """Compute predicted (fitted) values or forecasts.
+
+        Must return a numpy array of fitted/forecasted `endog` values.
+        TODO: use self.ss_model.computeExpectedValues / smoother outputs.
+        """
+        raise NotImplementedError(
+            "predict: implement using the StateSpaceModel prediction pipeline")
+    @jit
+    def get_prediction(self, start=None, end=None, exog=None, dynamic=False):
+        """Return a prediction results object with mean, se_mean and conf_int.
+
+        Implement a small container or return a tuple; statsmodels has its
+        own PredictionResults class — you may mirror that API.
+        """
+        raise NotImplementedError(
+            "get_prediction: implement to return prediction results")
+
+    def loglike(self, y_obs) -> float:
+        """Return (negative) log-likelihood for optimization.
+
+        """
+        # Defensive placeholder
+        params = np.asarray(params)
+        natural = self.untransform_params(params)
+        # ensure model is present
+        if self.ss_model is None:
+            raise NotImplementedError(
+                "loglike: no internal StateSpaceModel available — provide one or implement update to construct it")
+
+        # TODO: call update(...) to set models' parameters
+        # self.update(natural)
+
+        # TODO: call filter and extract log-likelihood (ensure conversion to float)
+        # res = self.ss_model.filter(self.endog)
+        # llf = res[-2]  # depends on filter return signature
+        # return float(llf)
+        raise NotImplementedError(
+            "loglike: implement likelihood evaluation using StateSpaceModel.filter")
+
+    def loglikeobs(self, params: jnp.ndarray):
+        """Return array of per-observation log-likelihood contributions.
+
+        Optional; useful for some statistics. Implement if needed.
+        """
+        raise NotImplementedError(
+            "loglikeobs: implement if per-observation contributions are needed")
+
+    def score(self, params: jnp.ndarray):
+        """Gradient (score) of the log-likelihood. Optional but useful.
+
+        Can compute via numerical differentiation of `loglike` or derive
+        analytically. Statsmodels will compute numerical derivatives if
+        this is not provided.
+        """
+        raise NotImplementedError(
+            "score: implement analytic or numeric gradient")
+
+    def hessian(self, params: jnp.ndarray):
+        """Hessian (observed information). Optional — statsmodels can
+        approximate it numerically if missing.
+        """
+        raise NotImplementedError(
+            "hessian: implement if you can provide an analytic Hessian")    
+
