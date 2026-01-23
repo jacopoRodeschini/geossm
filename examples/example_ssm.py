@@ -5,12 +5,11 @@ Created on Fri Jan  2 23:41:43 2026
 
 @author: jacopo
 """
-
+# %%
 import numpy as np
 import matplotlib.pyplot as plt
 import jax
 import pickle
-
 
 # %% import and check the version
 # pip install -e geossm
@@ -19,7 +18,6 @@ import geossm
 
 # print("Version: ", geossm.__version__)
 print("Load from: ", geossm.__file__)
-
 
 # %% Create the State Space Model (SSM)
 # Type = linear time-invariant SSM
@@ -61,7 +59,6 @@ filename = "model.pkl"
 with open(filename, 'wb') as file:
     pickle.dump(model, file)
 
-
 # load the model
 with open(filename, 'rb') as file:
     mymodel = pickle.load(file)
@@ -101,7 +98,7 @@ Xbeta = np.random.normal(1, 2, size=(p, b, 100))
 y_sim, x_sim = model.sim(seed=1234, Xbeta=Xbeta)
 
 print("Simulate response y:", y_sim.shape)
-print("Simulate stete x:", x_t.shape)
+print("Simulate stete x:", x_sim.shape)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
