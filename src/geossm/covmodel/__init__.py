@@ -1,4 +1,6 @@
-from geossm.covmodel import spdeAppoxCov
+# covariance model sub module for geossm
+
+from .covmodels import spdeAppoxCov
 
 
 __all__ = ['spdeAppoxCov']
