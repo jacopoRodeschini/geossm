@@ -5,10 +5,48 @@
 # GEOSSM
 > **Geo**statistics with **S**tate **S**pace **M**odels
 
-**GEOSSM** is a Python package designed to apply **state space models** to **spatially and temporally referenced data**.  
-It is tailored for modern **geostatistical workflows** and natively operates on `GeoDataFrame` objects from the `geopandas` library.
+**geossm** is a Python package designed to apply **state space models** to **spatially and temporally referenced data**.  It is tailored for modern **geostatistical workflows** and natively operates on `GeoDataFrame` objects from the `geopandas` library.
 
 The package is designed with scalability and modularity in mind, making it suitable for large spatial and spatiotemporal datasets.
+
+
+The cornerstone of this package relies on the PhD thesis: A State-Space Modelling Framework in Geostatistics with Application to Environmental Data (Jacopo Rodeschini)
+
+---
+
+## 🚀 Installation
+*Coming soon.*
+
+The package will be installable via:
+```bash
+pip install geossm
+```
+
+or from source
+
+1. **Download the repository** as a ZIP file named `Low_Rank_State_Space_Model.zip`, and extract it into a folder named `Low_Rank_State_Space_Model`.
+
+2. **Navigate into the folder**:
+
+```bash
+cd Low_Rank_State_Space_Model
+```
+
+3. **Create the Conda environment** (named `dev`) from the list of required packages:
+
+```bash
+conda env create --file=environment.yml --name dev
+```
+
+4. **Activate the environment**:
+
+```bash
+conda activate dev
+```
+5. Install the package
+```bash
+conda install -e
+```
 
 ---
 
@@ -31,11 +69,3 @@ The package is designed with scalability and modularity in mind, making it suita
   - GeoPackage
 - Supports spatial and temporal indexing through geometry and time columns
 
----
-
-## 🚀 Installation
-*Coming soon.*
-
-The package will be installable via:
-```bash
-pip install geossm
