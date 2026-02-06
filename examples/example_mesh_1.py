@@ -9,6 +9,8 @@ create the mesh and the associate covariane function
 """
 
 
+import math
+import pickle
 import gmsh
 import pygmsh
 import matplotlib.tri as mtri  # For Triangulation object
@@ -45,7 +47,7 @@ print("Load from: ", geossm.__file__)
 # %% Import the Matern model based on the SPDE approach R^2
 
 if geossm.__file__:
-    from geossm.covmodel import spdeAppoxCov
+    from geossm.covmodel.covmodels import spdeAppoxCov
 
 # %% Create random point on [0,1]^2
 
@@ -69,12 +71,15 @@ plt.show()
 # %% [Utils] Build mesh gmsh
 
 
-def buildMesh(poly, lc, points):
+def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
     with pygmsh.occ.Geometry() as geom:
 
+        if lc_buffer is None:
+            lc_buffer = lc
+
         coords = np.array(poly.buffer(
-            lc).simplify(lc*0.05).exterior.coords[:-1])
-        domain = geom.add_polygon(coords, mesh_size=lc*0.1)
+            lc_buffer).simplify(lc_buffer).exterior.coords[:-1])
+        domain = geom.add_polygon(coords, mesh_size=lc_buffer*0.1)
 
         # 2. Add physical group for the domain surface (good practice)
         geom.add_physical(domain, label="surface_domain")
@@ -82,25 +87,14 @@ def buildMesh(poly, lc, points):
         # Add points for the boundary
         embedded_tags = []
         for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, 1e22)
+            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
             embedded_tags.append(t)
 
         gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
 
         # fix the points
-        gmsh.model.mesh.embed(
-            0, embedded_tags, 2, domain._id)
-
-        # gmsh.option.setNumber("Mesh.Algorithm", 5)
-
-        # # Ensure Gmsh uses the 'lc' values assigned to the points
-        # gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        # gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # # Set a global maximum and minimum to prevent infinite refinement
-        # gmsh.option.setNumber("Mesh.CharacteristicLengthMax",  1.5*lc)
-        # # Only limit the absolute minimum to prevent crashes
-        # gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc)
+        # gmsh.model.mesh.embed(
+        #     0, embedded_tags, 2, domain._id)
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
 
@@ -109,7 +103,7 @@ def buildMesh(poly, lc, points):
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
         # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 0.7)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
         # Only limit the absolute minimum to prevent crashes
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
 
@@ -161,6 +155,13 @@ print(mesh)
 print(len(mesh.cells_dict['triangle']))
 print(len(mesh.cells_dict['vertex']))
 
+# save the mesh on local disk
+# mesh.write("mesh.vtu", mesh)     # VTK XML
+# mesh.write("mesh.msh", mesh)     # Gmsh
+# mesh.write("mesh.xdmf", mesh)    # XDMF (often used with FEM codes)
+# mesh.write("mesh.obj", mesh)     # OBJ
+# mesh.write("mesh.stl", mesh)     # STL (surface meshes)
+
 
 # %% Create the covariance function
 
@@ -178,5 +179,47 @@ print(cov_matern.is_isotropic)
 
 cov_matern = cov_matern.setup(mesh)
 
+print(cov_matern)
+
+# get the FEM solver
+print(cov_matern.fem_solver)
+
 # plot the mesh
-cov_matern._fem_solver.plot_mesh()
+ax = cov_matern.fem_solver.plot_mesh()
+
+# get the stiff and the mass matrix
+mass = cov_matern.fem_solver.mass  # diagonal ()
+stiff = cov_matern.fem_solver.stiff  # sparse
+
+# Get the sparse precision represeation of the matern
+Q = cov_matern.precision(rescale=1)
+
+# %% Save the covariance to local disk
+# pickable object
+
+filename = 'matern_rescale_1.pkl'
+
+with open(filename, 'wb') as f:
+    pickle.dump(cov_matern, f)
+
+
+# load
+with open(filename, 'rb') as f:
+    cov_load = pickle.load(f)
+
+# check the load covariance
+print(cov_load)
+ax = cov_load.fem_solver.plot_mesh()
+
+# %% Create different mesh (based on the LC)
+lc_list = [0.3, 0.5, 1]
+
+fix, axs = plt.subplots(1, len(lc_list), figsize=(15, 5))
+
+for lc, ax in zip(lc_list, axs):
+
+    mesh = buildMesh(domain, lc, points, lc_buffer=lc*2)
+
+    cov_matern = cov_matern.setup(mesh)
+
+    cov_matern.fem_solver.plot_mesh(ax=ax, title=f"Mesh with LC={lc}")
