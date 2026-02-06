@@ -247,9 +247,7 @@ class FEMSolver:
             (dt, j, i), shape=(self.ndofs, self.ndofs), copy=True)
 
         # cut on the effective dofs
-        effect_dof = len(self.vertex)
-
-        return mass[:effect_dof, :][:, :effect_dof], stiff[:effect_dof, :][:, :effect_dof]
+        return mass[:self.effective_dofs, :][:, :self.effective_dofs], stiff[:self.effective_dofs, :][:, :self.effective_dofs]
 
     def getBasis(self, phy_points=None):
         count, notfindInx, H = self._compute_basis(phy_points)
@@ -341,9 +339,7 @@ class FEMSolver:
 
         notfindInx = np.asarray(notfindInx)
 
-        effect_dof = len(self.vertex)
-
-        return count, notfindInx, H[:, :effect_dof]
+        return count, notfindInx, H[:, :self.effective_dofs]
 
     def plot_mesh(self, ax=None, figsize=(10, 8), title="Title",
                   alpha_vertex=1,
@@ -421,6 +417,16 @@ class FEMSolver:
         # plt.show()
         return ax
 
+    def get_distance(self, points=None):
+        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        return cdist(self.vertex, self.vertex) if points is None else cdist(points, self.vertex)
+
+    def distance(self, points=None):
+        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+
+        return self.get_distance(points=points)
+    
+    
     @ property
     def vertex(self):
         """
@@ -532,6 +538,11 @@ class FEMSolver:
     @ property
     def ndofs(self):
         return self._fespace.GetNDofs()
+    
+    @ property
+    def effective_dofs(self):
+        """Return the effective number of DOFs (associated with vertices)"""
+        return len(self.vertex)
 
     # Property for number of vector DOFs (fespace.GetVSize())
     @ property
@@ -547,12 +558,41 @@ class FEMSolver:
         return self._mass
 
     # Property for number of vertices (mesh.GetNV())
+    @ property
+    def inner_points(self):
+        """Return the point of the grid"""
+        return self.vertex[self.inner]
+
+    @ property
+    def n_inner_points(self):
+        """Return the point of the grid"""
+        return self.inner.sum()
+
+    @ property
+    def outer_points(self):
+        """Return the boundary point of the grid"""
+        return self.vertex[~self.inner]
+
+    @ property
+    def n_outer_points(self):
+        """Return the number of the boundary point of the grid"""
+        return (~self.inner).sum()
+
+    @ property
+    def totpoints(self):
+        """Return the total point (inner + boundary) of the grid (same as vertex)"""
+        return self.vertex
+
+    @ property
+    def n_totpoints(self):
+        """Return the total point number of the grid"""
+        return self.nvertex
 
     @ property
     def shape(self):
-        return (self.nvertex, self.nelement)
+        return (self.nvertex, self.nelements, self.nbElements)
 
-    def __repr__(self):
+    def __str__(self):
         s = f"FEMSolver object with: \n"
         s += f" - Number of vertices: {self.nvertex} \n"
         s += f" - Number of elements: {self.nelements} \n"
@@ -561,9 +601,11 @@ class FEMSolver:
         s += f" - FE space order: {self.fespace_order} \n"
         return s
 
-    def __str__(self):
-        return self.__repr__()
-
+    def __repr__(self):
+        # plot the mesh 
+        self.plot_mesh(title="FEM Mesh Visualization")     
+        return self.__str__()
+        
 
 # %% SPDE Approximation of the Matern covariance model
 class spdeAppoxCov(Matern):
@@ -611,7 +653,6 @@ class spdeAppoxCov(Matern):
 
         # FEM components
         self._fem_solver = None
-        self._is_setup = False
 
         # Initialize parent Matern class
         super().__init__(
@@ -620,6 +661,30 @@ class spdeAppoxCov(Matern):
             latlon=latlon, geo_scale=geo_scale, temporal=False,
             spatial_dim=2, var_raw=None, hankel_kw=None
         )
+
+    @ property
+    def meshIO(self):
+        if self._meshIO is None:
+            raise RuntimeError("Mesh not loaded. Call setup() with a mesh first.")
+        return self._meshIO
+
+    @property
+    def fem_solver(self):
+        if self._fem_solver is None:
+            raise RuntimeError("FEM solver not initialized. Call setup() first.")
+        return self._fem_solver
+    
+    def __str__(self):
+        base = super(Matern, self).__str__()  # Get the string representation from the parent class
+
+        if self._fem_solver is not None:
+            base += f"\n {str(self.fem_solver)}"    
+
+        else:
+            base += "\n - FEM solver not initialized. Call setup() with a mesh to initialize."
+
+        return base
+        
 
     def setup(self, mesh_obj: meshio._mesh.Mesh):
         """
@@ -676,7 +741,8 @@ class spdeAppoxCov(Matern):
             ) from e
 
         return self
-
+    
+    
     def _compute_precision_spde(self, rescale=None):
         """
         @rescale = rescale factor
@@ -690,14 +756,15 @@ class spdeAppoxCov(Matern):
         if rescale is not None:
             self.rescale = rescale  # Rescale factor (k)
 
-        effect_dof = len(self.vertex)
+        effective_dofs = self.fem_solver.effective_dofs
+
         # Compute the inverse of the mass matrix
-        Cinv = sp.diags(1/self.mass.diagonal(), offsets=0, shape=(
-            effect_dof, effect_dof), format="csr")
+        Cinv = sp.diags(1/self.fem_solver.mass.diagonal(), offsets=0, shape=(
+            effective_dofs, effective_dofs), format="csr")
 
         # Compute the K matrix
         k = self.rescale
-        K = (k**2) * self.mass + self.stiff
+        K = (k**2) * self.fem_solver.mass + self.fem_solver.stiff
 
         # Compute the precision matrix of the process y
         Q = self.sigma2k * (K @ Cinv @ K)
@@ -713,6 +780,12 @@ class spdeAppoxCov(Matern):
 
         return self._compute_precision_spde(rescale)
 
+
+    def distance(self, points=None):
+        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+
+        return self._fem_solver.distance(points=points)
+    
     # property:: spatial process
     @ property
     def emp_range(self):
@@ -728,47 +801,8 @@ class spdeAppoxCov(Matern):
         return sc.special.gamma(1) / (sc.special.gamma(2) * 4*np.pi * (self.rescale**2))
 
     @ property
-    def inner_points(self):
-        """Return the point of the grid"""
-        return self.vertex[self.inner]
-
-    @ property
-    def n_inner_points(self):
-        """Return the point of the grid"""
-        return self.inner.sum()
-
-    @ property
-    def outer_points(self):
-        """Return the boundary point of the grid"""
-        return self.vertex[~self.inner]
-
-    @ property
-    def n_outer_points(self):
-        """Return the number of the boundary point of the grid"""
-        return (~self.inner).sum()
-
-    @ property
-    def totpoints(self):
-        """Return the total point (inner + boundary) of the grid (same as vertex)"""
-        return self.vertex
-
-    @ property
-    def n_totpoints(self):
-        """Return the total point number of the grid"""
-        return self.nvertex
-
-    # %% property:: FE SPACE (fespace)
-
-    def get_distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
-
-        return cdist(self.vertex, self.vertex) if points is None else cdist(points, self.vertex)
-
-    @ property
-    def distance(self):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
-
-        return self.get_distance()
+    def domain(self):
+        return self._domain
 
     # %% property: stiff and mass matrix
 
@@ -776,7 +810,7 @@ class spdeAppoxCov(Matern):
         # Create a dictionary of the object's state excluding non-picklable attributes
         state = self.__dict__.copy()
         # Exclude the attributes that can't be pickled
-        excluded_attrs = ['_fem_solver', '_is_setup']
+        excluded_attrs = ['_fem_solver', '_mesh']
         for attr in excluded_attrs:
             if attr in state:
                 del state[attr]
@@ -787,13 +821,7 @@ class spdeAppoxCov(Matern):
         self.__dict__.update(state)
         # Reinitialize the attributes that were excluded from pickling
         self._mesh = None
-        # Rebuild the mesh and finite element space if needed
-        if '_meshIO' in state and state['_meshIO'] is not None:
-            self._meshIO = state['_meshIO']
-
-        if self._meshIO:
+        
+        # Rebuild the mesh and finite element solver if meshIO is available
+        if self._meshIO is not None:
             self.setup(self._meshIO)
-
-    def __setstate__(self, state):
-        state.pop("bad_attribute", None)
-        self.__dict__.update(state)
