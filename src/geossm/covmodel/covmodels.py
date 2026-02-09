@@ -153,10 +153,10 @@ class FEMSolver:
         # compute matrices now
         self._mass, self._stiff = self._compute_mass_stiff()
 
-    @ property
+    @property
     def mesh(self):
         return self._mesh
-    
+
     @property
     def inner(self):
         return self._inner
@@ -184,9 +184,8 @@ class FEMSolver:
         # Use provided domain polygons
         if points is not None:
             phy_points = np.asarray(points, dtype=np.float64)
-        else: 
+        else:
             phy_points = np.asarray(self.vertex, dtype=np.float64)
-
 
         inner = np.logical_or.reduce([
             np.array([poly.contains(Point(p)) for p in phy_points])
@@ -425,9 +424,8 @@ class FEMSolver:
         """Get the distance between the (vertex, points) or (vertex, vertex)"""
 
         return self.get_distance(points=points)
-    
-    
-    @ property
+
+    @property
     def vertex(self):
         """
         Returns the coordinates of mesh vertices that have a DOF associated
@@ -464,16 +462,16 @@ class FEMSolver:
 
         return dof_associated_vertex_coords
 
-    @ property
+    @property
     def nvertex(self):
         return len(self.vertex)
 
-    @ property
+    @property
     def nelements(self):
         """Get the number of discretisation elements (like the number of triangle)"""
         return self.mesh.GetNE()
 
-    @ property
+    @property
     def elements(self):
         triangles = []
 
@@ -487,28 +485,28 @@ class FEMSolver:
 
         return triangles_array
 
-    @ property
+    @property
     def box(self):
         return self.mesh.GetBoundingBox()
 
-    @ property
+    @property
     def domain(self):
         return self._domain
 
     # Property for number of boundary elements (mesh.GetNBE())
-    @ property
+    @property
     def nbElements(self):
         return self.mesh.GetNBE()
 
-    @ property
+    @property
     def nbEdges(self):
         return self.mesh.GetNEdges()
 
-    @ property
+    @property
     def geoshape(self):
         return self.mesh.GetElementGeometry(0)
 
-    @ property
+    @property
     def getBoundaryEdge(self):
         boundaryEdge = []
         for i in range(self.nbElement):
@@ -516,7 +514,7 @@ class FEMSolver:
 
         return np.array(boundaryEdge)
 
-    @ property
+    @property
     def boundary_vertex(self, boolean=True):
         bdr_vertex = []
         for i in range(self.mesh.GetNBE()):
@@ -524,71 +522,71 @@ class FEMSolver:
 
         return np.array(bdr_vertex)
 
-    @ property
+    @property
     def fespace(self):
         """Return the finite elment space"""
         return self._fespace
 
     # Property for the space dimension (fespace.GetVDim())
-    @ property
+    @property
     def fespace_order(self):
         return self._fespace.GetVDim()
 
     # Property for number of local degrees of freedom (fespace.GetNDofs())
-    @ property
+    @property
     def ndofs(self):
         return self._fespace.GetNDofs()
-    
-    @ property
+
+    @property
     def effective_dofs(self):
         """Return the effective number of DOFs (associated with vertices)"""
         return len(self.vertex)
 
     # Property for number of vector DOFs (fespace.GetVSize())
-    @ property
+    @property
     def GetVSize(self):
         return self._fespace.GetVSize()
 
-    @ property
+    @property
     def stiff(self):
         return self._stiff
 
-    @ property
+    @property
     def mass(self):
         return self._mass
 
     # Property for number of vertices (mesh.GetNV())
-    @ property
+    @property
     def inner_points(self):
         """Return the point of the grid"""
         return self.vertex[self.inner]
 
-    @ property
+    @property
     def n_inner_points(self):
         """Return the point of the grid"""
         return self.inner.sum()
 
-    @ property
+    @property
     def outer_points(self):
         """Return the boundary point of the grid"""
         return self.vertex[~self.inner]
 
-    @ property
+    @property
     def n_outer_points(self):
         """Return the number of the boundary point of the grid"""
         return (~self.inner).sum()
 
-    @ property
+    @property
     def totpoints(self):
         """Return the total point (inner + boundary) of the grid (same as vertex)"""
         return self.vertex
 
-    @ property
+    @property
     def n_totpoints(self):
         """Return the total point number of the grid"""
         return self.nvertex
 
-    @ property
+    @property
     def shape(self):
         return (self.nvertex, self.nelements, self.nbElements)
 
@@ -602,10 +600,103 @@ class FEMSolver:
         return s
 
     def __repr__(self):
-        # plot the mesh 
-        self.plot_mesh(title="FEM Mesh Visualization")     
+        # plot the mesh
+        self.plot_mesh(title="FEM Mesh Visualization")
         return self.__str__()
-        
+
+
+# %% Heat kernel
+
+# Euclidean distance is wrong in a non-convex domain like PacMan.
+# hdist = cdist(points, points)
+
+# Graph shortest path that stays entirely inside the polygon
+# 1 - Compute distances on a FEM mesh graph (Dijkstra on barycentric graph)
+# 2 : Laplacian distance (encodes how information diffuses through geometry)
+
+
+# solve the hteat equation
+# def heat_geodesic_kernel(fem_solver, i):
+#     fes = femsolver._fespace
+#     mesh = femsolver._mesh
+
+#     # setup the mass and stiff matrix
+#     M = mfem.BilinearForm(fes)
+#     M.AddDomainIntegrator(mfem.MassIntegrator())
+#     M.Assemble()
+#     M.Finalize()
+#     Mmat = M.SpMat()
+
+#     K = mfem.BilinearForm(fes)
+#     K.AddDomainIntegrator(mfem.DiffusionIntegrator())
+#     K.Assemble()
+#     K.Finalize()
+#     Kmat = K.SpMat()
+
+#     # solve the heat equation
+#     t = mesh.GetElementSize(0)**2  # rule of thumb
+
+#     u = mfem.GridFunction(fes)
+#     rhs = mfem.GridFunction(fes)
+
+#     rhs.Assign(0.0)
+#     rhs[i] = 1.0  # source of the heat
+
+#     A = mfem.Add(1.0, Mmat, t, Kmat)
+
+#     solver = mfem.CGSolver()
+#     solver.SetOperator(A)
+#     solver.SetRelTol(1e-8)
+#     solver.Mult(rhs, u)
+
+#     # % Compute normalized gradient field
+#     dim = mesh.Dimension()
+#     vfes = mfem.FiniteElementSpace(mesh, fes.FEColl(), dim)
+
+#     #  Extract the gradient of the heat solution 'u'
+#     X = mfem.GridFunction(vfes)
+#     grad_u_coeff = mfem.GradientGridFunctionCoefficient(u)
+
+#     # Perform an L2 projection (averaging the gradients from neighboring elements)
+#     # This is actually okay for smoothing, but the normalization still has to happen point-by-point.
+#     X.ProjectCoefficient(grad_u_coeff)
+
+#     # Pointwise normalization
+#     data = X.GetDataArray()  # (this is a view, not a copy)
+#     data_reshaped = data.reshape(-1, dim)  # (num_nodes, dimension)
+
+#     # Normalize: -grad(u) / |grad(u)|
+#     norms = np.linalg.norm(data_reshaped, axis=1, keepdims=True) + 1e-12
+#     data_reshaped[:] = -data_reshaped / norms
+
+#     # # X is already normalized
+#     # print(np.max(np.abs(np.linalg.norm(X.GetDataArray().reshape(-1, vdim),
+#     #                                    axis=1) - 1.0)))
+
+#     # %Set up the final Poisson problem: \Delta d = \nabla \cdot (\phi)
+
+#     divX = mfem.GridFunction(fes)
+#     divX.ProjectCoefficient(mfem.DivergenceGridFunctionCoefficient(X))
+
+#     phi = mfem.GridFunction(fes)
+
+#     solver.SetOperator(Kmat)
+#     solver.Mult(divX, phi)
+
+#     return phi.GetDataArray()
+
+# Compute the laplacian godesis distance using the heat kernel
+
+# femsolver = cov_matern.setup(meshio).fem_solver
+
+# hdist = np.zeros((femsolver.nvertex, femsolver.nvertex))
+# for i, s in enumerate(points):
+#     hdist[i, :] = heat_geodesic_kernel(femsolver, i)
+
+# # cut on the inner points
+# hdist = hdist[:, femsolver.inner][femsolver.inner, :]
+# hdist = (hdist + hdist.T)/2
+
 
 # %% SPDE Approximation of the Matern covariance model
 class spdeAppoxCov(Matern):
@@ -662,29 +753,31 @@ class spdeAppoxCov(Matern):
             spatial_dim=2, var_raw=None, hankel_kw=None
         )
 
-    @ property
+    @property
     def meshIO(self):
         if self._meshIO is None:
-            raise RuntimeError("Mesh not loaded. Call setup() with a mesh first.")
+            raise RuntimeError(
+                "Mesh not loaded. Call setup() with a mesh first.")
         return self._meshIO
 
     @property
     def fem_solver(self):
         if self._fem_solver is None:
-            raise RuntimeError("FEM solver not initialized. Call setup() first.")
+            raise RuntimeError(
+                "FEM solver not initialized. Call setup() first.")
         return self._fem_solver
-    
+
     def __str__(self):
-        base = super(Matern, self).__str__()  # Get the string representation from the parent class
+        # Get the string representation from the parent class
+        base = super(Matern, self).__str__()
 
         if self._fem_solver is not None:
-            base += f"\n {str(self.fem_solver)}"    
+            base += f"\n {str(self.fem_solver)}"
 
         else:
             base += "\n - FEM solver not initialized. Call setup() with a mesh to initialize."
 
         return base
-        
 
     def setup(self, mesh_obj: meshio._mesh.Mesh):
         """
@@ -741,8 +834,7 @@ class spdeAppoxCov(Matern):
             ) from e
 
         return self
-    
-    
+
     def _compute_precision_spde(self, rescale=None):
         """
         @rescale = rescale factor
@@ -780,19 +872,18 @@ class spdeAppoxCov(Matern):
 
         return self._compute_precision_spde(rescale)
 
-
     def distance(self, points=None):
         """Get the distance between the (vertex, points) or (vertex, vertex)"""
 
         return self._fem_solver.distance(points=points)
-    
+
     # property:: spatial process
-    @ property
+    @property
     def emp_range(self):
         """Return the empirical range paramiter  """
         return np.sqrt(8*self.nu) / self.rescale
 
-    @ property
+    @property
     def sigma2k(self):
         """
         Return the marginal variance of the standardise approximate spatial SPDE process
@@ -800,7 +891,7 @@ class spdeAppoxCov(Matern):
         """
         return sc.special.gamma(1) / (sc.special.gamma(2) * 4*np.pi * (self.rescale**2))
 
-    @ property
+    @property
     def domain(self):
         return self._domain
 
@@ -821,7 +912,7 @@ class spdeAppoxCov(Matern):
         self.__dict__.update(state)
         # Reinitialize the attributes that were excluded from pickling
         self._mesh = None
-        
+
         # Rebuild the mesh and finite element solver if meshIO is available
         if self._meshIO is not None:
             self.setup(self._meshIO)
