@@ -1,14 +1,4 @@
-# Title: Example of MLE inference
-from tqdm import tqdm
-from joblib import Parallel, delayed
-import math
-import pickle
-import gmsh
-import pygmsh
-import matplotlib.tri as mtri  # For Triangulation object
-import scipy.spatial
-from scipy.spatial import Delaunay
-from scipy.spatial.distance import cdist
+
 import mfem.ser as mfem
 
 import numpy as np
@@ -24,9 +14,14 @@ import warnings
 
 from scipy.spatial import ConvexHull
 import meshio
+import pygmsh
+import gmsh
 
 from scipy.sparse.linalg import splu
+from scipy.spatial.distance import cdist
 
+from joblib import Parallel, delayed
+from tqdm import tqdm
 
 # %% import the geossm package
 
@@ -41,32 +36,17 @@ print("Load from: ", geossm.__file__)
 if geossm.__file__:
     from geossm.covmodel.covmodels import spdeAppoxCov
 
-# %% Create the packman domain
+# %% Create a convex domain [0,1]^2
 n = 400
-triangle = Polygon([(0, 0), (1, -1), (1, 1)])
-
-
-def circle(center=(0, 0), radius=1.0, n_points=100):
-    cx, cy = center
-    points = [
-        (cx + radius * math.cos(2*math.pi*i/n_points),
-         cy + radius * math.sin(2*math.pi*i/n_points))
-        for i in range(n_points)
-    ]
-    return Polygon(points)
-
-
-pacman = circle(radius=1.0, n_points=200).difference(triangle)
+domain = Polygon([(0, 0), (0, 1), (1, 1), (1, 0)])
 
 # generate points inside that domain
-points = np.random.uniform(-1, 1, size=(n, 2))
-
-points = np.array([p for p in points if pacman.contains(Point(p))])
+points = np.random.uniform(0, 1, size=(n, 2))
 
 # plot the generate poinsts
 fix, ax = plt.subplots()
 ax.plot(points[:, 0], points[:, 1], 'x', label='Random Points')
-ax.plot(pacman.exterior.xy[0], pacman.exterior.xy[1],
+ax.plot(domain.exterior.xy[0], domain.exterior.xy[1],
         'r-', label='Pacman Boundary')
 ax.set_title('Random Points in Pacman Domain')
 ax.set_xlabel('X-axis')
@@ -74,12 +54,13 @@ ax.set_ylabel('Y-axis')
 ax.legend()
 plt.show()
 
-# %% Simulate the GP partial observations
+# %% Generate the observed dataset
 
 theta = 0.5  # range
 rescale = np.sqrt(8 * 1) / theta
 
 covf = Matern(dim=2, var=1, rescale=rescale, nugget=0, latlon=False, nu=1)
+
 hdist = cdist(points, points)
 
 Sigma = covf.covariance(hdist)
@@ -92,7 +73,7 @@ yobs = Sigma_chol @ np.random.normal(size=len(points)) + \
 # plot the observed data
 fix, ax = plt.subplots()
 s = ax.scatter(points[:, 0], points[:, 1], c=yobs, cmap='viridis')
-ax.plot(pacman.exterior.xy[0], pacman.exterior.xy[1],
+ax.plot(domain.exterior.xy[0], domain.exterior.xy[1],
         'r-', label='Pacman Boundary')
 ax.set_title('Simulated Observations in Pacman Domain')
 ax.set_xlabel('X-axis')
@@ -103,7 +84,8 @@ plt.show()
 
 # %% [Utils] Build mesh gmsh
 
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
+
+def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22, embed=False):
     with pygmsh.occ.Geometry() as geom:
 
         if lc_buffer is None:
@@ -125,35 +107,37 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
 
         # fix the points
-        # gmsh.model.mesh.embed(
-        #     0, embedded_tags, 2, domain._id)
+        if embed:
+            gmsh.model.mesh.embed(
+                0, embedded_tags, 2, domain._id)
 
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
+        # gmsh.option.setNumber("Mesh.Algorithm", 6)
 
         # Allow triangles to be very large
         gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
         # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 2)
 
         # 5. Generate
         gmsh.model.mesh.generate(2)
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
+        # gmsh.option.setNumber("Mesh.Smoothing", 10)
 
         # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+        # gmsh.option.setNumber("Mesh.Optimize", 1)
+        # gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
 
         mesh = geom.generate_mesh()
 
     return mesh
+
+
 # %% Create the covariance funtion
 
-
 # create the mesh
-meshio = buildMesh(pacman, lc=1.5, points=points, lc_buffer=0.5)
+meshio = buildMesh(domain, lc=0.1, points=points, lc_buffer=1)
 
 # Create the covariance funcion
-cov_matern = spdeAppoxCov([pacman], latlon=False, nu=1, var=1, rescale=1)
+cov_matern = spdeAppoxCov([domain], latlon=False, nu=1, var=1, rescale=1)
 
 # set the mesh
 cov_matern = cov_matern.setup(meshio)
@@ -162,7 +146,7 @@ print(cov_matern)
 # plot the mesh
 fix, ax = plt.subplots()
 s = ax.scatter(points[:, 0], points[:, 1], c=yobs, cmap='viridis')
-ax.plot(pacman.exterior.xy[0], pacman.exterior.xy[1],
+ax.plot(domain.exterior.xy[0], domain.exterior.xy[1],
         'r-', label='Pacman Boundary')
 cov_matern.fem_solver.plot_mesh(ax=ax)
 ax.set_title('Simulated Observations in Pacman Domain')
@@ -182,14 +166,13 @@ res = sc.optimize.minimize(minfun, args=(
     H, cov_matern, yobs), x0=np.log(5), method='Nelder-Mead')
 
 
-# %% The MC simulation
+# %% The estimate task
 
 
 def estimate(n=100):
 
-    points = np.random.uniform(-1, 1, size=(n, 2))
-
-    points = np.array([p for p in points if pacman.contains(Point(p))])
+    # Create the random points within the domain
+    points = np.random.uniform(0, 1, size=(n, 2))
 
     covf = Matern(dim=2, var=1, rescale=rescale, nugget=0, latlon=False, nu=1)
     hdist = cdist(points, points)
@@ -202,10 +185,10 @@ def estimate(n=100):
         np.random.normal(0, s2, size=len(points))
 
     # create the mesh
-    meshio = buildMesh(pacman, lc=1.5, points=points, lc_buffer=0.5)
+    meshio = buildMesh(domain, lc=0.15, points=points, lc_buffer=0.5)
 
     # Create the covariance funcion
-    cov_matern = spdeAppoxCov([pacman], latlon=False, nu=1, var=1, rescale=1)
+    cov_matern = spdeAppoxCov([domain], latlon=False, nu=1, var=1, rescale=1)
     cov_matern = cov_matern.setup(meshio)
 
     # compute the H on the new points (while the mesh is fixed)
@@ -213,18 +196,20 @@ def estimate(n=100):
     H = H[:, cov_matern.fem_solver.inner]
 
     res = sc.optimize.minimize(minfun, args=(
-        H, cov_matern, yobs), x0=np.log(5), method='Nelder-Mead')
+        H, cov_matern, yobs), x0=np.log(0.3), method='Nelder-Mead')
 
     return np.exp(res.x)
 
 
+# %% Run The MC simulation
 boot = 10
 
 # Parallel execution [faster]
 results = Parallel(n_jobs=-1, backend='loky')(
     delayed(estimate)(n=100) for _ in tqdm(range(boot)))
 
-np.mean(results)
+bias = rescale - np.mean(results)
+rmse = np.sqrt(np.mean((rescale - results)**2))
 
 
 # %% Optimisation function
@@ -253,6 +238,6 @@ def minfun(par, H, spdeCov, yObs):
     logdet = np.linalg.slogdet(M)[1]
     logpdf = logdet + yObs @ invM @ yObs.T
 
-    print(rescale, logpdf)
+   #  print(rescale, logpdf)
 
     return 0.5*logpdf
