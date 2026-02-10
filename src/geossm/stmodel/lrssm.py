@@ -18,14 +18,13 @@ except Exception:
             self.exog = exog
 
 # inmport the state space model
-from ssm import StateSpaceModel
-from covmodel import spdeAppoxCov
-import geopandas
+from geossm.ssm import StateSpaceModel
+from geossm.covmodel import spdeAppoxCov
+
 import jax.numpy as jnp
 from jax import jit, lax, vmap
 import scipy.sparse as sp
 from functools import partial
-import meshio
 import time
 from jax.scipy.linalg import block_diag
 from scipy.linalg import block_diag as scyp_block_diag
