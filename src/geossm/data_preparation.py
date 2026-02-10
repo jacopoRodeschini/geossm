@@ -15,68 +15,47 @@ from patsy import ModelDesc, dmatrices
 import geopandas as geopd
 import pandas as pd
 
+
 class DesignMatrices:
 
-    def __init__(self, y: np.array, X: np.array, formula: str,
+    def __init__(self, y: np.array, y_design_info, X: np.array, X_design_info, formula: str,
                  csr, geometry, timestamps, time_col_name='Time'):
         """
         Design Matrices for spatial-temporal modeling.
         Construct while inittialized.
         Supposed to be return from data_preparation class.
         """
-        self.y = y # target variables, np.array [N x T]
-        self.X = X # covariates, np.array [N x P x T] 
-        self.formula = formula # formula string
-        self.crs = csr # coordinate reference system
-        self.geometry = geometry # obervations geometries
-        self.geometry_id = 'geometry_id' # geometry id column name
-        self.time_col_name = time_col_name # time column name
-        self.timestamps = timestamps # observations timestamps
-        self.N, self.b, self.T = X.shape # number of points, number of covariates, number of timestamps
+        self.y = y  # target variables, np.array [N x T]
+        self.X = X  # covariates, np.array [N x P x T]
+        self.y_design_info =  y_design_info # design info for y (patsy)
+        self.X_design_info = X_design_info  # design info for X (patsy)
+        self.formula = formula  # formula string
+        self.crs = csr  # coordinate reference system
+        self.geometry = geometry  # obervations geometries
+        self.geometry_id = 'geometry_id'  # geometry id column name
+        self.time_col_name = time_col_name  # time column name
+        self.timestamps = timestamps  # observations timestamps
+        # number of points, number of covariates, number of timestamps
+        self.N, self.b, self.T = X.shape
         self.terms = ModelDesc.from_formula(formula)
-
+    
     def __str__(self):
-        description = """Design Matrices object ----------------------
-formula: {formula}
-Time name: {time_name}
-
-# Space
-- Crs: {crs_name}
-- Geometry type: {ptType}
-- Geometry name: {geo_name} 
-- Number of points: {N} (centroid)
-- Box: {box}
-- Dist: min={dmin}, median={dmed}, max={dmax}
-
-# Time
-- Number of timestamp: {T} 
-- Timestamp: min={tmin}, max={tmax}
-
-# Design matrix 
+        description = """Design matrices object
+----------------------------------
 y: {y_shape}
-y name : {y_name}
+y name : {y_name}       
 
-X: {x_shape}
+X: {x_shape}                    
 X name: {x_name}
 ----------------------------------
-""".format(formula=self.formula, time_name=self.time_col_name,
-           crs_name=self.crs.name, ptType=np.unique(self.geometry_type), geo_name=self.geodf.geometry.name, N=self.N, box=self.box,
-           dmin=np.round(self.distance.min(), 2),
-           dmed=np.round(np.median(self.distance), 2),
-           dmax=np.round(self.distance.max(), 2),
-           T=self.T, tmin=self.geodf[self.time_col_name].min(), tmax=self.geodf[self.time_col_name].max(),
-           y_shape=self.y.shape,
-           y_name=self._y_design_info.column_names,
-           x_shape=self.X.shape,
-           x_name=self._x_design_info.column_names
-           )
-
+""".format(y_shape=self.y.shape, y_name=self.y_design_info.column_names,
+                x_shape=self.X.shape, x_name=self.X_design_info.column_names)
         return description
 
 
 class data_preparation:
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str):
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64):
         """
         Prepare the spatial-temporal dataset for modeling.
         Parameters
@@ -89,7 +68,7 @@ class data_preparation:
         -------
         DesignMatrices
             An object containing the design matrices and related metadata.
-        
+
         """
 
         self.geodf = geodf
@@ -99,10 +78,10 @@ class data_preparation:
             self.design_matrices = self._build()
 
     def __call__(self):
-        return self.design_matrices
+        return self.get()
 
     def get(self):
-        return self.__call__()
+        return self.design_matrices
 
     def _check(self, geodf, dtype):
         # Do preliminary check of the dataset
@@ -175,7 +154,7 @@ class data_preparation:
         # Get the points of the response variable and distace
         self.points = self._getPoints(self.geodf, self.geometry_id)
 
-        return DesignMatrices(self.y, self.X, self.formula, self.crs, self.geometry, self.timestamps)
+        return DesignMatrices(self.y, self._y_design_info, self.X, self._x_design_info, self.formula ,self.crs, self.geometry, self.timestamps)
 
     def _computedesignMatrix(self, geodf, geometry_id, time_col_name, response_name, formula=None, terms=None):
 
@@ -235,9 +214,9 @@ class data_preparation:
 
             return geodf, point, y, ytemp.design_info, Xbeta, Xtemp.design_info, N, T, time
 
-    def _checkFormula(self, formula):
+    def _checkFormula(self, formula: str):
 
-        # TODO: check the fromula parser
+        # TODO: check the formula parser
         flag = True
         msg = ""
 
@@ -343,3 +322,41 @@ class data_preparation:
             flag = False
 
         return flag, msg, geometry_id
+
+    def __repr__(self):
+        return self.__str__()
+
+    def __str__(self):
+        description = """Dataset object 
+----------------------------------
+formula: {formula}
+Time  column: {time_name}
+Space column: {space_name}
+
+# Space
+- Crs: {crs_name}
+- Geometry type: {ptType}
+- Number of points: {N} (centroid)
+- Box: {box}
+
+# Time
+- Number of timestamp: {T} 
+- Timestamp: min={tmin}, max={tmax}
+
+# Design matrix 
+y: {y_shape}
+y name : {y_name}
+
+X: {x_shape}
+X name: {x_name}
+----------------------------------
+""".format(formula=self.formula, time_name=self.time_col_name, space_name="geometry",
+           crs_name=self.crs.name, ptType=np.unique(self.geometry), N=self.N, box=self.box,
+           T=self.T, tmin=self.timestamps.min(), tmax=self.timestamps.max(),
+           y_shape=self.y.shape,
+           y_name=self._y_design_info.column_names,
+           x_shape=self.X.shape,
+           x_name=self._x_design_info.column_names
+           )
+
+        return description
