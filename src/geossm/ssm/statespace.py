@@ -533,19 +533,19 @@ class StateSpaceModel:
     def estimate(self, y_t) -> tuple:
 
         # run the filter
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, time_filter = self.filter(
+        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tdelta_filter = self.filter(
             y_t)
 
         # run the smoother
-        x_T, P_T, P_T_1, time_smoother = self.smoother(
+        x_T, P_T, P_T_1, tdelta_smoother = self.smoother(
             x_t, P_t, K, x_t_1, P_t_1, invP_t_1)
 
         # compute expected values
-        y_hat, S11, S10, S00, time_expected = self.computeExpectedValues(
+        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
 
         # Package results in a convenience container
-        results = SSMResults(
+        """results = SSMResults(
             model=self,
             y_obs=y_t,
             x_filtered=x_t,
@@ -565,9 +565,9 @@ class StateSpaceModel:
             S10=S10,
             S00=S00,
             time_expected=time_expected
-        )
+        )"""
 
-        return results
+        return y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
     def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
         """
