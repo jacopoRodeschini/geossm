@@ -38,13 +38,14 @@ def list_datasets():
     rows = [header, sep]
 
     # Add a flag if the dataset is larger than 10 MB
-    flag = " *" if size_mb > 10 else ""
+    
     for name in sorted(_AVAILABLE):
         filename = _AVAILABLE[name]
         path = base / filename
         size_mb = path.stat().st_size / 1024**2
         ext = path.suffix.lstrip(".")
 
+        flag = " *" if size_mb > 10 else ""
         rows.append(
             f"{name:<20} {ext:<6} {size_mb:>10.3f}{flag}"
         )
