@@ -988,30 +988,67 @@ Run time  : Tot: {format_value(time_iter, scalar_decimals)}, Estep: {format_valu
 """
         return msg
     
+    def __str__(self):
+
+        flag = False
+        if hasattr(self, '_cov_matern'):
+            qdim = [len(cov.n_inner_points) for cov in self._cov_matern]
+            covfs = [str(cov) for cov in self._cov_matern]
+            nlat = self.nlat
+            flag = True
+        else:
+            qdim = 'None'
+            covfs = 'None'
+            nlat = 'None'
+        
+        lines = []
+
+        lines.append("LRStateSpaceModel")
+        lines.append("-" * 60)
+
+        lines.append(f"Observed variables : {self.nvar} - {self.ndim}")
+        lines.append(f"Latent factors     : {nlat} - {qdim}")
+        lines.append(f"Domain             : {[d.geom_type for d in self.domain]}")
+
+        lines.append("-" * 60)
+        formulas = [gr.formula for gr in self.gridList]
+        lines.append("Observation eqs    :")
+        lines.extend(f"  - {f}" for f in formulas)
 
 
+        lines.append("-" * 60)
+        if flag:
+            lines.append(f"Covariance         :")
+            lines.extend(f"  - {cf}" for cf in covfs)
+        else:
+            lines.append("Covariance         : None (not set up)")
+
+        lines.append("-" * 60)
+        lines.append("Model structure:")
+        lines.append("-" * 60)
+        lines.append(self.model_structure(qdim))
+
+        lines.append("-" * 60)
+        lines.append(f"JAX backend        : {jax.default_backend()}")
+        lines.append(f"JAX devices        : {jax.devices()}")
+
+        return "\n".join(lines)
+
+
+    def model_structure(self,  qdim):
+        """Return a formatted summary of the state-space structure."""
+
+        return (
+            "Observation equation:\n"
+            + f"  y(t) = X{getattr(self.Xbeta_train, 'shape', 'None')} beta + H({self.pdim},{qdim}) x(t)"
+            + f"+ e(t),  e(t) ~ N(0, R({self.pdim}, {self.pdim}))\n\n"
+            + "State equation:\n"
+            + f"  x(t) = F({qdim},{qdim}) x(t-1) "
+            + f"+ u(t),  u(t) ~ N(0, Q({qdim},{qdim}))\n"
+        )
+        
     def print_info(self, msg):
         print(f"{time.time()} - {msg}")
     
-    def info(self, verbose=True):
-        
-        # grid information
-        print("------------------------------------------------------------------")
-        print(f"Number of variables: {self.nvar}")
-        if verbose:
-            print(f"List of grids: {len(self.gridList)}")
-            msg = [f"Grid {g.__str__()}" for  g in self.gridList]
-            print("\n".join(msg))
-        
-        # hardware platform infromation 
-        print("------------------------------------------------------------------")
-        print(f"JAX backend: {jax.default_backend()}")
-        print(f"JAX devices: {jax.devices()}")
-
-        print("------------------------------------------------------------------")
-        hardware = getHardware()
-        print(f"Hardware: {hardware}")
-        
-
-
+    
 
