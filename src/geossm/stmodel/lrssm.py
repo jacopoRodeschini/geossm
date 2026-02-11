@@ -31,6 +31,12 @@ from scipy.linalg import block_diag as scyp_block_diag
 import jax
 from scipy.optimize import minimize
 
+from geossm import data_preparation, DesignMatrices
+from geossm import block_diag_3D, getHardware
+
+from shapely.geometry import LineString, Point, Polygon, MultiPoint
+
+
 # %% Utilities for the EM algorithm (jax kernel functions)
 # %% [Utils] Updating formula, JAX (M-Step)
 
@@ -251,7 +257,7 @@ def _compute_A2_jax_kernel(y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, n
                 tt = jnp.eye(max_mdim_i, dtype=y_t.dtype)
 
                 # kron_term_val_j shape: (max_mdim_i, nlat * max_mdim_i)
-                kron_term_val_j = jnp.kron(ei_jax(j, nlat), tt)
+                kron_term_val_j = jnp.kron(_ei_jax(j, nlat), tt)
 
                 # Check for compatibility between ldim and nlat for Psi_it @ x_T
                 # This is an implicit assumption from your original code's structure.
@@ -280,7 +286,7 @@ def _compute_A2_jax_kernel(y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, n
                     tt_jk = jnp.eye(max_mdim_i, dtype=y_t.dtype)
                     # Kron term: shape (nlat * max_mdim_i, nlat * max_mdim_i)
                     kron_op_jk = jnp.kron(
-                        ei_jax(j_idx, nlat).T @ ei_jax(k_idx, nlat), tt_jk)
+                        _ei_jax(j_idx, nlat).T @ _ei_jax(k_idx, nlat), tt_jk)
 
                     # Calculate the term for trace: Psi_it.T @ kron_op_jk @ Psi_it @ (x_T @ x_T.T + P_T)
                     # Psi_it.T is (nlat, nlat * max_mdim_i)
@@ -306,8 +312,6 @@ def _compute_A2_jax_kernel(y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, n
     return W
 
 # Helper function ei for JAX
-
-
 def _ei_jax(i, dim):
     """
     Creates a one-hot row vector for JAX.
@@ -319,35 +323,54 @@ def _ei_jax(i, dim):
 
 class LRStateSpaceModel:
 
-    def __init__(self, df, formulas, domain=None):
+    def __init__(self, df, formulas, domain=None, verbose=True):
 
         self.df = df
         self.formulas = formulas
 
         # Compute the design matrices
+        if verbose:
+            self.print_info("Building observation grid...")
+        
         self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, self.T = self._buildObservationGrid(
             df, formulas)
-
-        self.yTrain, self.Xbeta_train = self._buildDesignMatrix(self)
+        
+        if verbose:
+            self.print_info("Building design matrix...")    
+        self.y_train, self.Xbeta_train = self._buildDesignMatrix()
 
         # Check the domain
+        if verbose:
+            self.print_info("Checking the domain...")
+
         flag, msg = self._checkDomain(domain)
         if flag:
             raise ValueError(msg)
         else:
             self.domain = self._setDomain(domain)
 
-    def setup(self, mesh_obj: list):
-
+    def setup(self, mesh_obj: list, domain: list = None):
+        
+        # this domain is the domain on which the mesh is defined, and where the 
+        # covariance function has a meaning
+        if domain is not None:
+            flag, msg = self._checkDomain(domain)
+            if flag:
+                raise ValueError(msg)
+        else:
+            domain  = self._domain
+        
+        if len(mesh_obj) != len(domain):
+            raise ValueError(f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain)})")  
+    
         # mehs_obj = list of the latent domain
         self._cov_matern = []
-        for meshi in mesh_obj:
+        for meshi, domi in zip(mesh_obj, domain):
 
             # create the covariance model of the matern
             temp = spdeAppoxCov(
-                [self.domain], latlon=False, nu=1, var=1, rescale=1)
-
-            self._cov_matern.append(temp.setup(mesh_obj))
+                [domi], latlon=False, nu=1, var=1, rescale=1)
+            self._cov_matern.append(temp.setup(meshi))
 
         self.nlat = len(self._cov_matern)
 
@@ -617,7 +640,7 @@ class LRStateSpaceModel:
                             tdelta_ks, tdelta_A], dtype=jnp.float32)
         return beta, s2e, est_f, x0, Sigma0, est_covList, est_A, tdelta, opt.success
 
-    # %% [Utils] Argmin problem, JAX  (M-step, rescale)
+    # %[Utils] Argmin problem, JAX  (M-step, rescale)
 
     def _minf(self, params, est_covList, T, Omega):
         ks = np.exp(params)  # Stability, add small eps to avoid zeros
@@ -862,21 +885,21 @@ class LRStateSpaceModel:
 
         return flag, msg
 
-    def _buildObservationGrid(self, df, formula):
+    def _buildObservationGrid(self, df, formulas):
 
-        nvar = len(formula)  # numer of the response variable
-        gridList = [grid(df, f) for f in formula]
+        nvar = len(formulas)  # numer of the response variable
+        gridList = [data_preparation(df, f) for f in formulas]
 
         T = [gr.T for gr in gridList]
         points = [gr.points for gr in gridList]
 
         # get dimnesion of each grid
-        ndim = [grid.N for grid in gridList]
-        block = np.hstack((0, np.cumsum(ndim)))
+        pdim = [grid.N for grid in gridList]
+        block_p = np.hstack((0, np.cumsum(pdim)))
 
-        return nvar, points, gridList, ndim, block[-1], block, T
+        return nvar, points, gridList, pdim, block_p[-1], block_p, T
 
-    def _buildDesignMatrix(self, ):
+    def _buildDesignMatrix(self):
 
         Ylist_original = [grid.y for grid in self.gridList]
 
@@ -888,7 +911,7 @@ class LRStateSpaceModel:
         #     Ylist.append(np.log(yi))
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
-        XBeta_list = [grid.X for grid in self.gridList]
+        Xbeta_list = [grid.X for grid in self.gridList]
 
         # points_train = [pt[index, :] for pt, index in zip(points, itrain)]
         # points_test = [pt[index, :] for pt, index in zip(points, itest)]
@@ -899,13 +922,13 @@ class LRStateSpaceModel:
         # Y_test_list = [yi[index, :] for yi, index in zip(Ylist, itest)]
         # Xbeta_test_list = [xi[index, :, :] for xi, index in zip(Xlist, itest)]
 
-        yTrain = jnp.vstack(Ylist)
-        Xbeta_train = block_diag_3D(Xbeta_list)
+        y_train = jnp.vstack(Ylist)
+        Xbeta_train = block_diag_3D(*Xbeta_list)
 
         # Y_test = np.vstack(Y_test_list)
         # Xbeta_test = block_diag_3D(Xbeta_test_list)
 
-        return yTrain, Xbeta_train
+        return y_train, Xbeta_train
 
     def logger(self,
                niter,
@@ -964,3 +987,31 @@ Run time  : Tot: {format_value(time_iter, scalar_decimals)}, Estep: {format_valu
 ------------------------------------------------------------------
 """
         return msg
+    
+
+
+    def print_info(self, msg):
+        print(f"{time.time()} - {msg}")
+    
+    def info(self, verbose=True):
+        
+        # grid information
+        print("------------------------------------------------------------------")
+        print(f"Number of variables: {self.nvar}")
+        if verbose:
+            print(f"List of grids: {len(self.gridList)}")
+            msg = [f"Grid {g.__str__()}" for  g in self.gridList]
+            print("\n".join(msg))
+        
+        # hardware platform infromation 
+        print("------------------------------------------------------------------")
+        print(f"JAX backend: {jax.default_backend()}")
+        print(f"JAX devices: {jax.devices()}")
+
+        print("------------------------------------------------------------------")
+        hardware = getHardware()
+        print(f"Hardware: {hardware}")
+        
+
+
+
