@@ -5,6 +5,8 @@ General utility functions for GEOSSM.
 import numpy as np
 import datetime
 import jax
+import platform
+import psutil
 
 # %% [Utils] key stream
 
