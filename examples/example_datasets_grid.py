@@ -16,6 +16,8 @@ import geossm
 from geossm import data_preparation as grid
 import geossm.datasets as df
 
+from shapely.geometry import Point
+
 
 # %% List all availabel dataset
 
@@ -23,8 +25,11 @@ print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
 
-Agrimonia = df.load_dataset('agrimonia')
+Agrimonia, shape = df.load_dataset('agrimonia')
 print(Agrimonia.columns)
+
+# if you do not want the shapefile associate
+# Agrimonia, _ = df.load_dataset('agrimonia')
 
 # %% From .csv to geopandas
 
