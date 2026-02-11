@@ -35,6 +35,66 @@ from geossm import data_preparation, DesignMatrices
 from geossm import block_diag_3D, getHardware
 
 from shapely.geometry import LineString, Point, Polygon, MultiPoint
+from dataclasses import dataclass, replace
+
+# %% Data class supports
+
+@dataclass
+class FitOptions:
+    max_iter: int = 100
+    tol_relat: float = 1e-3
+    verbose: bool = True
+    dtype: any = jnp.float32
+
+@dataclass
+class Param:
+    name: str
+    value: any
+    fixed: bool = False
+
+    def set(self, new_value):
+        """Update parameter value if not fixed."""
+        if self.fixed:
+            return self
+        return Param(
+            name=self.name,
+            value=jnp.asarray(new_value),
+            fixed=self.fixed,
+        )
+
+    def freeze(self):
+        """Return frozen version of parameter."""
+        return Param(self.name, self.value, True)
+
+    def unfreeze(self):
+        """Return unfrozen version of parameter."""
+        return Param(self.name, self.value, False)
+
+    def __repr__(self):
+        status = "fixed" if self.fixed else "free"
+        shape = getattr(self.value, "shape", None)
+        return f"Param(name='{self.name}', shape={shape}, {status})"
+
+@dataclass
+class ModelParams:
+    beta: Param
+    s2e: Param
+    f: Param
+    A: Param
+    ks: Param
+    x0: Param
+    Sigma0: Param
+
+    def as_dict(self):
+        return {k: getattr(self, k).value for k in self.__dataclass_fields__}
+
+    def free_params(self):
+        return {
+            k: getattr(self, k).value
+            for k in self.__dataclass_fields__
+            if not getattr(self, k).fixed
+        }
+
 
 
 # %% Utilities for the EM algorithm (jax kernel functions)
@@ -375,16 +435,19 @@ class LRStateSpaceModel:
         self.nlat = len(self._cov_matern)
 
         return self
+    
 
-    def fit(self, beta0=None, s2e0=None,
-            f0=None, A0=None, ks0=None, x0=None, Sigma0=None,
-            max_iter=100, tol_relat=1e-3, nstat=[], verbose=True, dtype=jnp.float32,
-            fix_b=False, fix_s2=False, fix_f=False, fix_A=False, fix_ks=False, fix_x0=False, fix_Sigma0=False):
+    def fit(self, params0: ModelParams | None = None, options: FitOptions | None = None):
 
-        # make sure all think are jax.numpy
-        # y_t = jnp.asarray(y_t, dtype=jnp.float32)
-        # Xbeta = jnp.asarray(Xbeta, dtype=jnp.float32)
-        # pdim = jnp.asarray(pdim)
+        # get the global options
+        verbose = options.verbose if options is not None else True
+        max_iter = options.max_iter if options is not None else 100
+        tol_relat = options.tol_relat if options is not None else 1e-3
+        dtype = options.dtype if options is not None else jnp.float32
+
+        # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
+        # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
+        params0 = self._parseParams(params0)
 
         # Get global constants
         nvar = self.nvar  # len(self.pdim)
@@ -408,20 +471,17 @@ class LRStateSpaceModel:
 
         # TODO: add verbose option here to print the initial values of the parameters and the log-likelihood
 
-        # set the initial values
-        est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_A = self._getInitialValues(
+        # Get the initial values
+        est_params = self._getInitialValues(
             y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist()), T)
 
-        est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A = self.updateParams(
-            beta0, s2e0, f0, A0, ks0, x0, Sigma0, fix_b, fix_s2, fix_f, fix_A, fix_ks, fix_x0, fix_Sigma0)
+        # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
+        est_params = self._updateParams(params0, est_params)
 
         # ---- print messages
         if verbose:
-            msg = f"beta:{jnp.round(est_beta,2)} - s2e:{jnp.round(est_s2e,2)} - f:{jnp.round(est_f,2)} - rescale:{jnp.round(est_ks,2)} - A: {jnp.round(est_A.flatten(),2)}"
+            msg = f"beta:{jnp.round(est_params.beta,2)} - s2e:{jnp.round(est_params.s2e,2)} - f:{jnp.round(est_params.f,2)} - rescale:{jnp.round(est_params.ks,2)} - A: {jnp.round(est_params.A.flatten(),2)}"
             print(msg)
-
-        est_vet_par = jnp.hstack(
-            (est_beta.flatten(), est_s2e.flatten(), est_f.flatten(), est_ks.flatten(), est_A.flatten()))
 
         # Flag of the EM convergence
         flag = True
@@ -434,10 +494,11 @@ class LRStateSpaceModel:
         tdelta_iter = 0
         tdelta_Edet = np.zeros(3)
         tdelta_Mdet = np.zeros(3)
+        nstat = [] # list to store the results of each iteration
 
-        it = {'niter': niter, 'beta': est_beta, 's2e': est_s2e, 'f': est_f,
-              'ks': est_ks, 'est_A': est_A.flatten(), 'x0': est_x0.mean(),
-              'S0': jnp.diag(est_Sigma0).mean(), 'logL': logL_cur,
+        it = {'niter': niter, 'beta': est_params.beta, 's2e': est_params.s2e, 'f': est_params.f,
+              'ks': est_params.ks, 'est_A': est_params.A.flatten(), 'x0': est_params.x0.mean(),
+              'S0': jnp.diag(est_params.Sigma0).mean(), 'logL': logL_cur,
               'deltaP': delta_par, 'deltaL': delta_lik, 'relatL': relat_lik,
               'time_tot': tdelta_iter, 'tdelta_E': tdelta_Edet.sum(),
               'tdelta_E_detail': tdelta_Edet, 'tdelta_M': tdelta_Mdet.sum(), 'tdelta_M_detail': tdelta_Mdet}
@@ -457,10 +518,10 @@ class LRStateSpaceModel:
             tStart_iter = time.time()
 
             # ---- build parametrised matrices
-            H = self.buildH_dense(est_A, basis)  # dense
+            H = self.buildH_dense(est_params.A, basis)  # dense
 
             # R, F = buildRF(est_s2e, est_f, pdim, qdim)
-            R, F = self.buildRF_dense(est_s2e, est_f, pdim, qdim)
+            R, F = self.buildRF_dense(est_params.s2e, est_params.f, pdim, qdim)
 
             # Compute the maginal precision matrix
             invQ = []
@@ -484,16 +545,12 @@ class LRStateSpaceModel:
 
             # ---- E step
             y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
-                y_obs, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta)
+                y_obs, R, F, H, Q, est_params.x0, est_params.Sigma0, Xbeta, est_params.beta)
 
             # ---- M step, get the updated parameters
-            update_beta, update_s2e, update_f, update_x0, update_Sigma0, cov_function, update_A, tdelta_Mdet, opt_success = self._M_step(
-                y_obs, y_hat, F, H, Xbeta, points, cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_beta)
-
-            # Update the paramiters after the M step
-            update_ks = jnp.array([cov.rescale for cov in cov_function])
-            update_beta, update_s2e, update_f, update_x0, update_Sigma0, update_ks, update_A = self._updateParams(beta=update_beta, s2e=update_s2e, f=update_f, A=update_A, ks=update_ks, x0=update_x0, Sigma0=update_Sigma0,
-                                                                                                                  fix_b=fix_b, fix_s2=fix_s2, fix_f=fix_f, fix_A=fix_A, fix_ks=fix_ks, fix_x0=fix_x0, fix_Sigma0=fix_Sigma0)
+            update_params, cov_function, opt_success, tdelta_Mdet = self._M_step(
+                y_obs, y_hat, F, H, Xbeta, points, cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_params.beta)
+            
 
             # Stack the vector parameter
             # update_vet_par = jnp.hstack(
@@ -508,19 +565,18 @@ class LRStateSpaceModel:
 
             # Print iteration messages
             if verbose:
-                msg = self.logger(niter, logL_cur, delta_lik, relat_lik, update_beta,
-                                  update_s2e, update_f, update_ks, est_A, est_x0, est_Sigma0, opt_success,  tdelta_iter, tdelta_Edet.sum(), tdelta_Mdet.sum())
+                msg = self.logger(niter, logL_cur, delta_lik, relat_lik, update_params, opt_success, tdelta_iter, tdelta_Edet.sum(), tdelta_Mdet.sum())
 
                 print(msg)
 
             # Update the paramiters to be used in the next EM iteration
-            est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A = update_beta, update_s2e, update_f, update_x0, update_Sigma0, update_ks, update_A
+            est_params = self._updateParams(est_params, update_params)
             logL_prev = logL_cur
 
             # append the results
-            it = {'niter': niter, 'beta': est_beta, 's2e': est_s2e, 'f': est_f,
-                  'ks': est_ks, 'est_A': est_A.flatten(), 'x0': est_x0.mean(),
-                  'S0': jnp.diag(est_Sigma0).mean(), 'logL': logL_cur,
+            it = {'niter': niter, 'beta': est_params.beta, 's2e': est_params.s2e, 'f': est_params.f,
+                  'ks': est_params.ks, 'est_A': est_params.A.flatten(), 'x0': est_params.x0.mean(),
+                  'S0': jnp.diag(est_params.Sigma0).mean(), 'logL': logL_cur,
                   'deltaP': delta_par, 'deltaL': delta_lik, 'relatL': relat_lik,
                   'time_tot': tdelta_iter, 'tdelta_E': tdelta_Edet.sum(),
                   'tdelta_E_detail': tdelta_Edet, 'tdelta_M': tdelta_Mdet.sum(), 'tdelta_M_detail': tdelta_Mdet}
@@ -531,7 +587,7 @@ class LRStateSpaceModel:
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
 
-        return est_beta, est_s2e, est_f, est_x0, est_Sigma0, cov_function, est_A, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00
+        return est_params, cov_function, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00
 
     @property
     def cov_function(self):
@@ -638,7 +694,12 @@ class LRStateSpaceModel:
 
         tdelta = jnp.array([tdelta_beta, tdelta_s2e, tdelta_f,
                             tdelta_ks, tdelta_A], dtype=jnp.float32)
-        return beta, s2e, est_f, x0, Sigma0, est_covList, est_A, tdelta, opt.success
+        
+        est_ks = jnp.exp(opt.x)
+
+        update_params = self._createParams(beta, s2e, est_f, x0, Sigma0, est_ks, est_A)
+
+        return update_params, est_covList, opt.success, tdelta
 
     # %[Utils] Argmin problem, JAX  (M-step, rescale)
 
@@ -689,31 +750,64 @@ class LRStateSpaceModel:
 
         return logdet
 
-    def _updateParams(self, beta=None, s2e=None, f=None, A=None, ks=None, x0=None, Sigma0=None, fix_b=False, fix_s2=False, fix_f=False, fix_A=False, fix_ks=False, fix_x0=False, fix_Sigma0=False):
+    
+    def _createParams(self, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A):
+        est_params = ModelParams(
+            beta=Param("beta", est_beta),
+            s2e=Param("s2e", est_s2e),
+            f=Param("f", est_f),
+            A=Param("A", est_A),
+            ks=Param("ks", est_ks),
+            x0=Param("x0", est_x0),
+            Sigma0=Param("Sigma0", est_Sigma0))   
+        
+        return est_params
+       
+    
+    def _parseParams(self, params0: ModelParams | None):
+        est_params = self._updateParams(params0, ModelParams())
+        
+        params0 if params0 is not None else ModelParams(
+            beta=Param("beta", None),
+            s2e=Param("s2e", None),
+            f=Param("f", None),
+            A=Param("A", None),
+            ks=Param("ks", None),
+            x0=Param("x0", None),
+            Sigma0=Param("Sigma0", None)
+        )
+        return est_params
+        
+    def _updateParams(self, params: ModelParams, updates: ModelParams) -> ModelParams:
+        """
+        Update parameters using values from `updates`,
+        respecting the `fixed` flags.
+        """
 
-        if beta is not None and fix_b == False:
-            est_beta = jnp.asarray(beta)
+        updated_fields = {}
 
-        if s2e is not None and fix_s2 == False:
-            est_s2e = jnp.asarray(s2e)
+        for name in params.__dataclass_fields__:
+            current_param = getattr(params, name)
+            new_param = getattr(updates, name)
 
-        if f is not None and fix_f == False:
-            est_f = jnp.asarray(f)
-        if A is not None and fix_A == False:
-            est_A = jnp.asarray(A)
+            if current_param.fixed:
+                # Keep original parameter unchanged
+                updated_fields[name] = current_param
+            else:
+                # Update value but preserve fixed flag and name
+                updated_fields[name] = replace(
+                    current_param,
+                    value=jnp.asarray(new_param.value),
+                )
 
-        if ks is not None and fix_ks == False:
-            est_ks = jnp.asarray(ks)
-            for fcov, ksi in zip(self.cov_function, est_ks):
+        new_params = ModelParams(**updated_fields)
+
+        # Special handling for ks → update covariance scaling
+        if not new_params.ks.fixed:
+            for fcov, ksi in zip(self.cov_function, new_params.ks.value):
                 fcov.rescale = ksi
 
-        if x0 is not None and fix_x0 == False:
-            est_x0 = jnp.asarray(x0)
-        if Sigma0 is not None and fix_Sigma0 == False:
-            est_Sigma0 = jnp.asarray(Sigma0)
-
-        # return the updated parameters
-        return est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A
+        return new_params
 
     @partial(jax.jit, static_argnums=(2, 3, 4))
     def _getInitialValues(self, y_t, Xbeta, block_p, block_q, T):
@@ -793,8 +887,9 @@ class LRStateSpaceModel:
         # est_Sigma0: Initial state covariance
         est_Sigma0 = 10 * jnp.eye(block_q[-1])
 
-        return est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A
-
+        # Create the est_params object with the initial values
+        est_params = self._createParams(est_beta, est_s2, est_f, est_x0, est_Sigma0, None, est_A)
+        return est_params
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
         nvar = len(points)
@@ -992,7 +1087,7 @@ Run time  : Tot: {format_value(time_iter, scalar_decimals)}, Estep: {format_valu
 
         flag = False
         if hasattr(self, '_cov_matern'):
-            qdim = [len(cov.n_inner_points) for cov in self._cov_matern]
+            qdim = [cov.fem_solver.n_inner_points for cov in self._cov_matern]
             covfs = [str(cov) for cov in self._cov_matern]
             nlat = self.nlat
             flag = True
