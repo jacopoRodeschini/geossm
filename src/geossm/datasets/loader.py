@@ -22,7 +22,7 @@ def load_dataset(name: str, return_geometry: bool = True):
 
     # ---- Load tabular data ----
     with base_data.joinpath(dataset["data"]).open("rb") as f:
-        df = pd.read_csv(f)
+        df = pd.read_csv(f, low_memory=False)
 
     if "geometry" in dataset:
         shp_path = base_shape.joinpath(f"{dataset['geometry']}/{dataset['geometry']}.shp")
