@@ -115,9 +115,22 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
 
 class FEMSolver:
-    def __init__(self, mesh, domain=None):
+    def __init__(self, meshio_obj: meshio.Mesh, domain=None):
 
         # Validate inputs
+        mesh = None
+        try:
+            if meshio_obj is not None:
+                if not isinstance(meshio_obj, meshio.Mesh):
+                    raise TypeError(
+                        f"meshio_obj must be meshio.Mesh, got {type(meshio_obj).__name__}"
+                    )
+                # Convert to MFEM if needed (or keep as meshio)
+                mesh = meshio_to_mfem_mesh(meshio_obj)
+        except Exception as e:
+            raise RuntimeError(f"Error loading mesh: {str(e)}") from e
+
+
         if not hasattr(mesh, 'Dimension'):
             raise TypeError(
                 f"mesh must be an mfem.Mesh object, got {type(mesh).__name__}"
@@ -817,16 +830,13 @@ class spdeAppoxCov(Matern):
                     raise TypeError(
                         f"mesh_obj must be meshio.Mesh, got {type(mesh_obj)}"
                     )
-                self._meshIO = mesh_obj
-                # Convert to MFEM if needed (or keep as meshio)
-                self._mesh = meshio_to_mfem_mesh(mesh_obj)
         except Exception as e:
             raise RuntimeError(f"Error loading mesh: {str(e)}") from e
 
         # Initialize FEM solver
         try:
-
-            self._fem_solver = FEMSolver(self._mesh, domain=self._domain)
+            self._meshIO = mesh_obj  # Store the mesh for potential reinitialization
+            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain)
 
         except Exception as e:
             raise RuntimeError(
