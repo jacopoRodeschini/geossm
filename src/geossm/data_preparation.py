@@ -145,7 +145,7 @@ class data_preparation:
 
         # Objcet geometry metrics attributes
         self.box = self.geodf.total_bounds
-        self.geometry_type = self.geodf.geom_type
+        self.geometry_type = self.geodf.geom_type.unique()
         self.crs = self.geodf.crs
 
         # Design matrix
@@ -261,15 +261,22 @@ class data_preparation:
 
     def _getPoints(self, geodf, geometry_id):
 
-        # pojected geometry to_crs() for accurete results
-        uni, idx = np.unique(geodf[geometry_id], return_index=True)
+        if not 'geometry' in geodf:
+            raise ValueError(f"Geometry column not found in the dataset")
+        
+        gdf_metric = geodf.to_crs(geodf.estimate_utm_crs())
 
-        # Extract the centroid by the geometry
-        centroid = geodf.iloc[idx].geometry.centroid
-
-        # Create a point vector (x, y)
-        return np.stack((centroid.x, centroid.y), axis=1)
-
+        centroids = (
+            gdf_metric.geometry
+            .drop_duplicates()
+            .centroid
+            .to_crs(geodf.crs)
+        )
+        
+        return np.column_stack([centroids.x, centroids.y])
+                
+       
+            
     def _computeDistance(self, points, pt=None, distance='euclidean'):
 
         if pt is None:
