@@ -283,6 +283,44 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
     jax.block_until_ready(x_T)
     return x_T, P_T, P_T_1
 
+@jit
+def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta): 
+    """ JIT-compiled kernel for computing expected values needed for M-step in EM. This is a straightforward implementation that can be optimized further if needed. """
+    
+    # Slices of the smoothed states
+    # x_t terms range from t=1 to T
+    # x_{t-1} terms range from t=0 to T-1
+    x_t_slice = x_T[:, 1:]      # Shape: [q, T]
+    x_tm1_slice = x_T[:, :-1]   # Shape: [q, T]
+
+    # --- 1. Compute predicted observations (y_hat) ---
+    # The term Xbeta @ beta can be computed efficiently using einsum.
+    # y_hat_t = Xbeta_t @ beta + H @ x_t
+    y_hat_covariate_term = jnp.einsum('pkt,k->pt', Xbeta, beta)
+    y_hat_state_term = H @ x_t_slice
+    y_hat = y_hat_covariate_term + y_hat_state_term
+
+    # --- 2. Compute sufficient statistics (S11, S10, S00) ---
+    # E[sum(x x')] = sum(E[x]E[x]' + Cov(x)) = sum(x_T x_T') + sum(P_T)
+    # The sum of outer products (x @ x') can be vectorized as X @ X.T
+
+    # S11 = E[sum_{t=1..T} x_t x_t']
+    # We need sums over t=1 to T
+    S11 = (x_t_slice @ x_t_slice.T) + jnp.sum(P_T[:, :, 1:], axis=2)
+
+    # S00 = E[sum_{t=1..T} x_{t-1} x_{t-1}']
+    # We need sums over t-1=0 to T-1
+    S00 = (x_tm1_slice @ x_tm1_slice.T) + jnp.sum(P_T[:, :, :-1], axis=2)
+
+    # S10 = E[sum_{t=1..T} x_t x_{t-1}']
+    # P_T_1 is Cov(x_t, x_{t-1}), so the sum starts from t=1
+    S10 = (x_t_slice @ x_tm1_slice.T) + jnp.sum(P_T_1[:, :, 1:], axis=2)
+
+    jax.block_until_ready(S00)
+    return y_hat, S11, S10, S00
+        
+
+
 # %% State Space Model Class
 class StateSpaceModel:
     """
@@ -490,10 +528,10 @@ class StateSpaceModel:
         if Q_shape != (q, q):
             messages.append(f"Q must be shape ({q},{q}), got {Q_shape}.")
             flag = False
-        else:
-            if not is_pos_semidef(self.Q):
-                messages.append("Q must be symmetric positive semidefinite.")
-                flag = False
+        # else:
+        #    if not is_pos_semidef(self.Q):
+        #        messages.append("Q must be symmetric positive semidefinite.")
+        #        flag = False
 
         # x0: (q,)
         x0_shape = shape_str(self.x0)
@@ -529,16 +567,10 @@ class StateSpaceModel:
 
         return flag, "\n".join(messages)
 
-    @jit
     def estimate(self, y_t) -> tuple:
 
-        # run the filter
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tdelta_filter = self.filter(
-            y_t)
-
         # run the smoother
-        x_T, P_T, P_T_1, tdelta_smoother = self.smoother(
-            x_t, P_t, K, x_t_1, P_t_1, invP_t_1)
+        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t)
 
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
@@ -567,7 +599,7 @@ class StateSpaceModel:
             time_expected=time_expected
         )"""
 
-        return y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
+        return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
     def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
         """
@@ -609,48 +641,19 @@ class StateSpaceModel:
         x_T, P_T, P_T_1 = _smoother_kernelJAX(
             self.H, self.F, x_t, P_t, K, x_t_1, P_t_1, invP_t_1)
         
-        tDelta = time.time() - tStart
+        td_smoother = time.time() - tStart
 
-        return (x_T, P_T, P_T_1, tDelta)
+        return (x_T, P_T, P_T_1, logL, td_filter, td_smoother)
 
-    @jit
+
     def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
 
         # Note: Type conversions are omitted for clarity. It's often better
         # to ensure inputs have the correct dtype before calling a JIT-compiled function.
-
-        # Slices of the smoothed states
-        # x_t terms range from t=1 to T
-        # x_{t-1} terms range from t=0 to T-1
-        x_t_slice = x_T[:, 1:]      # Shape: [q, T]
-        x_tm1_slice = x_T[:, :-1]   # Shape: [q, T]
-
-        # --- 1. Compute predicted observations (y_hat) ---
-        # The term Xbeta @ beta can be computed efficiently using einsum.
-        # y_hat_t = Xbeta_t @ beta + H @ x_t
-        y_hat_covariate_term = jnp.einsum('pkt,k->pt', self.Xbeta, self.beta)
-        y_hat_state_term = self.H @ x_t_slice
-        y_hat = y_hat_covariate_term + y_hat_state_term
-
-        # --- 2. Compute sufficient statistics (S11, S10, S00) ---
-        # E[sum(x x')] = sum(E[x]E[x]' + Cov(x)) = sum(x_T x_T') + sum(P_T)
-        # The sum of outer products (x @ x') can be vectorized as X @ X.T
-
-        # S11 = E[sum_{t=1..T} x_t x_t']
-        # We need sums over t=1 to T
         tStart = time.time()
 
-        S11 = (x_t_slice @ x_t_slice.T) + jnp.sum(P_T[:, :, 1:], axis=2)
+        y_hat, S11, S10, S00 = _compute_expected_values_kernelJAX(self.H, x_T, P_T, P_T_1, self.Xbeta, self.beta)
 
-        # S00 = E[sum_{t=1..T} x_{t-1} x_{t-1}']
-        # We need sums over t-1=0 to T-1
-        S00 = (x_tm1_slice @ x_tm1_slice.T) + jnp.sum(P_T[:, :, :-1], axis=2)
-
-        # S10 = E[sum_{t=1..T} x_t x_{t-1}']
-        # P_T_1 is Cov(x_t, x_{t-1}), so the sum starts from t=1
-        S10 = (x_t_slice @ x_tm1_slice.T) + jnp.sum(P_T_1[:, :, 1:], axis=2)
-
-        jax.block_until_ready(S10)
         tDelta = time.time() - tStart
 
         return (y_hat, S11, S10, S00, tDelta)
