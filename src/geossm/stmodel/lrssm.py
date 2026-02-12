@@ -96,10 +96,88 @@ class ModelParams:
         }
 
 
-
-# %% Utilities for the EM algorithm (jax kernel functions)
 # %% [Utils] Updating formula, JAX (M-Step)
 
+@partial(jax.jit, static_argnums=(2, 3))
+def _getInitialValues(y_t, Xbeta, block_p, block_q):
+    """
+    Computes initial parameter values for a model using JAX.
+
+    Args:
+        key (jax.random.PRNGKey): The random key for any stochastic operations.
+        y_t (jnp.ndarray): The target variable array of shape (ni, T).
+        Xbeta (jnp.ndarray): The feature array of shape (ni, b, T).
+        block_p (tuple or list): Static list defining blocks for variables.
+        block_q (tuple or list): Static list defining blocks for latent factors.
+        T (int): Static integer for the number of time steps.
+
+    Returns:
+        A tuple of estimated initial values:
+        (est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A)
+    """
+    nvar = len(block_p) - 1
+    nlat = len(block_q) - 1  # consider also the alpha
+
+    # --- beta (OLS) ---
+
+    # In JAX, arrays are immutable. Use jnp.where to replace nan/inf values
+    # instead of in-place assignment.
+    Yt_clean = jnp.nan_to_num(y_t)
+
+    # Reshape X to (ni, T, b)
+    Xr = Xbeta.transpose(0, 2, 1)  # (ni, T, b)
+
+    # Compute Xs and ys efficiently using Einstein summation convention
+    # This part is identical in syntax to NumPy.
+    Xs = jnp.einsum('bij,bik->jk', Xr, Xr)
+    ys = jnp.einsum('bij,bi->j', Xr, Yt_clean)
+
+    # Solve for b using jnp.linalg.solve for numerical stability
+    est_beta = jnp.linalg.solve(Xs, ys)
+
+    # --- Mean variance of the residuals ---
+    # Vectorize the residual calculation instead of using a Python loop.
+    # 'ibt,b->it' means: multiply (ni, b, T) with (b,) -> result (ni, T)
+    predicted_y = jnp.einsum('ibt,b->it', Xbeta, est_beta)
+    res = Yt_clean - predicted_y
+
+    # --- s2 measurement error [1 * p] ---
+    # A Python loop over static values (from block_p) is acceptable and will
+    # be "unrolled" by the JIT compiler.
+    var_res_list = []
+    for p in range(nvar):
+        # Slicing and computing variance
+        var_res_list.append(jnp.var(res[block_p[p]:block_p[p+1]]))
+
+    var_res = jnp.stack(var_res_list)
+    est_s2 = var_res * 0.2
+
+    # --- est_A (Loading Matrix) ---
+    # Create the matrix without loops using JAX's functional update syntax.
+    diag_vals = jnp.sqrt(var_res * 0.8)
+    diag_size = min(nvar, nlat)
+    # Create a zero matrix and set the diagonal elements
+    est_A = jnp.zeros((nvar, nlat))
+    est_A = est_A.at[jnp.arange(diag_size), jnp.arange(
+        diag_size)].set(diag_vals[:diag_size])
+
+    # --- Random Initial Values ---
+    # JAX requires explicit handling of random number keys.
+    # Split the main key for each separate random operation.
+    # key, f_key = jax.random.split(key)
+
+    # est_f: Sorted initial values
+    # rand_vals = jax.random.uniform(f_key, shape=(nlat,), minval=0.8, maxval=0.9)
+    est_f = jnp.repeat(0.8, nlat)  # jnp.flip(jnp.sort(rand_vals))
+
+    # est_x0: Initial state
+    est_x0 = jnp.zeros((block_q[-1],))
+
+    # est_Sigma0: Initial state covariance
+    est_Sigma0 = 10 * jnp.eye(block_q[-1])
+    
+    
+    return est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A
 
 @partial(jit, static_argnames=['b'])
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
@@ -407,7 +485,11 @@ class LRStateSpaceModel:
         if flag:
             raise ValueError(msg)
         else:
-            self.domain = self._setDomain(domain)
+            self._domain = self._setDomain(domain)
+
+    @property
+    def domain(self):
+        return self._domain 
 
     def setup(self, mesh_obj: list, domain: list = None):
         
@@ -452,36 +534,36 @@ class LRStateSpaceModel:
         # Get global constants
         nvar = self.nvar  # len(self.pdim)
         nlat = self.nlat
-        cov_function = self.cov_function
+        # cov_function = self.cov_function
         pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
         block_p = jnp.asarray(self.block_p, dtype=jnp.int32)
 
         # Get the observed data
-        y_obs = jnp.asarray(self.yTrain, dtype=dtype)
+        y_obs = jnp.asarray(self.y_train, dtype=dtype)
         Xbeta = jnp.asarray(self.Xbeta_train, dtype=dtype)
+
         points = self.points
         p, T = y_obs.shape
 
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
-            [cov.n_inner_points for cov in cov_function], dtype=jnp.int32)
+            [cov.fem_solver.n_inner_points for cov in self.cov_function], dtype=jnp.int32)
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
-
-        q = jnp.sum(qdim)
 
         # TODO: add verbose option here to print the initial values of the parameters and the log-likelihood
 
         # Get the initial values
-        est_params = self._getInitialValues(
-            y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist()), T)
+        box = [cv.fem_solver.box for cv in self.cov_function]
+        
+        est_ks = [jnp.sqrt(8*1) / ((jnp.abs(bx[0] - bx[1])).min() / 3) for bx in box]
+       
+        est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A = _getInitialValues(
+            y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist()))
+        
+        est_params = self._createParams(est_beta, est_s2, est_f, est_x0, est_Sigma0, est_ks, est_A)
 
         # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
         est_params = self._updateParams(params0, est_params)
-
-        # ---- print messages
-        if verbose:
-            msg = f"beta:{jnp.round(est_params.beta,2)} - s2e:{jnp.round(est_params.s2e,2)} - f:{jnp.round(est_params.f,2)} - rescale:{jnp.round(est_params.ks,2)} - A: {jnp.round(est_params.A.flatten(),2)}"
-            print(msg)
 
         # Flag of the EM convergence
         flag = True
@@ -496,17 +578,16 @@ class LRStateSpaceModel:
         tdelta_Mdet = np.zeros(3)
         nstat = [] # list to store the results of each iteration
 
-        it = {'niter': niter, 'beta': est_params.beta, 's2e': est_params.s2e, 'f': est_params.f,
-              'ks': est_params.ks, 'est_A': est_params.A.flatten(), 'x0': est_params.x0.mean(),
-              'S0': jnp.diag(est_params.Sigma0).mean(), 'logL': logL_cur,
-              'deltaP': delta_par, 'deltaL': delta_lik, 'relatL': relat_lik,
-              'time_tot': tdelta_iter, 'tdelta_E': tdelta_Edet.sum(),
-              'tdelta_E_detail': tdelta_Edet, 'tdelta_M': tdelta_Mdet.sum(), 'tdelta_M_detail': tdelta_Mdet}
-
-        nstat.append(it)
+        # Log the initial state before starting the EM iterations
+        nstat = self._log_iteration(nstat, niter, est_params, 0, logL_cur, delta_par, delta_lik, relat_lik, 
+                                    tdelta_iter, tdelta_Edet, tdelta_Mdet)
+        
+        if verbose:
+            msg = self.logger(nstat[-1])
+            print(msg)
 
         # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(points, cov_function)
+        basis = self._buildBasis_list(points, self.cov_function)
         Phi = self._buildH_dense(
             jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
 
@@ -518,18 +599,18 @@ class LRStateSpaceModel:
             tStart_iter = time.time()
 
             # ---- build parametrised matrices
-            H = self.buildH_dense(est_params.A, basis)  # dense
+            H = self._buildH_dense(est_params.A.value, basis)  # dense
 
             # R, F = buildRF(est_s2e, est_f, pdim, qdim)
-            R, F = self.buildRF_dense(est_params.s2e, est_params.f, pdim, qdim)
+            R, F = self._buildRF_dense(est_params.s2e.value, est_params.f.value, pdim, qdim)
 
             # Compute the maginal precision matrix
             invQ = []
-            for fcov in cov_function:
+            for fcov in self.cov_function:
                 invQi = fcov.precision()
 
                 # index of the inner points (i.e. the points of the latent domain)
-                inx = fcov.inner
+                inx = fcov.fem_solver.inner
                 Q_11 = invQi[inx, :][:, inx]
                 Q_12 = invQi[inx, :][:, ~inx]
                 Q_22 = invQi[~inx, :][:, ~inx]
@@ -544,18 +625,13 @@ class LRStateSpaceModel:
                 *[jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32)) for mt in invQ])
 
             # ---- E step
-            y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
-                y_obs, R, F, H, Q, est_params.x0, est_params.Sigma0, Xbeta, est_params.beta)
+            y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
+                y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
 
             # ---- M step, get the updated parameters
             update_params, cov_function, opt_success, tdelta_Mdet = self._M_step(
                 y_obs, y_hat, F, H, Xbeta, points, cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_params.beta)
             
-
-            # Stack the vector parameter
-            # update_vet_par = jnp.hstack(
-            #     (update_beta.flatten(), update_s2e.flatten(), update_f.flatten(), update_ks.flatten(), update_A.flatten()))
-
             # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
             delta_lik = logL_cur - logL_prev
             relat_lik = jnp.abs(delta_lik / logL_prev)
@@ -563,32 +639,25 @@ class LRStateSpaceModel:
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Print iteration messages
-            if verbose:
-                msg = self.logger(niter, logL_cur, delta_lik, relat_lik, update_params, opt_success, tdelta_iter, tdelta_Edet.sum(), tdelta_Mdet.sum())
-
-                print(msg)
-
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
             logL_prev = logL_cur
 
             # append the results
-            it = {'niter': niter, 'beta': est_params.beta, 's2e': est_params.s2e, 'f': est_params.f,
-                  'ks': est_params.ks, 'est_A': est_params.A.flatten(), 'x0': est_params.x0.mean(),
-                  'S0': jnp.diag(est_params.Sigma0).mean(), 'logL': logL_cur,
-                  'deltaP': delta_par, 'deltaL': delta_lik, 'relatL': relat_lik,
-                  'time_tot': tdelta_iter, 'tdelta_E': tdelta_Edet.sum(),
-                  'tdelta_E_detail': tdelta_Edet, 'tdelta_M': tdelta_Mdet.sum(), 'tdelta_M_detail': tdelta_Mdet}
-
-            nstat.append(it)
+            nstat = self._log_iteration(nstat, niter, est_params, opt_success, logL_cur, delta_par, delta_lik, relat_lik, 
+                                    tdelta_iter, tdelta_Edet, tdelta_Mdet)
+            
+            # print the results of the iteration
+            if verbose:
+                msg = self.logger(nstat[-1])
+                print(msg)
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
 
-        return est_params, cov_function, nstat, y_hat, x_T, P_T, P_T_1, S11, S10, S00
-
+        return est_params, y_hat, x_T, P_T, cov_function, nstat
+    
     @property
     def cov_function(self):
         return self._cov_matern
@@ -601,16 +670,16 @@ class LRStateSpaceModel:
 
         # Create the SSM object with the current parameters
         ssmodel = StateSpaceModel(
-            F=F, H=H, Q=Q, R=R, Xbeta=Xbeta, beta=est_beta, x0=est_x0, Sigma0=est_Sigma0)
+            H, R, F, Q, Xbeta=Xbeta, beta=est_beta, x0=est_x0, Sigma0=est_Sigma0)
 
         # Run the Kalman filter and smoother to get the expected values of the latent factors and the log-likelihood
-        y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation = ssmodel.estiamte(
+        y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation = ssmodel.estimate(
             y_t)
 
         tdelta = np.array([tdelta_filter, tdelta_smoother,
                           tdelta_expectation], dtype=jnp.float32)
 
-        return y_hat, x_t, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta
+        return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta
 
     def _M_step(self, y_t, y_hat, F, H, Xbeta, points, est_covList, block_p, block_q, x_T,
                 P_T, S11, S10, S00, Phi, est_beta):
@@ -765,18 +834,16 @@ class LRStateSpaceModel:
        
     
     def _parseParams(self, params0: ModelParams | None):
-        est_params = self._updateParams(params0, ModelParams())
         
-        params0 if params0 is not None else ModelParams(
+        return params0 if params0 is not None else ModelParams(
             beta=Param("beta", None),
             s2e=Param("s2e", None),
             f=Param("f", None),
             A=Param("A", None),
             ks=Param("ks", None),
             x0=Param("x0", None),
-            Sigma0=Param("Sigma0", None)
-        )
-        return est_params
+            Sigma0=Param("Sigma0", None))
+    
         
     def _updateParams(self, params: ModelParams, updates: ModelParams) -> ModelParams:
         """
@@ -802,94 +869,13 @@ class LRStateSpaceModel:
 
         new_params = ModelParams(**updated_fields)
 
-        # Special handling for ks → update covariance scaling
+        # Special handling for ks update covariance scaling
         if not new_params.ks.fixed:
             for fcov, ksi in zip(self.cov_function, new_params.ks.value):
                 fcov.rescale = ksi
 
         return new_params
-
-    @partial(jax.jit, static_argnums=(2, 3, 4))
-    def _getInitialValues(self, y_t, Xbeta, block_p, block_q, T):
-        """
-        Computes initial parameter values for a model using JAX.
-
-        Args:
-            key (jax.random.PRNGKey): The random key for any stochastic operations.
-            y_t (jnp.ndarray): The target variable array of shape (ni, T).
-            Xbeta (jnp.ndarray): The feature array of shape (ni, b, T).
-            block_p (tuple or list): Static list defining blocks for variables.
-            block_q (tuple or list): Static list defining blocks for latent factors.
-            T (int): Static integer for the number of time steps.
-
-        Returns:
-            A tuple of estimated initial values:
-            (est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A)
-        """
-        nvar = len(block_p) - 1
-        nlat = len(block_q) - 1  # consider also the alpha
-
-        # --- beta (OLS) ---
-
-        # In JAX, arrays are immutable. Use jnp.where to replace nan/inf values
-        # instead of in-place assignment.
-        Yt_clean = jnp.nan_to_num(y_t)
-
-        # Reshape X to (ni, T, b)
-        Xr = Xbeta.transpose(0, 2, 1)  # (ni, T, b)
-
-        # Compute Xs and ys efficiently using Einstein summation convention
-        # This part is identical in syntax to NumPy.
-        Xs = jnp.einsum('bij,bik->jk', Xr, Xr)
-        ys = jnp.einsum('bij,bi->j', Xr, Yt_clean)
-
-        # Solve for b using jnp.linalg.solve for numerical stability
-        est_beta = jnp.linalg.solve(Xs, ys)
-
-        # --- Mean variance of the residuals ---
-        # Vectorize the residual calculation instead of using a Python loop.
-        # 'ibt,b->it' means: multiply (ni, b, T) with (b,) -> result (ni, T)
-        predicted_y = jnp.einsum('ibt,b->it', Xbeta, est_beta)
-        res = Yt_clean - predicted_y
-
-        # --- s2 measurement error [1 * p] ---
-        # A Python loop over static values (from block_p) is acceptable and will
-        # be "unrolled" by the JIT compiler.
-        var_res_list = []
-        for p in range(nvar):
-            # Slicing and computing variance
-            var_res_list.append(jnp.var(res[block_p[p]:block_p[p+1]]))
-
-        var_res = jnp.stack(var_res_list)
-        est_s2 = var_res * 0.2
-
-        # --- est_A (Loading Matrix) ---
-        # Create the matrix without loops using JAX's functional update syntax.
-        diag_vals = jnp.sqrt(var_res * 0.8)
-        diag_size = min(nvar, nlat)
-        # Create a zero matrix and set the diagonal elements
-        est_A = jnp.zeros((nvar, nlat))
-        est_A = est_A.at[jnp.arange(diag_size), jnp.arange(
-            diag_size)].set(diag_vals[:diag_size])
-
-        # --- Random Initial Values ---
-        # JAX requires explicit handling of random number keys.
-        # Split the main key for each separate random operation.
-        # key, f_key = jax.random.split(key)
-
-        # est_f: Sorted initial values
-        # rand_vals = jax.random.uniform(f_key, shape=(nlat,), minval=0.8, maxval=0.9)
-        est_f = jnp.repeat(0.8, nlat)  # jnp.flip(jnp.sort(rand_vals))
-
-        # est_x0: Initial state
-        est_x0 = jnp.zeros((block_q[-1],))
-
-        # est_Sigma0: Initial state covariance
-        est_Sigma0 = 10 * jnp.eye(block_q[-1])
-
-        # Create the est_params object with the initial values
-        est_params = self._createParams(est_beta, est_s2, est_f, est_x0, est_Sigma0, None, est_A)
-        return est_params
+    
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
         nvar = len(points)
@@ -903,10 +889,10 @@ class LRStateSpaceModel:
             for q in range(nlat):
                 # This function works iif the cov class is already defined
                 # Compute basis between vertex and gird_obs point [m x q]
-                countij, notfindInxij, hij = hmesh[q]._compute_basis(
+                countij, notfindInxij, hij = hmesh[q].fem_solver._compute_basis(
                     points[p])
 
-                hij = self.normalize_rows_sparse(hij[:, hmesh[q].inner])
+                hij = self._normalize_rows_sparse(hij[:, hmesh[q].fem_solver.inner])
                 notfindInxRow.append(notfindInxij)
 
                 # conver into coo format
@@ -919,6 +905,33 @@ class LRStateSpaceModel:
             basis.append(hrow)  # [n_i x qsize ]
 
         return basis
+    
+    def _buildRF_dense(self, s2error, flatent, pdim, qdim):
+        """
+        Builds dense diagonal matrices in JAX.
+    
+        This is the recommended approach for a direct, easy-to-use replacement.
+    
+        Args:
+            s2error: 1D array of error variances.
+            flatent: 1D array of latent factor values.
+            pdim: Tuple of block dimensions for s2error (static for JIT).
+            qdim: Tuple of block dimensions for flatent (static for JIT).
+    
+        Returns:
+            A tuple of two dense JAX diagonal matrices.
+        """
+        # 1. Create the full diagonal vector by repeating elements
+        rdiag_vec = jnp.repeat(s2error, repeats=jnp.array(pdim)
+                               ).astype(dtype=jnp.float32)
+        fdiag_vec = jnp.repeat(flatent, repeats=jnp.array(qdim)
+                               ).astype(dtype=jnp.float32)
+    
+        # 2. Create the dense diagonal matrices from the vectors
+        rdiag_matrix = jnp.diag(rdiag_vec)
+        fdiag_matrix = jnp.diag(fdiag_vec)
+    
+        return rdiag_matrix, fdiag_matrix
 
     def _buildH_dense(self, A, basis):
 
@@ -1026,21 +1039,7 @@ class LRStateSpaceModel:
         return y_train, Xbeta_train
 
     def logger(self,
-               niter,
-               logL_cur,
-               delta_lik,
-               relat_lik,
-               update_beta,
-               update_s2e,
-               update_f,
-               update_ks,
-               est_A,
-               est_x0,
-               est_Sigma0,
-               opt_success,
-               time_iter,
-               time_Estep,
-               time_Mstep,
+               stats,
                beta_decimals=2,
                scalar_decimals=2,
                relat_decimals=5):
@@ -1067,21 +1066,62 @@ class LRStateSpaceModel:
 
         msg = f"""
 ------------------------------------------------------------------
-Iteration : {niter}
-logL      : {format_value(logL_cur, scalar_decimals)}
-delta L   : {format_value(delta_lik, scalar_decimals)}
-relat L   : {format_value(relat_lik, relat_decimals)}
-beta      : {format_value(update_beta, beta_decimals)}
-s2e       : {format_value(update_s2e, scalar_decimals)}
-f param   : {format_value(update_f, scalar_decimals)}
-rescale   : {format_value(update_ks, scalar_decimals)} (Status: {opt_success})
-A (flat)  : {format_value(np.asarray(est_A).flatten(), scalar_decimals)}
-x0        : {format_value(est_x0.mean(), scalar_decimals)}
-S0 diag   : {format_value(jnp.diag(est_Sigma0).mean(), scalar_decimals)}
-Run time  : Tot: {format_value(time_iter, scalar_decimals)}, Estep: {format_value(time_Estep, scalar_decimals)}, Mstep: {format_value(time_Mstep, scalar_decimals)}
+Iteration : {stats['niter']}
+logL      : {format_value(stats['logL'], scalar_decimals)}
+delta L   : {format_value(stats['deltaL'], scalar_decimals)}
+relat L   : {format_value(stats['relatL'], relat_decimals)}
+beta      : {format_value(stats['beta'], beta_decimals)}
+s2e       : {format_value(stats['s2e'], scalar_decimals)}
+f param   : {format_value(stats['f'], scalar_decimals)}
+rescale   : {format_value(stats['ks'], scalar_decimals)} (Status: {stats['opt_success']})
+A (flat)  : {format_value(np.asarray(stats['A']).flatten(), scalar_decimals)}
+x0        : {format_value(stats['x0'], scalar_decimals)}
+S0 diag   : {format_value(stats['Sigma0'], scalar_decimals)}
+Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {format_value(stats['tdelta_E'], scalar_decimals)}, Mstep: {format_value(stats['tdelta_M'], scalar_decimals)}
 ------------------------------------------------------------------
 """
         return msg
+    
+    def _log_iteration(self, history: list, niter: int,
+        params: ModelParams,
+        opt_success: bool,
+        logL_cur,
+        delta_par,
+        delta_lik,
+        relat_lik,
+        tdelta_iter,
+        tdelta_Edet,
+        tdelta_Mdet,
+    ):
+        """
+        Create iteration dictionary and append to history list.
+        """
+
+        it = {
+            "niter": niter,
+            "beta": params.beta.value,
+            "s2e": params.s2e.value,
+            "f": params.f.value,
+            "ks": params.ks.value,
+            "opt_success": opt_success,
+            "A": params.A.value.flatten(),
+            "x0": params.x0.value.mean(),
+            "Sigma0": jnp.diag(params.Sigma0.value).mean(),
+            "logL": logL_cur,
+            "deltaP": delta_par,
+            "deltaL": delta_lik,
+            "relatL": relat_lik,
+            "time_tot": tdelta_iter,
+            "tdelta_E": tdelta_Edet.sum(),
+            "tdelta_E_detail": tdelta_Edet,
+            "tdelta_M": tdelta_Mdet.sum(),
+            "tdelta_M_detail": tdelta_Mdet,
+        }
+
+        history.append(it)
+
+        return history
+    
     
     def __str__(self):
 
@@ -1128,7 +1168,6 @@ Run time  : Tot: {format_value(time_iter, scalar_decimals)}, Estep: {format_valu
         lines.append(f"JAX devices        : {jax.devices()}")
 
         return "\n".join(lines)
-
 
     def model_structure(self,  qdim):
         """Return a formatted summary of the state-space structure."""
