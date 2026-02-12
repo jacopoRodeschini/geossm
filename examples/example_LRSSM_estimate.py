@@ -41,6 +41,10 @@ agri['geometry'] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
 
 agri = geodf.GeoDataFrame(agri, crs=4326)
 
+domain = list(shape.geometry[0].geoms)[0].boundary
+buffer = list(domain.buffer(0.3).boundary.geoms)[0]
+
+
 # %% Build the model
 
 model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain = [Polygon(buffer)])
@@ -115,9 +119,13 @@ fem_solver.plot_mesh(ax=ax)
 
 # add the mesh object and the domain where the laten domain is defined
 # if None it is assumed to be the same of the observation  
-model = model.setup([mesh_io], [Polygon(buffer)])
+model = model.setup([mesh_io])
 
-print(model)
+# %% Estimate the Model
+
+
+results = model.fit()
+
 
 # %% Estimate the model 
 
@@ -130,9 +138,6 @@ params0 = params()
 fit_options = FitOptions()
 
 
-
-
-results = model.fit()
 
 
 
