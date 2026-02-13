@@ -23,7 +23,7 @@ from geossm import block_diag_3D
 
 from shapely.geometry import Polygon
 from dataclasses import replace
-from geossm.stmodel.lrssm import Param, FitOptions, ModelParams
+from geossm.stmodel import Param, FitOptions, ModelParams
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
