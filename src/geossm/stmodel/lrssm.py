@@ -4,25 +4,12 @@ statsmodels' MLEModel API.
 """
 
 import numpy as np
-from scipy.spatial import ConvexHull
-
-try:
-    from statsmodels.tsa.statespace.mlemodel import MLEModel
-except Exception:
-    # Minimal fallback base class to allow importing this module when
-    # statsmodels is not installed. This fallback does not implement
-    # any optimization or fit behavior.
-    class MLEModel(object):
-        def __init__(self, endog=None, exog=None, **kwargs):
-            self.endog = endog
-            self.exog = exog
-
+import jax.numpy as jnp
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
 from geossm.covmodel import spdeAppoxCov
 
-import jax.numpy as jnp
-from jax import jit, lax, vmap
+from jax import jit, lax
 import scipy.sparse as sp
 from functools import partial
 import time
@@ -31,75 +18,18 @@ from scipy.linalg import block_diag as scyp_block_diag
 import jax
 from scipy.optimize import minimize
 
-from geossm import data_preparation, DesignMatrices
-from geossm import block_diag_3D, getHardware
+from geossm import data_preparation
+from geossm import block_diag_3D
 
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
-from dataclasses import dataclass, replace
-
-# %% Data class supports
-
-@dataclass
-class FitOptions:
-    max_iter: int = 100
-    tol_relat: float = 1e-3
-    verbose: bool = True
-    dtype: any = jnp.float32
-
-@dataclass
-class Param:
-    name: str
-    value: any
-    fixed: bool = False
-
-    def set(self, new_value):
-        """Update parameter value if not fixed."""
-        if self.fixed:
-            return self
-        return Param(
-            name=self.name,
-            value=jnp.asarray(new_value),
-            fixed=self.fixed,
-        )
-
-    def freeze(self):
-        """Return frozen version of parameter."""
-        return Param(self.name, self.value, True)
-
-    def unfreeze(self):
-        """Return unfrozen version of parameter."""
-        return Param(self.name, self.value, False)
-
-    def __repr__(self):
-        status = "fixed" if self.fixed else "free"
-        shape = getattr(self.value, "shape", None)
-        return f"Param(name='{self.name}', shape={shape}, {status})"
-
-@dataclass
-class ModelParams:
-    beta: Param
-    s2e: Param
-    f: Param
-    A: Param
-    ks: Param
-    x0: Param
-    Sigma0: Param
-
-    def as_dict(self):
-        return {k: getattr(self, k).value for k in self.__dataclass_fields__}
-
-    def free_params(self):
-        return {
-            k: getattr(self, k).value
-            for k in self.__dataclass_fields__
-            if not getattr(self, k).fixed
-        }
+from shapely.geometry import Polygon
+from dataclasses import replace
+from geossm.stmodel.lrssm import Param, FitOptions, ModelParams
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
 
 @partial(jax.jit, static_argnums=(2, 3))
-def _getInitialValues(y_t, Xbeta, block_p, block_q):
+def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     """
     Computes initial parameter values for a model using JAX.
 
@@ -550,20 +480,11 @@ class LRStateSpaceModel:
             [cov.fem_solver.n_inner_points for cov in self.cov_function], dtype=jnp.int32)
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
 
-        # TODO: add verbose option here to print the initial values of the parameters and the log-likelihood
-
         # Get the initial values
-        box = [cv.fem_solver.box for cv in self.cov_function]
+        est_params = self._getInitialValues(y_obs, Xbeta,block_p, block_q)
         
-        est_ks = [jnp.sqrt(8*1) / ((jnp.abs(bx[0] - bx[1])).min() / 3) for bx in box]
-       
-        est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A = _getInitialValues(
-            y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist()))
-        
-        est_params = self._createParams(est_beta, est_s2, est_f, est_x0, est_Sigma0, est_ks, est_A)
-
         # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
-        est_params = self._updateParams(params0, est_params)
+        est_params = self._updateParams0(params0, est_params)
 
         # Flag of the EM convergence
         flag = True
@@ -629,8 +550,8 @@ class LRStateSpaceModel:
                 y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
 
             # ---- M step, get the updated parameters
-            update_params, cov_function, opt_success, tdelta_Mdet = self._M_step(
-                y_obs, y_hat, F, H, Xbeta, points, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_params.beta)
+            update_params,  opt_success, tdelta_Mdet = self._M_step(
+                y_obs, y_hat, F, H, Xbeta, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi)
             
             # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
             delta_lik = logL_cur - logL_prev
@@ -656,7 +577,7 @@ class LRStateSpaceModel:
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
 
-        return est_params, y_hat, x_T, P_T, cov_function, nstat
+        return est_params, y_hat, x_T, P_T, self.cov_function, nstat
     
     @property
     def cov_function(self):
@@ -681,8 +602,8 @@ class LRStateSpaceModel:
 
         return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta
 
-    def _M_step(self, y_t, y_hat, F, H, Xbeta, points, est_covList, block_p, block_q, x_T,
-                P_T, S11, S10, S00, Phi, est_beta):
+    def _M_step(self, y_t, y_hat, F, H, Xbeta, est_covList, block_p, block_q, x_T,
+                P_T, S11, S10, S00, Phi):
 
         # convert all input to save memory
         p, T = y_t.shape
@@ -764,12 +685,13 @@ class LRStateSpaceModel:
         tdelta = jnp.array([tdelta_beta, tdelta_s2e, tdelta_f,
                             tdelta_ks, tdelta_A], dtype=jnp.float32)
         
-        est_ks = jnp.exp(opt.x)
+        est_ks = jnp.exp(opt.x) 
         # print("est_ks", est_ks)
 
+        # Note that the Cov. function is updated in place with the new rescale parameter (i.e. the range parameter of the Matern covariance function)
         update_params = self._createParams(beta, s2e, est_f, x0, Sigma0, est_ks, est_A)
 
-        return update_params, est_covList, opt.success, tdelta
+        return update_params, opt.success, tdelta
 
     # %[Utils] Argmin problem, JAX  (M-step, rescale)
 
@@ -807,6 +729,20 @@ class LRStateSpaceModel:
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
+    def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
+
+        # Compute the initial values of the parameters
+        est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_A = _compute_inital_values_jax_kernel(y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist()))
+
+        # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
+        box = [cv.fem_solver.box for cv in self.cov_function]
+        est_ks = [jnp.sqrt(8*1) / ((jnp.abs(bx[0] - bx[1])).min() / 3) for bx in box]
+       
+        # Create the est_params object with the estimated initial values (if not provided, they will be set to None and the model will use default initial values)
+        est_params = self._createParams(est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A)
+
+        return est_params
+        
     
     def _createParams(self, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A):
         est_params = ModelParams(
@@ -836,7 +772,7 @@ class LRStateSpaceModel:
     def _updateParams(self, params: ModelParams, updates: ModelParams) -> ModelParams:
         """
         Update parameters using values from `updates`,
-        respecting the `fixed` flags.
+        respecting the `fixed` flags and handling None initial values.
         """
 
         updated_fields = {}
@@ -844,25 +780,59 @@ class LRStateSpaceModel:
         for name in params.__dataclass_fields__:
             current_param = getattr(params, name)
             new_param = getattr(updates, name)
-
+            
+            # ---- CASE 1: parameter is fixed, never update
             if current_param.fixed:
-                # Keep original parameter unchanged
                 updated_fields[name] = current_param
-            else:
-                # Update value but preserve fixed flag and name
-                updated_fields[name] = replace(
-                    current_param,
-                    value=jnp.asarray(new_param.value),
-                )
+                continue
+
+            # ---- CASE 3: normal update (free parameter with initial value)
+            updated_fields[name] = replace(
+                current_param,
+                value=jnp.asarray(new_param.value),
+            )
 
         new_params = ModelParams(**updated_fields)
 
         # Special handling for ks update covariance scaling
-        if not new_params.ks.fixed:
+        if not new_params.ks.fixed and new_params.ks.value is not None:
             for fcov, ksi in zip(self.cov_function, new_params.ks.value):
                 fcov.rescale = ksi
 
         return new_params
+    
+    def _updateParams0(self, params0: ModelParams, updates: ModelParams) -> ModelParams:
+        """
+        Update parameters using values from `updates`,
+        respecting the `fixed` flags and handling None initial values.
+        """
+
+        updated_fields = {}
+
+        for name in params0.__dataclass_fields__:
+            current_param0 = getattr(params0, name)
+            new_param = getattr(updates, name)
+            
+            if current_param0.value is not None:
+                updated_fields[name] = current_param0
+                continue
+            
+            # ---- CASE 3: normal update (free parameter with initial value)
+            updated_fields[name] = replace(
+                current_param0,
+                value=jnp.asarray(new_param.value),
+            )
+
+        new_params = ModelParams(**updated_fields)
+
+        # Special handling for ks update covariance scaling
+        if not new_params.ks.fixed and new_params.ks.value is not None:
+            for fcov, ksi in zip(self.cov_function, new_params.ks.value):
+                fcov.rescale = ksi
+
+        return new_params
+    
+    
     
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
