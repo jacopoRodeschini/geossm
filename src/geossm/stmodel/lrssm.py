@@ -630,7 +630,7 @@ class LRStateSpaceModel:
 
             # ---- M step, get the updated parameters
             update_params, cov_function, opt_success, tdelta_Mdet = self._M_step(
-                y_obs, y_hat, F, H, Xbeta, points, cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_params.beta)
+                y_obs, y_hat, F, H, Xbeta, points, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi, est_params.beta)
             
             # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
             delta_lik = logL_cur - logL_prev
@@ -765,6 +765,7 @@ class LRStateSpaceModel:
                             tdelta_ks, tdelta_A], dtype=jnp.float32)
         
         est_ks = jnp.exp(opt.x)
+        # print("est_ks", est_ks)
 
         update_params = self._createParams(beta, s2e, est_f, x0, Sigma0, est_ks, est_A)
 
@@ -780,11 +781,11 @@ class LRStateSpaceModel:
 
         # Compute the maginal precision matrix
         invQ = []
-        for fcov in est_covList:
-            invQi = fcov.precision()
+        for fcov, ki in zip(est_covList, ks):
+            invQi = fcov.precision(rescale=ki)
 
             # index of the inner points (i.e. the points of the latent domain)
-            inx = fcov.inner
+            inx = fcov.fem_solver.inner
             Q_11 = invQi[inx, :][:, inx]
             Q_12 = invQi[inx, :][:, ~inx]
             Q_22 = invQi[~inx, :][:, ~inx]
@@ -805,19 +806,6 @@ class LRStateSpaceModel:
 
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
-
-    def logdetSparse(Q):
-        # Perform LU decomposition of the sparse matrix
-        lu = sp.linalg.splu(Q)
-
-        # Extract diagonal elements from L and U
-        diagL = lu.L.diagonal().astype(np.complex128)
-        diagU = lu.U.diagonal().astype(np.complex128)
-
-        # Compute the log-determinant
-        logdet = np.log(np.abs(diagL)).sum() + np.log(np.abs(diagU)).sum()
-
-        return logdet
 
     
     def _createParams(self, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A):
