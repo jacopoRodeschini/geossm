@@ -48,7 +48,6 @@ buffer = list(domain.buffer(0.3).boundary.geoms)[0]
 # %% Build the model
 
 model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain = [Polygon(buffer)])
-print(model)
 
 # %% [Utils] build mesh with gmsh
 
@@ -122,26 +121,84 @@ fem_solver.plot_mesh(ax=ax)
 model = model.setup([mesh_io])
 
 
+# %% Estimate the Model (default estimation options)
+
+est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit()
+
+# plot the likelihood curve
+fig, ax = plt.subplots()
+ax.plot([i['deltaL'] for i in nstat])
+ax.set_yscale('log')
+ax.set_xlabel('Iteration')
+ax.set_ylabel('Log Likelihood')
+ax.set_title('Log Likelihood Curve')
+ax.grid()
+plt.show()
+
+
+# %% Estimate the model with other options  
+
 from geossm.stmodel import FitOptions
 
+opt = FitOptions()
+opt.max_iter = 5
 
-options = FitOptions()
-options.max_iter = 10
-
-# %% Estimate the Model
-
-est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(options=options)
+print(opt)
 
 
-# %% Estimate the model 
+est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(options=opt)
 
-from geossm.stmodel import params, FitOptions
+# plot the likelihood curve
+fig, ax = plt.subplots()
+ax.plot([i['deltaL'] for i in nstat])
+ax.set_yscale('log')
+ax.set_xlabel('Iteration')
+ax.set_ylabel('Log Likelihood')
+ax.set_title('Log Likelihood Curve')
+ax.grid()
+plt.show()
 
-# set the initial paramites (none if they are unknow)
-params0 = params()
+# %% Estimate the model with inital values
+from geossm.stmodel import FitOptions, ModelParams
 
-# set the option for the fit 
-fit_options = FitOptions()
+# set the option 
+opt = FitOptions()
+opt.max_iter = 500
+opt.tol_relat = 1e-4
+
+# set the pars0
+par0 = ModelParams(beta=[10,1], s2e = 10)
+print(par0)
+
+# % fit the model
+est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, options=opt)
+
+# print the estimate paramiters
+print(est_params)
+
+# %% More controll on the model paramiters
+from geossm.stmodel.lrssm import Param, ModelParams
+
+b0 = Param("beta", [11,1], fixed=True)
+
+# set the pars0
+par0 = ModelParams(beta=b0, s2e = 10)
+
+# %%
+print(par0)
+
+# % fit the model
+est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, options=opt)
+
+# print the estimate paramiters
+print(est_params)
+
+
+
+
+
+
+
 
 
 
