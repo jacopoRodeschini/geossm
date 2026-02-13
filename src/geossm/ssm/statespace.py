@@ -546,11 +546,11 @@ class StateSpaceModel:
                 f"Sigma0 must be shape ({q},{q}), got {Sigma0_shape}.")
             flag = False
         # Check positive semidefinite
-        else:
-            if not is_pos_semidef(self.Sigma0):
-                messages.append(
-                    "Sigma0 must be symmetric positive semidefinite.")
-                flag = False
+        # else:
+        #     if not is_pos_semidef(self.Sigma0):
+        #         messages.append(
+        #             "Sigma0 must be symmetric positive semidefinite.")
+        #         flag = False
 
         # Xbeta: (p, b, T)
         Xbeta_shape = shape_str(self.Xbeta)
