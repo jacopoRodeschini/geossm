@@ -163,7 +163,7 @@ from geossm.stmodel import FitOptions, ModelParams
 
 # set the option 
 opt = FitOptions()
-opt.max_iter = 500
+opt.max_iter = 20
 opt.tol_relat = 1e-4
 
 # set the pars0
@@ -177,14 +177,12 @@ est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, optio
 print(est_params)
 
 # %% More controll on the model paramiters
-from geossm.stmodel.lrssm import Param, ModelParams
+from geossm.stmodel import Param, ModelParams
 
 b0 = Param("beta", [11,1], fixed=True)
 
 # set the pars0
 par0 = ModelParams(beta=b0, s2e = 10)
-
-# %%
 print(par0)
 
 # % fit the model
@@ -192,6 +190,18 @@ est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, optio
 
 # print the estimate paramiters
 print(est_params)
+
+
+# plot the likelihood curve
+fig, ax = plt.subplots()
+ax.plot([i['deltaL'] for i in nstat])
+ax.set_yscale('log')
+ax.set_xlabel('Iteration')
+ax.set_ylabel('Log Likelihood')
+ax.set_title('Log Likelihood Curve')
+ax.grid()
+plt.show()
+
 
 
 
