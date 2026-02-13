@@ -74,8 +74,8 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
 
         # fix the points
-        gmsh.model.mesh.embed(
-            0, embedded_tags, 2, domain._id)
+        # gmsh.model.mesh.embed(
+        #     0, embedded_tags, 2, domain._id)
 
         gmsh.option.setNumber("Mesh.Algorithm", 6)
 
@@ -105,7 +105,7 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
 # %% Build the mesh for the AQ_pm10 observed variable
 
 points = model.points[0]
-mesh_io = buildMesh(buffer, 1, points)
+mesh_io = buildMesh(buffer, 0.5, points)
 print(mesh_io)
 
 # plot the mesh (use the fem_solver utlities)
@@ -121,10 +121,16 @@ fem_solver.plot_mesh(ax=ax)
 # if None it is assumed to be the same of the observation  
 model = model.setup([mesh_io])
 
+
+from geossm.stmodel import FitOptions
+
+
+options = FitOptions()
+options.max_iter = 10
+
 # %% Estimate the Model
 
-
-results = model.fit()
+est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(options=options)
 
 
 # %% Estimate the model 
