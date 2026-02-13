@@ -1,6 +1,6 @@
 # Spatio-temporal models submodule
 
 
-from .lrssm import LRStateSpaceModel, params, FitOptions
+from .lrssm import LRStateSpaceModel, Param, FitOptions
 
-__all__ = ["LRStateSpaceModel" "params", "FitOptions"]
+__all__ = ["LRStateSpaceModel", "Param", "FitOptions"]
