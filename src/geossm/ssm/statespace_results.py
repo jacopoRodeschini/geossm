@@ -49,6 +49,10 @@ class SSMResults:
     P_smoothed: ArrayLike = None      # (q, q, T+1)
     P_lag: ArrayLike = None           # (q, q, T)  lag-one covariances
 
+    Xbeta: ArrayLike = None           # (q, q, T)  lag-one covariances
+    beta: ArrayLike = None
+    xbeta_names: ArrayLike = None
+
     # optional sufficient statistics from E-step
     S11: ArrayLike = None
     S10: ArrayLike = None
@@ -256,17 +260,24 @@ class SSMResults:
                 "skew": float(sk), "kurtosis": float(kt)}
     
 
-
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
         # Ensure numpy arrays for summary stats
         
         self.results = np.array([0])
-        self.params = np.array([0])
-        self.std_err = np.array([0])
-        self.tvalues = np.array([0])
-        self.pvalues = np.array([0])
-        self.conf_int = np.array([0])
+        self.params = self.beta
+        self.param_names = self.xbeta_names
+        self.bse = np.zeros(len(self.beta))
+        self.tvalues = np.zeros(len(self.beta))
+        self.pvalues = np.zeros(len(self.beta))
+
+        def conf_int_parmas(alpha=0.05):
+            lower = self.params - 1.96 * self.bse
+            upper = self.params + 1.96 * self.bse
+            return np.column_stack([lower, upper])
+
+
+        self.conf_int = lambda alpha: conf_int_parmas(alpha)
        
         self.nobs = self.y_obs.size
         self.nspace, self.ntime = self.y_obs.shape
@@ -324,6 +335,13 @@ class SSMResults:
         smry = Summary()
         smry.add_table_2cols(self,title="State Space Model results",
                              gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+
+        # add the model params
+        smry.add_table_params(
+            self,
+            yname=None,
+            xname=self.param_names
+        )
 
         return smry
     

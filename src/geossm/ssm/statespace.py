@@ -327,7 +327,7 @@ class StateSpaceModel:
     A class representing a State Space Model with Kalman filtering capabilities.
     """
 
-    def __init__(self, H, R, F, Q, x0=None, Sigma0=None, Xbeta=None, beta=None, dtype=jnp.float32):
+    def __init__(self, H, R, F, Q, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, dtype=jnp.float32):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
@@ -342,6 +342,7 @@ class StateSpaceModel:
         self._Sigma0 = None  # Initial covariance estimate
         self._Xbeta = None  # Exogenous variables
         self._beta = None  # Coefficients for exogenous variables
+        self._xbeta_names = None
         self._T = None  # Time length
         self._p = None  # number of measurement equation
         self._q = None  # number of state equation
@@ -359,7 +360,7 @@ class StateSpaceModel:
         if beta is None:
             beta = np.zeros(Xbeta.shape[1])
 
-        self.set(H=H, F=F, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
+        self.set(H=H, F=F, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
         # define the filtered attribute ?
 
@@ -372,7 +373,7 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
-    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None):
+    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None):
         """
         Set model parameters and matrices.
         @ return: None
@@ -388,13 +389,13 @@ class StateSpaceModel:
         # Check parameters
 
         self._update_parameters(
-            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
+            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
         flag, msg = self._check_parameters()
         if not flag:
             raise ValueError(msg)
 
-    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None):
+    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names=None ):
         """
         Helper function to update model parameters if provided.
         """
@@ -433,8 +434,23 @@ class StateSpaceModel:
                 self._b = int(self._beta.shape[0])
             except Exception:
                 self._b = None
+        
+        if xbeta_names is not None:
+            if len(xbeta_names) != len(self._b):
+                raise ValueError(
+                    f"Expected {len(self._b)} xbeta names, got {len(xbeta_names)}."
+                )
+            self._xbeta_names = xbeta_names
+            
+        else:
+            self._xbeta_names = [f"X_{i}" for i in range(self._b)]
+
 
         return True
+
+    @ property
+    def xbeta_names(self):
+        return self._xbeta_names
 
     def _check_parameters(self):
         """
@@ -567,18 +583,19 @@ class StateSpaceModel:
 
         return flag, "\n".join(messages)
 
-    def estimate(self, y_t):
+    def estimate(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
 
 
         # run the smoother
-        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t)
+        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
         
         results = SSMResults(
-            y_hat=y_hat, x_T=x_T, P_T=P_T, P_T_1=P_T_1, S11=S11, S10=S10, S00=S00, logL=logL,
+            y_hat=y_hat, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
+            x_T=x_T, P_T=P_T, P_T_1=P_T_1, S11=S11, S10=S10, S00=S00, logL=logL,
             tdelta_filter=tdelta_filter, tdelta_smoother=tdelta_smoother, tdelta_expectation=tdelta_expectation
         )
         
@@ -586,7 +603,7 @@ class StateSpaceModel:
 
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
-    def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
+    def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
         """
         Kalman Filter using jax.lax.scan for variable-length inputs.
 
@@ -594,7 +611,7 @@ class StateSpaceModel:
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
         # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
         
         # Run the scan
         tStart = time.time()
@@ -609,14 +626,16 @@ class StateSpaceModel:
             x_t, P_t, P_t_1)
         
 
-        results  = SSMResults(model=self, y_obs=y_t, x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
+        results  = SSMResults(model=self, 
+                              y_obs=y_t, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
+                              x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
                               P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
                               y_hat = y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation)
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
-    def smoother(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
+    def smoother(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
         """
         Kalman smoother using jax.lax.scan for efficient, T-independent compilation.
 
@@ -626,7 +645,7 @@ class StateSpaceModel:
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
         # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
         # First, run the filter to get necessary inputs for the smoother
         x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, td_filter = self.filter(
