@@ -63,5 +63,55 @@ plt.show()
 
 results = model.filter(y_sim)
 
+# print summary
+print(results.summary())
+
+
+# %% The residual array are all numpy array 
+
+
+# get residuals
+res = results.residuals
+
+# get the mse
+mse_global= results.mse('global')
+mse_space= results.mse('space')
+mse_time= results.mse('time')
+
+# plot the mse in time
+plt.plot(mse_time)
+
+# %% Get the prediction
+
+y_hat = results.y_hat
+
+lower, upper = results.conf_int_y(alpha=0.05)
+
+
+t = np.arange(y_hat.shape[1])
+
+plt.figure()
+plt.plot(t, y_hat[0])
+plt.plot(t, y_sim[0],'x')
+plt.fill_between(t, lower[0], upper[0], alpha=0.3)
+
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.title("Prediction with 95% Confidence Interval")
+
+plt.show()
+
+# %% Get the residual diagnostics
+
+stats = results.diagnostics()
+
+# %% Get dictionaly of the resutls
+
+results_dict = results.as_dict()
+
+
+
+
+
 
 

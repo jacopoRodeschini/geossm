@@ -14,7 +14,10 @@ import numpy as np
 import jax.numpy as jnp
 from scipy.stats import norm
 from statsmodels.iolib.summary import Summary
-from statsmodels.stats.stattools import jarque_bera, durbin_watson, omni_normtest
+from scipy.stats import jarque_bera, skew, kurtosis
+from statsmodels.stats.stattools import durbin_watson, omni_normtest
+from datetime import date, datetime
+
 
 
 ArrayLike = Optional[Any]
@@ -23,7 +26,7 @@ ArrayLike = Optional[Any]
 @dataclass
 class SSMResults:
     # metadata
-    model: Optional[Any] = None
+    model: Optional[Any]
     nobs: Optional[int] = None
     param_names: Optional[list] = None
 
@@ -51,10 +54,30 @@ class SSMResults:
     S10: ArrayLike = None
     S00: ArrayLike = None
 
+    today = date.today()
+
     # internal cache
     _residuals: Optional[np.ndarray] = field(default=None, init=False, repr=False)
 
+    # Convert all quantity to numpy array 
+    def __post_init__(self):
+        self = self.to_numpy()
+
     # ---------- Utility methods ----------
+    def to_numpy(self) -> "SSMResults":
+        """Convert stored arrays to NumPy in-place and return self."""
+        exclude = {"model"}
+
+        for name in self.__dataclass_fields__:
+            if name in exclude:
+                continue
+
+            val = getattr(self, name, None)
+            if val is not None and isinstance(val, jnp.ndarray):
+                setattr(self, name, self._to_numpy(val))
+        return self
+    
+
     def _to_numpy(self, arr):
         if arr is None:
             return None
@@ -63,16 +86,6 @@ class SSMResults:
             return np.asarray(arr)
         except Exception:
             return arr
-
-    def to_numpy(self) -> "SSMResults":
-        """Convert stored arrays to NumPy in-place and return self."""
-        for name in ("y_obs", "y_hat", "x_filtered", "P_filtered", "x_pred",
-                     "P_pred", "invP_pred", "K", "x_smoothed", "P_smoothed",
-                     "P_lag", "S11", "S10", "S00"):
-            val = getattr(self, name, None)
-            if val is not None:
-                setattr(self, name, self._to_numpy(val))
-        return self
 
     # ---------- Residuals / Diagnostics ----------
     def _compute_residuals(self) -> Optional[np.ndarray]:
@@ -95,24 +108,24 @@ class SSMResults:
         return self._compute_residuals()
 
     # ---------- Error metrics ----------
-    def mse(self, kind: str = "global") -> float:
+    def mse(self, which: str = "global") -> float:
         """Mean squared error. kind in {'global','space','time'}."""
         err = self._compute_residuals()
-        if err is None:
+        if which is None:
             return float("nan")
-        if kind == "global":
+        if which == "global":
             valid = err[~np.isnan(err)]
             return float(np.mean(valid ** 2)) if valid.size else float("nan")
-        if kind == "space":
+        if which == "space":
             # average across time axis -> shape (p,)
             return np.nanmean(err ** 2, axis=1)
-        if kind == "time":
+        if which == "time":
             # average across space axis -> shape (T,)
             return np.nanmean(err ** 2, axis=0)
-        raise ValueError("kind must be one of {'global','space','time'}")
+        raise ValueError("which must be one of {'global','space','time'}")
 
-    def rmse(self, kind: str = "global") -> float:
-        v = self.mse(kind=kind)
+    def rmse(self, which: str = "global") -> float:
+        v = self.mse(which=which)
         if isinstance(v, np.ndarray):
             return np.sqrt(v)
         return float(np.sqrt(v))
@@ -195,39 +208,98 @@ class SSMResults:
     # ---------- Diagnostics & summary ----------
     def diagnostics(self) -> Dict[str, float]:
         """Return a small diagnostics dict computed on residuals (numpy)."""
-        err = self._compute_residuals()
+        
+        err = getattr(self, 'residuals', None)
         if err is None:
-            return {}
+            err = self._compute_residuals()
+            
         flat = err.flatten()
         flat = flat[~np.isnan(flat)]
-        jb, jbpv, skew, kurtosis = jarque_bera(flat, nan_policy="omit")
+        jb, jbpv = jarque_bera(flat, nan_policy="omit")
+        
+        sk = skew(flat, nan_policy="omit")
+        kt = kurtosis(flat, nan_policy="omit")
+        
         omni, omnipv = omni_normtest(flat)
+
         dw = durbin_watson(flat)
-        return {"jb": float(jb), "jb_pvalue": float(jbpv), "omni_pvalue": float(omnipv), "dw": float(dw),
-                "skew": float(skew), "kurtosis": float(kurtosis)}
+        return {"jb": float(jb), "jb_pvalue": float(jbpv), "omni": float(omni), "omni_pvalue": float(omnipv), "dw": float(dw),
+                "skew": float(sk), "kurtosis": float(kt)}
 
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
         # Ensure numpy arrays for summary stats
-        self.to_numpy()
-        err = self._compute_residuals() or np.array([])
+        
+        self.results = np.array([0])
+        self.params = np.array([0])
+        self.std_err = np.array([0])
+        self.tvalues = np.array([0])
+        self.pvalues = np.array([0])
+        self.conf_int = np.array([0])
+       
+        self.nobs = self.y_obs.size
+        self.nspace, self.ntime = self.y_obs.shape
+        self.missing = np.sum(np.isnan(self.y_obs))
+        self.yname = "prova"
+
+        # self.df_model = str(100)
+        # self.df_resid = str(100)
+        
+        # Compute residual diagnostics
+        err = getattr(self, 'residuals', None)
+        if err is None:
+            err = self._compute_residuals()
+        
+        stats = self.diagnostics()
+
         # top-left / top-right small tables
-        top_left = [
-            ("Model:", getattr(self.model, "__class__", type(self.model)).__name__),
-            ("No. Observations:", int(self.nobs) if self.nobs is not None else None),
-            ("Log Likelihood:", f"{self.llf:.6g}" if self.llf is not None else None),
-            ("Runtime filter (s):", f"{self.time_filter:.4g}" if self.time_filter is not None else None),
-            ("Runtime smoother (s):", f"{self.time_smoother:.4g}" if self.time_smoother is not None else None),
-        ]
-        top_right = [
-            ("MSE:", f"{self.mse():.6g}" if err.size else None),
-            ("RMSE:", f"{self.rmse():.6g}" if err.size else None),
-        ]
+        
+        top_left = dict([
+            ('Model type:', lambda: [self.model.__class__.__name__]),
+            ('Dep. Variable:', lambda: [self.yname]),
+            ('Date:', lambda: [self.today]),
+            ('Number of Obs:', lambda: [self.nobs]),
+            ('Number of points:', lambda: [self.nspace]),
+            ('# missing:', lambda: [self.missing]),
+            ('Time lenght:', lambda: [self.ntime]),
+            ('Log-Likelihood:', lambda: ["%#8.5g" % self.llf]),
+            ("Runtime filter (s):", lambda: [f"{self.time_filter:.3g}"]),
+            ])
+        
+        if getattr(self, 'time_smoother', None) is not None:
+            top_left["Runtime smoother (s):"] = lambda: [f"{self.time_smoother:.4g}"]
+
+        top_right = {
+            'jb:': lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
+            'Omnibus test:': lambda: f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})",
+            'Durbin-Watson:': lambda: f"{stats['dw']:.2f}",
+            'Skewness:': lambda: f"{stats['skew']:.2f}",
+            'Kurtosis:': lambda: f"{stats['kurtosis']:.2f}",
+            'MSE:': lambda: f"{self.mse():.2f}",
+            'RMSE:': lambda: f"{self.rmse():.2f}",
+        }
+
+        # Generate the dictionaly        
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append( (item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append( (item, top_right[item]()))
+        
+        # Generate the summary 
         smry = Summary()
-        smry.add_table_2cols(self, gleft=top_left, gright=top_right,
-                             yname=getattr(self, "y_name", (None,))[0] if getattr(self, "y_name", None) else None,
-                             xname=getattr(self, "param_names", None), title="State Space Model Results")
+        smry.add_table_2cols(self,title="State Space Model results",
+                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+
         return smry
+    
+    def __str__(self):
+        return self.summary()
+    
+    def __repr__(self):
+        return self.summary()
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict with main results converted to NumPy where possible."""

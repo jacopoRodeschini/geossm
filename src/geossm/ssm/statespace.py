@@ -599,11 +599,19 @@ class StateSpaceModel:
         # Run the scan
         tStart = time.time()
 
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(y_t, self.H, self.R, self.F, self.Q, self.x0, self.Sigma0, self.Xbeta, self.beta)
+        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(y_t, self.H, self.R, self.F, self.Q, self.x0, 
+                                                                      self.Sigma0, self.Xbeta, self.beta)
 
         tDelta = time.time() - tStart
 
-        results  = SSMResults(self, x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta)
+        # compute expected values (given the filterd values)
+        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+            x_t, P_t, P_t_1)
+        
+
+        results  = SSMResults(model=self, y_obs=y_t, x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
+                              P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
+                              y_hat = y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation)
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
