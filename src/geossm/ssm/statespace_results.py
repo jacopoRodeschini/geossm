@@ -204,6 +204,35 @@ class SSMResults:
         lower = y_hat - z * resid_std
         upper = y_hat + z * resid_std
         return lower, upper
+    
+
+    def coverage_probability(self, alpha: float = 0.05, which='global'):
+        return self._coverage_probability(alpha, which)
+
+    def _coverage_probability(self, alpha: float = 0.05, which='global'):
+        """
+        Compute empirical coverage probability of prediction intervals.
+
+        -------
+        float
+            Coverage probability in [0, 1].
+        """
+        y_true = self.y_obs
+
+        lower, upper = self.conf_int_y(alpha, prediction  = False)
+        
+        inside = (y_true >= lower) & (y_true <= upper)
+        
+        
+        if which == "global":
+            return np.nanmean(inside)
+        elif which == "space":
+            return np.nanmean(inside, axis = 1)
+        elif which == "time":
+            return np.nanmean(inside, axis = 0)
+        else:
+            raise ValueError("which must be 'smoothed' or 'filtered'")
+
 
     # ---------- Diagnostics & summary ----------
     def diagnostics(self) -> Dict[str, float]:
@@ -225,6 +254,8 @@ class SSMResults:
         dw = durbin_watson(flat)
         return {"jb": float(jb), "jb_pvalue": float(jbpv), "omni": float(omni), "omni_pvalue": float(omnipv), "dw": float(dw),
                 "skew": float(sk), "kurtosis": float(kt)}
+    
+
 
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
@@ -277,6 +308,7 @@ class SSMResults:
             'Kurtosis:': lambda: f"{stats['kurtosis']:.2f}",
             'MSE:': lambda: f"{self.mse():.2f}",
             'RMSE:': lambda: f"{self.rmse():.2f}",
+            'Coverage Prob.:': lambda: f"{self._coverage_probability():.2f}, (alpha = 0.05)",
         }
 
         # Generate the dictionaly        

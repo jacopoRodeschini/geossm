@@ -63,8 +63,8 @@ plt.show()
 
 results = model.filter(y_sim)
 
-# print summary
 print(results.summary())
+
 
 
 # %% The residual array are all numpy array 
@@ -108,6 +108,10 @@ stats = results.diagnostics()
 # %% Get dictionaly of the resutls
 
 results_dict = results.as_dict()
+
+# %% Get the coverage probability
+
+cov_prov_space = results.coverage_probability(which='space')
 
 
 
