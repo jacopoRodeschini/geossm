@@ -8,9 +8,10 @@ import jax.numpy as jnp
 from jax.scipy.linalg import solve
 from jax import jit
 import time
-from geossm.ssm.statespace_results import SSMResults
 from geossm.utils import KeyStream
 import numpy as np
+
+from .statespace_results import SSMResults
 
 
 # %% JAX kernel functions for SSM
@@ -320,7 +321,6 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     return y_hat, S11, S10, S00
         
 
-
 # %% State Space Model Class
 class StateSpaceModel:
     """
@@ -567,7 +567,8 @@ class StateSpaceModel:
 
         return flag, "\n".join(messages)
 
-    def estimate(self, y_t) -> tuple:
+    def estimate(self, y_t):
+
 
         # run the smoother
         x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t)
@@ -575,31 +576,15 @@ class StateSpaceModel:
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
+        
+        results = SSMResults(
+            y_hat=y_hat, x_T=x_T, P_T=P_T, P_T_1=P_T_1, S11=S11, S10=S10, S00=S00, logL=logL,
+            tdelta_filter=tdelta_filter, tdelta_smoother=tdelta_smoother, tdelta_expectation=tdelta_expectation
+        )
+        
+        return results
 
-        # Package results in a convenience container
-        """results = SSMResults(
-            model=self,
-            y_obs=y_t,
-            x_filtered=x_t,
-            P_filtered=P_t,
-            K=K,
-            x_pred=x_t_1,
-            P_pred=P_t_1,
-            invP_pred=invP_t_1,
-            loglik=logL,
-            time_filter=time_filter,
-            x_smoothed=x_T,
-            P_smoothed=P_T,
-            P_lag=P_T_1,
-            time_smoother=time_smoother,
-            y_hat=y_hat,
-            S11=S11,
-            S10=S10,
-            S00=S00,
-            time_expected=time_expected
-        )"""
-
-        return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
+        # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
     def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
         """
@@ -618,7 +603,10 @@ class StateSpaceModel:
 
         tDelta = time.time() - tStart
 
-        return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
+        results  = SSMResults(self, x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta)
+
+        return results
+        # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
     def smoother(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None) -> tuple:
         """
@@ -697,10 +685,12 @@ class StateSpaceModel:
             keys = KeyStream(seed)
 
         # Call the simulation kernel to generate the time series
+        tStart = time.time()
         y_t_sim, x_t_sim = _sim_kernelJAX(
             keys, self.H, self.R, self.F, self.Q, self.x0, self.Sigma0, Xbeta, self.beta)
 
-        return y_t_sim, x_t_sim
+        tdelta = time.time() - tStart
+        return y_t_sim, x_t_sim, tdelta
 
     # propoerty
     @property
