@@ -348,10 +348,10 @@ class SSMResults:
         return smry
     
     def __str__(self):
-        return self.summary()
+        return str(self.summary())
     
     def __repr__(self):
-        return self.summary()
+        return str(self.summary())
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict with main results converted to NumPy where possible."""

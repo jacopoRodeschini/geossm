@@ -10,6 +10,9 @@ from jax import jit
 import time
 from geossm.utils import KeyStream
 import numpy as np
+from datetime import date 
+from statsmodels.iolib.summary import Summary
+from types import SimpleNamespace
 
 from .statespace_results import SSMResults
 
@@ -350,6 +353,7 @@ class StateSpaceModel:
 
         self._type = 'Linear (Gaussian)'
         self._order = '(1, 0)'  # Placeholder for ARMA order if needed
+        self._today = date.today()
         
     
         # Set the initial state starting values if not provided
@@ -388,7 +392,7 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
-    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None):
+    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, yname=None):
         """
         Set model parameters and matrices.
         @ return: None
@@ -400,17 +404,19 @@ class StateSpaceModel:
         @ param Sigma0: Initial covariance estimate
         @ param Xbeta: Exogenous variables
         @ param beta: Coefficients for exogenous variables
+        @ param xbeta_names: Names for the exogenous variables (optional)
+        @ param yname: Name for the dependent variable (optional)
         """
         # Check parameters
 
         self._update_parameters(
-            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
 
         flag, msg = self._check_parameters()
         if not flag:
             raise ValueError(msg)
 
-    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names=None ):
+    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names=None, yname=None):
         """
         Helper function to update model parameters if provided.
         """
@@ -460,12 +466,21 @@ class StateSpaceModel:
         else:
             self._xbeta_names = [f"X_{i}" for i in range(self._b)]
 
+        if yname is not None:
+            self._yname = yname
+        else:
+            self._yname = "y"
+
 
         return True
 
     @ property
     def xbeta_names(self):
         return self._xbeta_names
+    
+    @ property
+    def yname(self):
+        return self._yname
 
     def _check_parameters(self):
         """
@@ -618,7 +633,7 @@ class StateSpaceModel:
 
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
-    def filter(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
+    def filter(self, y_t, yname = None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
         """
         Kalman Filter using jax.lax.scan for variable-length inputs.
 
@@ -626,8 +641,9 @@ class StateSpaceModel:
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
         # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
         
+
         # Run the scan
         tStart = time.time()
 
@@ -926,21 +942,75 @@ class StateSpaceModel:
         if not hasattr(self, '_beta'):
             self._beta = None
 
-    def summary(self, print_output: bool = True) -> str:
-        """Return or print a short summary with key shapes and metrics."""
-        st = "\nState Space Model Summary \n"
 
-        st += "------------------------------------ \n"
-        st += "State Space formulas:\n"
-        st += f"y(t) = X {getattr(self.Xbeta, 'shape', None)} beta + H {self.H.shape} x(t) + e(t) ~N(0, R {self.R.shape}) \n"
-        st += f"x(t) = F {self.F.shape} x(t-1) + u(t) ~N(0, Q {self.Q.shape}) \n \n"
+    def summary(self, print_output: str = "full") -> Summary:        
+        """Return or print a structured summary of the model."""
+        self.model = SimpleNamespace()
+        self.model.results = np.array([0])
+        self.params = self.beta
+        self.param_names = self.xbeta_names
+        self.model.bse = np.zeros(len(self.beta))
+        self.model.tvalues = np.zeros(len(self.beta))
+        self.model.pvalues = np.zeros(len(self.beta))
 
-        return st
+        # top-left / top-right small tables
+        p, q, T  = self.shape if hasattr(self, 'shape') else (None, None, None)
+        
+        top_left = dict([
+            ('Model name:', lambda: [self.__class__.__name__]),
+            ('Model type:', lambda: [self.type if hasattr(self, 'type') else "None"]),
+            ('Model order:', lambda: [self.order if hasattr(self, 'order') else "None"]),
+            ('Dep. Variable:', lambda: [self.yname]),
+            ('Date:', lambda: [self._today]),
+            ])
+        
+        top_right = dict([
+            ('Shape (p, q, T) :', lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
+            ('JAX devices:', lambda: [f"{jax.devices()}"]),
+
+        ])
+
+        # Generate the dictionaly        
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append( (item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append( (item, top_right[item]()))
+        
+        # Generate the summary 
+        smry = Summary()
+        smry.add_table_2cols(self,title="State Space Model results",
+                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+        
+        if print_output == "short":
+            return smry
+        else: 
+            st = "Methods:\n"
+            st += "-"*60 + "\n"
+            st += ".filter(): A recursive algorithm to estimate the state \n"
+            st += ".smoother(): Aprovides smoothed estimates of the state \n"
+            st += ".estimate(): A method that runs the smoother and computes expected values \n" 
+            st += ".sim(): Simulates data from the model given the parameters \n"
+            st += "\n"
+        
+
+            st += "Reference:\n"
+            st += "-"*60 + "\n"
+            st += "Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.\n"
+
+            smry.add_extra_txt([st])
+
+            return smry
+
+
 
     def __str__(self):
         """String representation of the model."""
 
-        return self.summary(print_output=True)
+        return str(self.summary(print_output="short"))
 
     def __repr__(self):
         return self.__str__()
