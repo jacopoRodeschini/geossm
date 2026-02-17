@@ -17,6 +17,7 @@ from statsmodels.iolib.summary import Summary
 from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date, datetime
+import jax
 
 
 
@@ -32,9 +33,9 @@ class SSMResults:
 
     # main likelihood / info
     llf: Optional[float] = None  # log-likelihood (scalar)
-    time_filter: Optional[float] = None
-    time_smoother: Optional[float] = None
-    time_expectation: Optional[float] = None
+    time_filter: Optional[float] = 0.0
+    time_smoother: Optional[float] = 0.0
+    time_expectation: Optional[float] = 0.0  
 
     # raw outputs (JAX or NumPy arrays). Keep None default to allow partial results.
     y_obs: ArrayLike = None           # (p, T)
@@ -50,9 +51,11 @@ class SSMResults:
     P_lag: ArrayLike = None           # (q, q, T)  lag-one covariances
 
     Xbeta: ArrayLike = None           # (q, q, T)  lag-one covariances
+    
+    # optional regression outputs (if model includes exogenous regressors)
     beta: ArrayLike = None
     xbeta_names: ArrayLike = None
-
+    
     # optional sufficient statistics from E-step
     S11: ArrayLike = None
     S10: ArrayLike = None
@@ -295,24 +298,27 @@ class SSMResults:
         stats = self.diagnostics()
 
         # top-left / top-right small tables
+        p, q, T  = self.model.shape if hasattr(self.model, 'shape') else (None, None, None)
         
         top_left = dict([
-            ('Model type:', lambda: [self.model.__class__.__name__]),
+            ('Model name:', lambda: [self.model.__class__.__name__]),
+            ('Model type:', lambda: [self.model.type if hasattr(self.model, 'type') else "None"]),
+            ('Model order:', lambda: [self.model.order if hasattr(self.model, 'order') else "None"]),
             ('Dep. Variable:', lambda: [self.yname]),
             ('Date:', lambda: [self.today]),
-            ('Number of Obs:', lambda: [self.nobs]),
-            ('Number of points:', lambda: [self.nspace]),
+            # ('Number of obs:', lambda: [self.nobs]),
+            # ('Number of series:', lambda: [self.nspace]),
+            #('Time length:', lambda: [self.ntime]),
+            ('Shape (p, q, T) :', lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ('# missing:', lambda: [self.missing]),
-            ('Time lenght:', lambda: [self.ntime]),
             ('Log-Likelihood:', lambda: ["%#8.5g" % self.llf]),
-            ("Runtime filter (s):", lambda: [f"{self.time_filter:.3g}"]),
+            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
+            ('JAX devices:', lambda: [f"{jax.devices()}"]),
+            ('Runtime total (s):', lambda: [f"{(self.time_filter or 0) + (self.time_smoother or 0) + (self.time_expectation or 0):.3g}"]),
             ])
         
-        if getattr(self, 'time_smoother', None) is not None:
-            top_left["Runtime smoother (s):"] = lambda: [f"{self.time_smoother:.4g}"]
-
         top_right = {
-            'jb:': lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
+            'Jarque-Bera:': lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
             'Omnibus test:': lambda: f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})",
             'Durbin-Watson:': lambda: f"{stats['dw']:.2f}",
             'Skewness:': lambda: f"{stats['skew']:.2f}",
@@ -320,6 +326,9 @@ class SSMResults:
             'MSE:': lambda: f"{self.mse():.2f}",
             'RMSE:': lambda: f"{self.rmse():.2f}",
             'Coverage Prob.:': lambda: f"{self._coverage_probability():.2f}, (alpha = 0.05)",
+            "Runtime filter (s):": lambda: f"{self.time_filter:.3g}",
+            "Runtime smoother (s):": lambda: f"{self.time_smoother:.3g}",
+            "Runtime expectation (s):": lambda: f"{self.time_expectation:.3g}",
         }
 
         # Generate the dictionaly        
@@ -335,13 +344,6 @@ class SSMResults:
         smry = Summary()
         smry.add_table_2cols(self,title="State Space Model results",
                              gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
-
-        # add the model params
-        smry.add_table_params(
-            self,
-            yname=None,
-            xname=self.param_names
-        )
 
         return smry
     

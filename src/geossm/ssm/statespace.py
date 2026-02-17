@@ -348,6 +348,10 @@ class StateSpaceModel:
         self._q = None  # number of state equation
         self._b = None  # number of regression coefficent
 
+        self._type = 'Linear (Gaussian)'
+        self._order = '(1, 0)'  # Placeholder for ARMA order if needed
+        
+    
         # Set the initial state starting values if not provided
         if x0 is None:
             x0 = np.zeros(F.shape[0])
@@ -363,6 +367,17 @@ class StateSpaceModel:
         self.set(H=H, F=F, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
         # define the filtered attribute ?
+    @property
+    def type(self):
+        return self._type
+    
+    @property
+    def order(self):
+        return self._order
+    
+    @property
+    def shape(self):
+        return (self._p, self._q, self._T)
 
     def __call__(self, y_t):
         """
