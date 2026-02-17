@@ -12,8 +12,8 @@ import jax
 from geossm.ssm import StateSpaceModel as ssm
 
 # %% create the ssm model
-p = 10
-q = 6
+p = 1
+q = 1
 b = 3
 T = 100
 
@@ -24,10 +24,10 @@ F = 0.85 * np.eye(q)
 H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
 
 # measueremtent error covaraince matrix
-R = 0.2 * np.eye(p)
+R = 0.4 * np.eye(p)
 
 # innovetion covariance matrix
-Q = 0.5 * np.eye(q)
+Q = 1 * np.eye(q)
 
 # regression design matrix
 Xbeta = np.random.normal(0, 1, size=(p, b, T))
@@ -62,6 +62,7 @@ plt.show()
 # %% Estimate the model (by filtering the data)
 
 results = model.filter(y_sim)
+print(results)
 
 # print the summary of the results
 print(results.summary())
@@ -109,7 +110,7 @@ plt.show()
 y_hat = results.y_hat
 
 # get the confidence interval
-lower, upper = results.conf_int_y(alpha=0.05)
+lower, upper = results.conf_int_y(alpha=0.05, prediction=True)
 
 
 t = np.arange(y_hat.shape[1])
@@ -149,17 +150,8 @@ print("Coverage probability global:", cov_prov_global)
 print("Coverage probability space:", cov_prov_space.mean())
 print("Coverage probability time:", cov_prov_time.mean())
 
-# plot the coverage probability in time
-plt.plot(cov_prov_time,label='Coverage Probability time')
-plt.xlabel("Time")
-plt.ylabel("Coverage Probability")
-plt.title("Coverage Probability Over Time")
-plt.legend()
-plt.grid()
-plt.show()
 
-
-# %% Another example of filtering with increasing noise
+# %% Example of filtering
 
 # create the model
 p = 1
@@ -211,9 +203,9 @@ plt.show()
 # print the result summary
 print(results)
 
-# %% Filtering performance under increasing noise
-p = 1
-q = 1
+# %% Example of filtering under increasing noise
+p = 2
+q = 2
 b = 3
 T = 100
 
@@ -250,6 +242,51 @@ ax.set_xticks(range(len(np.linspace(0.1, d, num=num))))
 ax.set_xticklabels([f"{sigma2:.2f}" for sigma2 in np.linspace(0.1, d, num=num)])
 plt.show()
 
+
+# %% Estimated coverage probability under increasing level of noise
+
+# increasing noise variance
+p = 1
+q = 1
+b = 3
+T = 100
+
+F = 0.90 * np.eye(q)
+H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
+Q = 0.6 * np.eye(q)
+
+Xbeta = np.random.normal(0, 1, size=(p, b, T))
+beta = np.ones(b)
+
+cov_prob = []
+d = 10
+num = 20
+domain = np.linspace(0.1, 10, num=num)
+for sigma2e in domain:
+    R = sigma2e * np.eye(p)
+    model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
+
+    # simulate the data
+    y_sim, x_sim, tdelta = model.sim(seed=1234)
+
+    # filter the state
+    res = model.filter(y_sim)
+
+    # compute the state rmse
+    cov_prob.append(res.coverage_probability(which='global'))
+
+
+snr = Q.diagonal() / domain
+
+# plot the rmse
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(cov_prob, marker='o')
+ax.set_title('State RMSE vs Measurement Noise Variance')
+ax.set_xlabel('Measurement Noise Variance (sigma^2)')
+ax.set_ylabel('RMSE')
+ax.set_xticks(range(len(np.linspace(0.1, d, num=num))))
+ax.set_xticklabels([f"{lam:.2f}" for lam in snr])
+plt.show()
 
 
 

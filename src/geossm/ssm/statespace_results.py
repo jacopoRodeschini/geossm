@@ -200,30 +200,37 @@ class SSMResults:
             raise ValueError("y_hat not available.")
 
         # try using model H and P_smoothed to compute predictive var
+        p, T = y_hat.shape
+
         model = getattr(self, "model", None)
                 
         Psm = None
         if self.P_smoothed is not None:
-            Psm = self.P_smoothed[:,:,1:]# exclude t=0
+            Psm = self.P_smoothed
         elif self.P_filtered is not None:
-            Psm = self.P_filtered[:,:,1:] # fallback to filtered covariances if smoothed not available
+            Psm = self.P_filtered # fallback to filtered covariances if smoothed not available
         else:
             Psm = None
          
+
         if model is not None and hasattr(model, "H") and Psm is not None:
             H = np.asarray(model.H)
             R = np.asarray(getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0)))
-            T = Psm.shape[-1]
-            p = H.shape[0]
-            std = np.zeros((p, T))
+            # std = np.zeros((p, T))
+            lower = np.zeros((p, T))
+            upper = np.zeros((p, T))
+            
             for t in range(T):
-                var_y = H @ Psm[:, :, t] @ H.T
-                if prediction and getattr(model, "R", None) is not None:
-                    var_y = var_y + np.asarray(model.R)
-                std[:, t] = np.sqrt(np.maximum(np.diag(var_y), 0.0))
-            lower = y_hat - z * std
-            upper = y_hat + z * std
+                var_y = H @ Psm[:, :, t+1] @ H.T
+                if prediction:
+                    var_y = var_y + R
+                
+                std_t = np.sqrt(np.diag(var_y))
+            
+                lower[:, t] = y_hat[:, t] - z * std_t
+                upper[:, t] = y_hat[:, t] + z * std_t
             return lower, upper
+
 
         # fallback to residual std
         err = self._compute_residuals()
@@ -248,7 +255,7 @@ class SSMResults:
         """
         y_true = self.y_obs
 
-        lower, upper = self.conf_int_y(alpha, prediction  = False)
+        lower, upper = self.conf_int_y(alpha, prediction  = True)
         
         inside = (y_true >= lower) & (y_true <= upper)
         
@@ -385,7 +392,6 @@ class SSMResults:
             "P_filtered": self.P_filtered,
             "x_smoothed": self.x_smoothed,
             "P_smoothed": self.P_smoothed,
-            "P_lag": self.P_lag,
             "llf": self.llf,
             "mse": self.mse("global"),
             "rmse": self.rmse("global"),
