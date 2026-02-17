@@ -7,7 +7,7 @@ summary. Keep this as a lightweight adapter — heavy inference (bootstrap,
 Hessian) should live in the fitter.
 """
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional, Any, Tuple, Dict
 
 import numpy as np
@@ -48,7 +48,7 @@ class SSMResults:
     K: ArrayLike = None               # Kalman gains (maybe last or full history)
     x_smoothed: ArrayLike = None      # (q, T+1)
     P_smoothed: ArrayLike = None      # (q, q, T+1)
-    P_lag: ArrayLike = None           # (q, q, T)  lag-one covariances
+    P_pred_smoothed: ArrayLike = None           # (q, q, T)  lag-one covariances
 
     Xbeta: ArrayLike = None           # (q, q, T)  lag-one covariances
     
@@ -69,6 +69,20 @@ class SSMResults:
     # Convert all quantity to numpy array 
     def __post_init__(self):
         self = self.to_numpy()
+
+    
+    # Update function 
+    def update(self, **kwargs) -> "SSMResults":
+        """
+        Return a NEW SSMResults with updated fields.
+        """
+        valid_fields = set(self.__dataclass_fields__)
+
+        for key in kwargs:
+            if key not in valid_fields:
+                raise AttributeError(f"{key} is not a valid field of SSMResults")
+
+        return replace(self, **kwargs)
 
     # ---------- Utility methods ----------
     def to_numpy(self) -> "SSMResults":
@@ -161,11 +175,11 @@ class SSMResults:
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
         if which == "smoothed":
-            mean = self._to_numpy(self.x_smoothed)
-            cov = self._to_numpy(self.P_smoothed)
+            mean = self.x_smoothed
+            cov = self.P_smoothed
         elif which == "filtered":
-            mean = self._to_numpy(self.x_filtered)
-            cov = self._to_numpy(self.P_filtered)
+            mean = self.x_filtered
+            cov = self.P_filtered
         else:
             raise ValueError("which must be 'smoothed' or 'filtered'")
 
@@ -181,13 +195,21 @@ class SSMResults:
         """Confidence intervals for y_hat. If prediction True include measurement noise R when available."""
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
-        y_hat = self._to_numpy(self.y_hat)
+        y_hat = self.y_hat
         if y_hat is None:
             raise ValueError("y_hat not available.")
 
         # try using model H and P_smoothed to compute predictive var
         model = getattr(self, "model", None)
-        Psm = self._to_numpy(self.P_smoothed)
+                
+        Psm = None
+        if self.P_smoothed is not None:
+            Psm = self.P_smoothed[:,:,1:]# exclude t=0
+        elif self.P_filtered is not None:
+            Psm = self.P_filtered[:,:,1:] # fallback to filtered covariances if smoothed not available
+        else:
+            Psm = None
+         
         if model is not None and hasattr(model, "H") and Psm is not None:
             H = np.asarray(model.H)
             R = np.asarray(getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0)))

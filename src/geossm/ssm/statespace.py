@@ -613,12 +613,11 @@ class StateSpaceModel:
 
         return flag, "\n".join(messages)
 
-    def estimate(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
+    def estimate(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
 
 
         # run the smoother
-        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
-
+        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
@@ -666,7 +665,7 @@ class StateSpaceModel:
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
-    def smoother(self, y_t, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
+    def smoother(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
         """
         Kalman smoother using jax.lax.scan for efficient, T-independent compilation.
 
@@ -676,20 +675,33 @@ class StateSpaceModel:
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
         # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
 
         # First, run the filter to get necessary inputs for the smoother
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, td_filter = self.filter(
-            y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta)
+        res_filter = self.filter(
+            y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
         
         # Now run the smoother
         tStart = time.time() 
         x_T, P_T, P_T_1 = _smoother_kernelJAX(
-            self.H, self.F, x_t, P_t, K, x_t_1, P_t_1, invP_t_1)
+            self.H, self.F, res_filter.x_filtered, res_filter.P_filtered, res_filter.K, res_filter.x_pred, res_filter.P_pred, res_filter.invP_pred)
         
         td_smoother = time.time() - tStart
 
-        return (x_T, P_T, P_T_1, logL, td_filter, td_smoother)
+        # compute expected values (given the smoothed values)
+        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+            x_T, P_T, P_T_1)
+        
+        # update the results object with the smoothed values and expected values
+        res_smooth = res_filter.update(
+            x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=P_T_1, y_hat=y_hat, S11=S11, S10=S10, S00=S00, time_smoother=td_smoother, time_expectation=tdelta_expectation
+        )
+        
+        # return (x_T, P_T, P_T_1, res_filter.llf, res_filter.time_filter, td_smoother)
+        
+        return res_smooth
+        
+
 
 
     def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
