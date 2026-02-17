@@ -59,33 +59,56 @@ ax.legend()
 plt.show()
 
 
-# %% Estimate the model (estimate the state equation)
+# %% Estimate the model (by filtering the data)
 
 results = model.filter(y_sim)
 
-
+# print the summary of the results
 print(results.summary())
-
 
 
 # %% The residual array are all numpy array 
 
-
-# get residuals
+# Get residuals
 res = results.residuals
+
+# Plot the grouped by boxplot (firs 50 days)
+plt.figure(figsize=(8, 6))
+plt.boxplot(res[:,:50], labels=[f"${i}$" for i in range(res.shape[1])][:50])
+plt.title("Boxplot of Residuals by Time")
+plt.xlabel("Time")
+plt.ylabel("Residuals")
+plt.xticks(rotation=45)
+plt.tight_layout()
+plt.grid()
+plt.show()
+
+# %% Get the goodness of fit
 
 # get the mse
 mse_global= results.mse('global')
 mse_space= results.mse('space')
 mse_time= results.mse('time')
 
+print("MSE global:", mse_global)
+print("MSE space:", mse_space.mean())
+print("MSE time:", mse_time.mean())
+
 # plot the mse in time
-plt.plot(mse_time)
+plt.plot(mse_time,label='MSE time')
+plt.xlabel("Time")
+plt.ylabel("MSE")
+plt.title("Mean Squared Error Over Time")
+plt.legend()
+plt.grid()
+plt.show()
 
-# %% Get the prediction
+# %% Get the prediction and confidence interval
 
+# get the predicted values
 y_hat = results.y_hat
 
+# get the confidence interval
 lower, upper = results.conf_int_y(alpha=0.05)
 
 
@@ -95,16 +118,22 @@ plt.figure()
 plt.plot(t, y_hat[0])
 plt.plot(t, y_sim[0],'x')
 plt.fill_between(t, lower[0], upper[0], alpha=0.3)
-
+plt.grid()
 plt.xlabel("Time")
 plt.ylabel("Value")
 plt.title("Prediction with 95% Confidence Interval")
-
 plt.show()
 
 # %% Get the residual diagnostics
 
 stats = results.diagnostics()
+
+# print the diagnostics
+print("Jarque-Bera test statistic:", stats['jb'])
+print("Jarque-Bera p-value:", stats['jb_pvalue'])
+print("Omnibus test statistic:", stats['omni'])
+print("Omnibus test p-value:", stats['omni_pvalue'])
+
 
 # %% Get dictionaly of the resutls
 
@@ -112,7 +141,23 @@ results_dict = results.as_dict()
 
 # %% Get the coverage probability
 
+cov_prov_global = results.coverage_probability(which='global')
 cov_prov_space = results.coverage_probability(which='space')
+cov_prov_time = results.coverage_probability(which='time')
+
+print("Coverage probability global:", cov_prov_global)
+print("Coverage probability space:", cov_prov_space.mean())
+print("Coverage probability time:", cov_prov_time.mean())
+
+# plot the coverage probability in time
+plt.plot(cov_prov_time,label='Coverage Probability time')
+plt.xlabel("Time")
+plt.ylabel("Coverage Probability")
+plt.title("Coverage Probability Over Time")
+plt.legend()
+plt.grid()
+plt.show()
+
 
 
 
