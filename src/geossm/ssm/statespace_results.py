@@ -39,8 +39,9 @@ class SSMResults:
 
     # raw outputs (JAX or NumPy arrays). Keep None default to allow partial results.
     y_obs: ArrayLike = None           # (p, T)
+    yname: ArrayLike = None
     y_hat: ArrayLike = None           # (p, T), expected observation from smoothed states
-    x_filtered: ArrayLike = None      # (q, T+1) including t=0
+    x_filtered: ArrayLike = None      # (q, T+1) 
     P_filtered: ArrayLike = None      # (q, q, T+1)
     x_pred: ArrayLike = None          # (q, T)
     P_pred: ArrayLike = None          # (q, q, T)
@@ -70,7 +71,6 @@ class SSMResults:
     def __post_init__(self):
         self = self.to_numpy()
 
-    
     # Update function 
     def update(self, **kwargs) -> "SSMResults":
         """
@@ -152,22 +152,6 @@ class SSMResults:
         return float(np.sqrt(v))
 
     # ---------- Confidence intervals ----------
-    def _std_from_cov(self, cov: np.ndarray) -> np.ndarray:
-        """Return standard deviations from covariance array.
-        Accepts cov shape (q,q,T) or (q,q) and returns shape (q,T) or (q,1).
-        """
-        cov = np.asarray(cov)
-        if cov.ndim == 3:
-            q, _, T = cov.shape
-            std = np.zeros((q, T))
-            for t in range(T):
-                std[:, t] = np.sqrt(np.maximum(np.diag(cov[:, :, t]), 0.0))
-            return std
-        if cov.ndim == 2:
-            return np.sqrt(np.maximum(np.diag(cov), 0.0))[:, None]
-        # fallback
-        return np.sqrt(np.maximum(cov, 0.0))
-
     def conf_int_state(self, which: str = "smoothed", alpha: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
         """Return (lower, upper) CI arrays for states.
         which: 'smoothed'|'filtered' -> uses P_smoothed or P_filtered and corresponding means.
@@ -186,9 +170,13 @@ class SSMResults:
         if mean is None or cov is None:
             raise ValueError("State means or covariances are not available.")
 
-        std = self._std_from_cov(cov)  # (q,T) or (q,1)
-        lower = mean - z * std
-        upper = mean + z * std
+        lower = np.zeros_like(mean)
+        upper = np.zeros_like(mean)
+        for t in range(mean.shape[1]):
+            std = np.sqrt(np.diag(cov[:, :, t]))
+            lower[:,t] = mean[:, t] - z * std
+            upper[:,t] = mean[:, t] + z * std
+            
         return lower, upper
 
     def conf_int_y(self, alpha: float = 0.05, prediction: bool = False) -> Tuple[np.ndarray, np.ndarray]:

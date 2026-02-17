@@ -330,7 +330,7 @@ class StateSpaceModel:
     A class representing a State Space Model with Kalman filtering capabilities.
     """
 
-    def __init__(self, H, R, F, Q, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, dtype=jnp.float32):
+    def __init__(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, dtype=jnp.float32):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
@@ -355,7 +355,6 @@ class StateSpaceModel:
         self._order = '(1, 0)'  # Placeholder for ARMA order if needed
         self._today = date.today()
         
-    
         # Set the initial state starting values if not provided
         if x0 is None:
             x0 = np.zeros(F.shape[0])
@@ -368,9 +367,16 @@ class StateSpaceModel:
         if beta is None:
             beta = np.zeros(Xbeta.shape[1])
 
-        self.set(H=H, F=F, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        # Update parameters without checking (we will check after setting all parameters)
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
 
-        # define the filtered attribute ?
+        # Check parameters only if the key parameters are set (alow for partial initialization)
+        if self.H is not None and self.F is not None and self.Q is not None and self.R is not None:
+            flag, msg = self._check_parameters()
+            if not flag:
+                raise ValueError(msg)
+
+
     @property
     def type(self):
         return self._type
@@ -412,9 +418,6 @@ class StateSpaceModel:
         self._update_parameters(
             F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
 
-        flag, msg = self._check_parameters()
-        if not flag:
-            raise ValueError(msg)
 
     def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names=None, yname=None):
         """
@@ -473,14 +476,6 @@ class StateSpaceModel:
 
 
         return True
-
-    @ property
-    def xbeta_names(self):
-        return self._xbeta_names
-    
-    @ property
-    def yname(self):
-        return self._yname
 
     def _check_parameters(self):
         """
@@ -615,7 +610,6 @@ class StateSpaceModel:
 
     def estimate(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
 
-
         # run the smoother
         x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
         # compute expected values
@@ -642,6 +636,11 @@ class StateSpaceModel:
         # Update parameters if provided
         self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
         
+        # Check parameters
+        flag, msg = self._check_parameters()
+        if not flag:
+            raise ValueError(msg)
+
 
         # Run the scan
         tStart = time.time()
@@ -676,6 +675,11 @@ class StateSpaceModel:
         """
         # Update parameters if provided
         self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+
+        # Check parameters
+        flag, msg = self._check_parameters()
+        if not flag:
+            raise ValueError(msg)
 
         # First, run the filter to get necessary inputs for the smoother
         res_filter = self.filter(
@@ -862,6 +866,14 @@ class StateSpaceModel:
     @property
     def shape(self):
         return (self.p, self.q, self.T)
+
+    @ property
+    def xbeta_names(self):
+        return self._xbeta_names
+    
+    @ property
+    def yname(self):
+        return self._yname
 
     # ----------------- Pickle support -----------------
     def __getstate__(self):
