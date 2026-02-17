@@ -25,6 +25,9 @@ from shapely.geometry import Polygon
 from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
+from .geossm.ssm import StateSpaceModel
+from .geossm.ssm.statespace_results import StateSpaceResults
+
 
 # %% [Utils] Updating formula, JAX (M-Step)
 
@@ -389,7 +392,7 @@ def _ei_jax(i, dim):
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
-class LRStateSpaceModel:
+class LRStateSpaceModel(StateSpaceModel):
 
     def __init__(self, df, formulas, domain=None, verbose=True):
 
@@ -416,6 +419,10 @@ class LRStateSpaceModel:
             raise ValueError(msg)
         else:
             self._domain = self._setDomain(domain)
+
+        # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
+        super().__init__()
+
 
     @property
     def domain(self):
@@ -545,6 +552,9 @@ class LRStateSpaceModel:
             Q = block_diag(
                 *[jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32)) for mt in invQ])
 
+            # Inizialisate the SSM with the current parameters (we need it for the E step)
+            super().set(H=H, R=R, F=F, Q=Q, Xbeta=Xbeta, beta=est_params.beta.value, x0=est_params.x0.value, Sigma0=est_params.Sigma0.value)
+            
             # ---- E step
             y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
                 y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
@@ -583,19 +593,27 @@ class LRStateSpaceModel:
     def cov_function(self):
         return self._cov_matern
 
-    def _E_step(self, y_t, R, F, H, Q, est_x0, est_Sigma0, Xbeta, est_beta):
+    def _E_step(self, y_t):
 
         # E step: compute the expected values of the latent factors and the log-likelihood
         # 1) Create the SSM object with the current parameters
         # 2) Run the Kalman filter and smoother to get the expected values of the latent factors and the log-likelihood
 
-        # Create the SSM object with the current parameters
-        ssmodel = StateSpaceModel(
-            H, R, F, Q, Xbeta=Xbeta, beta=est_beta, x0=est_x0, Sigma0=est_Sigma0)
-
         # Run the Kalman filter and smoother to get the expected values of the latent factors and the log-likelihood
-        y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation = ssmodel.estimate(
-            y_t)
+        # Call the parent class's estimate method to perform the Kalman filter and smoother
+        results = super().estimate(y_t)
+          
+        y_hat = results.y_hat
+        x_T = results.x_smoothed
+        P_T = results.P_smoothed
+        P_T_1 = results.P_pred_smoothed
+        S11 = results.S11
+        S10 = results.S10
+        S00 = results.S00
+        logL = results.llf
+        tdelta_filter = results.time_filter
+        tdelta_smoother = results.time_smoother
+        tdelta_expectation = results.time_expectation
 
         tdelta = np.array([tdelta_filter, tdelta_smoother,
                           tdelta_expectation], dtype=jnp.float32)
