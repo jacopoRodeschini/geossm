@@ -16,18 +16,19 @@ import pickle
 
 import geossm
 
-# print("Version: ", geossm.__version__)
+print("Version: ", geossm.__version__)
 print("Load from: ", geossm.__file__)
 
-# %% Create the State Space Model (SSM)
-# Type = linear time-invariant SSM
-
+# Import the StateSpaceModel class from geossm.ssm
 if geossm.__file__:
     from geossm.ssm import StateSpaceModel as ssm
     from geossm.utils import KeyStream
 
 
-# create the paametrisetim matrix
+# %% Create the State Space Model (SSM)
+# Type = linear time-invariant SSM
+
+# create the model parameters
 p = 10
 q = 6
 b = 3
@@ -53,7 +54,11 @@ beta = np.ones(b)
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta,
             x0=None, Sigma0=None, dtype=np.float32)
 
-# %% save the model using pickale
+# %% print the model summary
+print(model)
+print(model.summary())
+
+# %% Save the model using pickle
 filename = "model.pkl"
 
 with open(filename, 'wb') as file:
@@ -63,11 +68,6 @@ with open(filename, 'wb') as file:
 with open(filename, 'rb') as file:
     mymodel = pickle.load(file)
     print(mymodel)
-
-
-# %% print the model
-print(model)
-print(model.summary())
 
 # %% Get and Set model attibute
 
@@ -88,17 +88,21 @@ print(model.F.diagonal())
 
 # %% Simulate the model
 
-# use the internal Xbeta
-y_sim, x_sim = model.sim(seed=1234)
+# Use the default Xbeta (see the ssm() for details)
+y_sim, x_sim, tdelta = model.sim(seed=1234)
+print("Simulate response y:", y_sim.shape)
+print("Simulate stete x:", x_sim.shape)
+print("Computation time tDelta (s):", tdelta)
 
 
-# %% Simualte with new beta
+# %% Simulate with new Xbeta
 
 Xbeta = np.random.normal(1, 2, size=(p, b, 100))
-y_sim, x_sim = model.sim(seed=1234, Xbeta=Xbeta)
+y_sim, x_sim, tdelta = model.sim(seed=1234, Xbeta=Xbeta)
 
 print("Simulate response y:", y_sim.shape)
 print("Simulate stete x:", x_sim.shape)
+print("Computation time tDelta (s):", tdelta)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -111,92 +115,6 @@ ax.legend()
 plt.show()
 
 
-# %% Filter
-
-# create the model
-p = 1
-q = 1
-b = 3
-T = 100
-
-F = 0.90 * np.eye(q)
-H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
-R = 0.2 * np.eye(p)
-Q = 0.6 * np.eye(q)
-
-Xbeta = np.random.normal(0, 1, size=(p, b, T))
-beta = np.ones(b)
-
-model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta,
-            x0=None, Sigma0=None, dtype=jax.numpy.float32)
-
-print(model.summary())
-
-# simulate the data
-y_sim, x_sim = model.sim(seed=1234)
-
-# filter the state
-x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta = model.filter(y_sim)
-
-print("Filtered state x_t:", x_t.shape)
-print("Filtered state covariance P_t:", P_t.shape)
-print("Kalman gain K:", K.shape)
-print("Predicted state x_t_1:", x_t_1.shape)
-print("Predicted state covariance P_t_1:", P_t_1.shape)
-print("Predicted state invP_t_1:", invP_t_1.shape)
-print("Log-likelihood logL:", logL)
-print("Computation time tDelta (s):", tDelta)
-
-# plot one time-series
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[0, :], label='Simulated observation (y)')
-ax.plot(x_sim[0, :], label='Simulated state (x_sim)')
-ax.plot(x_t[0, :], ':', label='Filtered state (x_t)')
-ax.set_title('Filtered Time Series')
-ax.set_xlabel('Time')
-ax.set_ylabel('Value')
-ax.legend()
-plt.show()
-
-
-# %% Filtering performance under increasing noise
-p = 1
-q = 1
-b = 3
-T = 100
-
-F = 0.90 * np.eye(q)
-H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
-Q = 0.6 * np.eye(q)
-
-Xbeta = np.random.normal(0, 1, size=(p, b, T))
-beta = np.ones(b)
-
-rmse = []
-d = 10
-num = 20
-for sigma2 in np.linspace(0.1, 10, num=num):
-    R = sigma2 * np.eye(p)
-    model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
-
-    # simulate the data
-    y_sim, x_sim = model.sim(seed=1234)
-
-    # filter the state
-    x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta = model.filter(y_sim)
-
-    # compute the rmse
-    rmse.append(np.sqrt(np.mean((x_sim - x_t)**2)))
-
-# plot the rmse
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(rmse, marker='o')
-ax.set_title('RMSE vs Measurement Noise Variance')
-ax.set_xlabel('Measurement Noise Variance (sigma^2)')
-ax.set_ylabel('RMSE')
-ax.set_xticks(range(len(np.linspace(0.1, d, num=num))))
-ax.set_xticklabels([f"{sigma2:.2f}" for sigma2 in np.linspace(0.1, d, num=num)])
-plt.show()
 
 
 # %% Smooth
