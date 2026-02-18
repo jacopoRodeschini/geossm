@@ -12,10 +12,10 @@ import jax
 from geossm.ssm import StateSpaceModel as ssm
 
 # %% create the ssm model
-p = 1
-q = 1
+p = 10
+q = 2
 b = 3
-T = 100
+T = 50
 
 # markovian matrix
 F = 0.85 * np.eye(q)
@@ -24,10 +24,10 @@ F = 0.85 * np.eye(q)
 H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
 
 # measueremtent error covaraince matrix
-R = 0.4 * np.eye(p)
+R = 8 * np.eye(p)
 
 # innovetion covariance matrix
-Q = 1 * np.eye(q)
+Q = 10 * np.eye(q)
 
 # regression design matrix
 Xbeta = np.random.normal(0, 1, size=(p, b, T))
@@ -40,9 +40,7 @@ model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta,
 print(model)
 
 # %% Simulate the model
-
-Xbeta = np.random.normal(1, 2, size=(p, b, T))
-y_sim, x_sim, tdelta = model.sim(seed=1234, Xbeta=Xbeta)
+y_sim, x_sim, tdelta = model.sim(seed=1234)
 
 print("Simulate response y:", y_sim.shape)
 print("Simulate stete x:", x_sim.shape)
@@ -51,12 +49,37 @@ print("runtime", tdelta)
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.plot(y_sim[0, :], label='Simulated observation (y)')
-ax.plot(x_sim[0, :], ':', label='Simulated state (x)')
+ax.plot(x_sim[0, :T], ':', label='Simulated state (x)')
 ax.set_title('Simulated Time Series')
 ax.set_xlabel('Time')
 ax.set_ylabel('Value')
 ax.legend()
 plt.show()
+
+# %% Simulate with dirrent beta
+
+# regression design matrix
+Xbeta = np.random.normal(1, 2, size=(p, b, 100))
+beta = 2 * np.ones(b)
+
+y_sim, x_sim, tdelta = model.sim(seed=1234, Xbeta=Xbeta, beta=beta)
+
+T = model.T
+ 
+print("Simulate response y:", y_sim.shape)
+print("Simulate stete x:", x_sim.shape)
+print("runtime", tdelta)
+
+# plot one time-series
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(y_sim[0, :], label='Simulated observation (y)')
+ax.plot(x_sim[0, :T], ':', label='Simulated state (x)')
+ax.set_title('Simulated Time Series')
+ax.set_xlabel('Time')
+ax.set_ylabel('Value')
+ax.legend()
+plt.show()
+
 
 
 # %% Estimate the model (by filtering the data)
@@ -66,6 +89,27 @@ print(results)
 
 # print the summary of the results
 print(results.summary())
+
+# %% Coverage probability of the state 
+
+lower, upper = results.conf_int_state(alpha=0.05, which="filtered")
+t = np.arange(T)
+
+plt.figure()
+plt.plot(t, x_sim[0, :T], label='Simulated state (x)')
+plt.plot(t, results.x_filtered[0, 1:], ':', label='Filtered state (x_filtered)')
+plt.fill_between(t, lower[0][1:], upper[0][1:], alpha=0.3, label='95% Confidence Interval')
+plt.grid()
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.title("Filtered State with 95% Confidence Interval")
+plt.legend()
+plt.show()
+
+# compute the coverage probability
+inner = (x_sim[0,:T] >= lower[0, 1:]) & (x_sim[0, :T] <= upper[0, 1:])
+coverage_probability = np.mean(inner)
+print("Coverage Probability of the Filtered State:", coverage_probability)
 
 
 # %% The residual array are all numpy array 
@@ -161,8 +205,8 @@ T = 100
 
 F = 0.90 * np.eye(q)
 H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
-R = 0.2 * np.eye(p)
-Q = 0.6 * np.eye(q)
+R = 2 * np.eye(p)
+Q = 6 * np.eye(q)
 
 Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
@@ -187,12 +231,12 @@ print("Predicted state invP_t_1:", results.invP_pred.shape)
 print("Log-likelihood logL:", results.llf)
 print("Computation time tDelta (s):", results.time_filter)
 
-x_t = results.x_filtered
+x_t = results.x_filtered[:,1:]
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.plot(y_sim[0, :], label='Simulated observation (y)')
-ax.plot(x_sim[0, :], label='Simulated state (x_sim)')
+ax.plot(x_sim[0, :T], label='Simulated state (x_sim)')
 ax.plot(x_t[0, :], ':', label='Filtered state (x_t)')
 ax.set_title('Filtered Time Series')
 ax.set_xlabel('Time')
@@ -211,7 +255,7 @@ T = 100
 
 F = 0.90 * np.eye(q)
 H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
-Q = 0.6 * np.eye(q)
+Q = 6 * np.eye(q)
 
 Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
@@ -219,7 +263,7 @@ beta = np.ones(b)
 rmse = []
 d = 10
 num = 20
-for sigma2e in np.linspace(0.1, 10, num=num):
+for sigma2e in np.linspace(1, d, num=num):
     R = sigma2e * np.eye(p)
     model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
 
@@ -230,7 +274,7 @@ for sigma2e in np.linspace(0.1, 10, num=num):
     res = model.filter(y_sim)
 
     # compute the state rmse
-    rmse.append(np.sqrt(np.mean((x_sim - res.x_filtered)**2)))
+    rmse.append(np.sqrt(np.mean((x_sim[:,:T] - res.x_filtered[:,1:])**2)))
 
 # plot the rmse
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -238,22 +282,22 @@ ax.plot(rmse, marker='o')
 ax.set_title('State RMSE vs Measurement Noise Variance')
 ax.set_xlabel('Measurement Noise Variance (sigma^2)')
 ax.set_ylabel('RMSE')
-ax.set_xticks(range(len(np.linspace(0.1, d, num=num))))
-ax.set_xticklabels([f"{sigma2:.2f}" for sigma2 in np.linspace(0.1, d, num=num)])
+ax.set_xticks(range(len(np.linspace(1, d, num=num))))
+ax.set_xticklabels([f"{sigma2:.2f}" for sigma2 in np.linspace(1, d, num=num)])
 plt.show()
 
 
 # %% Estimated coverage probability under increasing level of noise
 
 # increasing noise variance
-p = 1
-q = 1
+p = 100
+q = 10
 b = 3
 T = 100
 
 F = 0.90 * np.eye(q)
 H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
-Q = 0.6 * np.eye(q)
+Q = 1 * np.eye(q)
 
 Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
@@ -261,7 +305,7 @@ beta = np.ones(b)
 cov_prob = []
 d = 10
 num = 20
-domain = np.linspace(0.1, 10, num=num)
+domain = np.linspace(1, d, num=num)
 for sigma2e in domain:
     R = sigma2e * np.eye(p)
     model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
@@ -276,7 +320,7 @@ for sigma2e in domain:
     cov_prob.append(res.coverage_probability(which='global'))
 
 
-snr = Q.diagonal() / domain
+snr = np.mean(Q.diagonal()) / domain
 
 # plot the rmse
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -284,7 +328,7 @@ ax.plot(cov_prob, marker='o')
 ax.set_title('State RMSE vs Measurement Noise Variance')
 ax.set_xlabel('Measurement Noise Variance (sigma^2)')
 ax.set_ylabel('RMSE')
-ax.set_xticks(range(len(np.linspace(0.1, d, num=num))))
+ax.set_xticks(range(len(np.linspace(1, d, num=num))))
 ax.set_xticklabels([f"{lam:.2f}" for lam in snr])
 plt.show()
 
