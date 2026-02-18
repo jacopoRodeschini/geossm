@@ -2,6 +2,6 @@
 
 
 from .statespace import StateSpaceModel
-from .statespace_results import SSMResults
+from .statespace_results import StateSpaceResults
 
-__all__ = ["StateSpaceModel", "SSMResults"]
+__all__ = ["StateSpaceModel", "StateSpaceResults"]
