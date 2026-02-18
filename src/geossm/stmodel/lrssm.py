@@ -8,6 +8,7 @@ import jax.numpy as jnp
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
 from geossm.covmodel import spdeAppoxCov
+from statsmodels.iolib.summary import Summary
 
 from jax import jit, lax
 import scipy.sparse as sp
@@ -25,8 +26,8 @@ from shapely.geometry import Polygon
 from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
-from .geossm.ssm import StateSpaceModel
-from .geossm.ssm.statespace_results import StateSpaceResults
+from .stmodel_results import LRStateSpaceResults
+from types import SimpleNamespace
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
@@ -399,16 +400,29 @@ class LRStateSpaceModel(StateSpaceModel):
         self.df = df
         self.formulas = formulas
 
+        # Overwrite the model attributes
+        self.model_name = "Low-Rank State Space Model"
+        self.type = "Linear (Gaussian)"
+        self.order = (1, 0)  # ARMA order (p, d, q) - not used in this model but kept for compatibility
+
         # Compute the design matrices
         if verbose:
             self.print_info("Building observation grid...")
         
-        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, self.T = self._buildObservationGrid(
+        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = self._buildObservationGrid(
             df, formulas)
+        
         
         if verbose:
             self.print_info("Building design matrix...")    
-        self.y_train, self.Xbeta_train = self._buildDesignMatrix()
+        
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        self.y_train, Xbeta_train = self._buildDesignMatrix()
+        
+        # get response name
+        self.ynames = [g._y_design_info.column_names for g in self.gridList]
+        xbeta_names = [g._x_design_info.column_names for g in self.gridList]
 
         # Check the domain
         if verbose:
@@ -419,9 +433,14 @@ class LRStateSpaceModel(StateSpaceModel):
             raise ValueError(msg)
         else:
             self._domain = self._setDomain(domain)
+        
+        self._cov_matern = None
 
         # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
-        super().__init__()
+        # y_train will be used later for estimation and for the results
+        super().__init__(Xbeta=Xbeta_train, 
+                         beta=None, 
+                         xbeta_names=xbeta_names)
 
 
     @property
@@ -556,7 +575,7 @@ class LRStateSpaceModel(StateSpaceModel):
             super().set(H=H, R=R, F=F, Q=Q, Xbeta=Xbeta, beta=est_params.beta.value, x0=est_params.x0.value, Sigma0=est_params.Sigma0.value)
             
             # ---- E step
-            y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
+            y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
                 y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
 
             # ---- M step, get the updated parameters
@@ -586,8 +605,24 @@ class LRStateSpaceModel(StateSpaceModel):
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
+            
+        
 
-        return est_params, y_hat, x_T, P_T, self.cov_function, nstat
+        # create the results object
+        results = LRStateSpaceResults(
+            formulas=self.formulas,
+            params=est_params,
+            Xbeta=Xbeta,
+            y_obs=y_obs,
+            points=points,
+            y_hat=y_hat, 
+            x_smoothed=x_T, 
+            P_smoothed=P_T, 
+            cov_function=self.cov_function, 
+            nstat=nstat)
+
+        return results
+    
     
     @property
     def cov_function(self):
@@ -606,7 +641,7 @@ class LRStateSpaceModel(StateSpaceModel):
         y_hat = results.y_hat
         x_T = results.x_smoothed
         P_T = results.P_smoothed
-        P_T_1 = results.P_pred_smoothed
+        # P_T_1 = results.P_pred_smoothed
         S11 = results.S11
         S10 = results.S10
         S00 = results.S00
@@ -618,7 +653,7 @@ class LRStateSpaceModel(StateSpaceModel):
         tdelta = np.array([tdelta_filter, tdelta_smoother,
                           tdelta_expectation], dtype=jnp.float32)
 
-        return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta
+        return y_hat, x_T, P_T, S11, S10, S00, logL, tdelta
 
     def _M_step(self, y_t, y_hat, F, H, Xbeta, est_covList, block_p, block_q, x_T,
                 P_T, S11, S10, S00, Phi):
@@ -850,8 +885,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return new_params
     
-    
-    
+       
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
         nvar = len(points)
@@ -1099,63 +1133,163 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return history
     
     
-    def __str__(self):
-
-        flag = False
-        if hasattr(self, '_cov_matern'):
-            qdim = [cov.fem_solver.n_inner_points for cov in self._cov_matern]
-            covfs = [str(cov) for cov in self._cov_matern]
-            nlat = self.nlat
-            flag = True
-        else:
-            qdim = 'None'
-            covfs = 'None'
-            nlat = 'None'
+    def summary(self, print_output: str = "full") -> Summary:        
+        """Return or print a structured summary of the model."""
+        self.model = SimpleNamespace()
+        self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
         
-        lines = []
+        len_sep = 89
+         
+        # top-left / top-right small tables
+        p, q, T  = self.shape if hasattr(self, 'shape') else (None, None, None)
 
-        lines.append("LRStateSpaceModel")
-        lines.append("-" * 60)
+        # Generate the summary 
+        smry = Summary()
+        
+        # Header        
+        top_left = dict([
+            ('Model name:', lambda: [self.__class__.__name__]),
+            ('Model type:', lambda: [self.type if hasattr(self, 'type') else "None"]),
+            ('Model order:', lambda: [self.order if hasattr(self, 'order') else "None"]),
+            ('Dep. Variables:', lambda: [self.ynames if hasattr(self, 'ynames') else "None"]),
+            ('Date:', lambda: [self._today]),
+            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
+            ('JAX devices:', lambda: [f"{jax.devices()}"])
+            ])
+        
+        top_right = dict([
+            ('Shape (p, q, T) :', lambda: f"(p = {p}, q = {q}, T = {T})"),
+            ('Diag. R', lambda: f"{jnp.mean(jnp.diag(self.R)):2f}" if self.R is not None else 'None'),
+            ('Diag. Q', lambda: f"{jnp.mean(jnp.diag(self.Q)):2f}" if self.Q is not None else 'None'),
+            ('Diag. F', lambda: f"{jnp.mean(jnp.diag(self.F)):2f}" if self.F is not None else 'None'),
+            ('mean x0', lambda: f"{jnp.mean(self.x0):2f}" if self.x0 is not None else 'None'),
+            ('mean Sigma0', lambda: f"{jnp.mean(jnp.diag(self.Sigma0)):2f}" if self.Sigma0 is not None else 'None'),
+        ])
 
-        lines.append(f"Observed variables : {self.nvar} - {self.ndim}")
-        lines.append(f"Latent factors     : {nlat} - {qdim}")
-        lines.append(f"Domain             : {[d.geom_type for d in self.domain]}")
+        # Generate the dictionaly        
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append( (item, list(top_left[item]())))
 
-        lines.append("-" * 60)
-        formulas = [gr.formula for gr in self.gridList]
-        lines.append("Observation eqs    :")
-        lines.extend(f"  - {f}" for f in formulas)
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append( (item, top_right[item]()))
+        
+        # Add the header to the summary
+        smry.add_table_2cols(self, title="State Space Model",
+                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+        
 
+        # todo: add the grid / fomula details (e.g., number of points, dimensions, etc.)
+        string_grid = []
+        string_grid.append("Observation Grid Details:")
+        string_grid.append('=' * len_sep)  # separator between grids
+        
+        for i, grid in enumerate(self.gridList):
+            grid_details = dict([
+                ('Grid type:', lambda: ['Sparse']),
+                ('Response y:', lambda: f"{grid._y_design_info.column_names}({grid.y.shape})"),
+                ('Formula:', lambda: f"{grid.formula}"),
+                ('Design X:', lambda: f"{grid.X.shape}"),
+                ('Points:', lambda: f"{grid.points.shape}"),
+                ('Geometry:', lambda: f"{grid.geometry}"),
+                ('Time steps:', lambda: f"{grid.T}"),  
+                ('CRS', lambda: f"{grid.crs}")
+            ])
 
-        lines.append("-" * 60)
-        if flag:
-            lines.append(f"Covariance         :")
-            lines.extend(f"  - {cf}" for cf in covfs)
+            # Generate the dictionaly        
+            temp = []
+            for item in grid_details.keys():
+                temp.append( (item, grid_details[item]()))
+
+            string_grid.append(self.format_info_table(temp, indent=0))
+            
+            
+            if i == len(self.gridList) - 1:
+                    continue
+            else:
+                string_grid.append('-' * len_sep)  # separator between grids
+        
+        
+        string_grid.append("\nCovariance Function Details:")
+        string_grid.append('=' * len_sep)  # separator between covariance functions
+          
+
+        if self._cov_matern is None or len(self._cov_matern) == 0:
+            string_grid.append("No covariance functions defined.")
         else:
-            lines.append("Covariance         : None (not set up)")
+            # Covariance function details (one table per latent domain)
+            for i, cov in enumerate(self._cov_matern):
+                cov_details = dict([
+                    ('Cov. type:', lambda: [cov.__class__.__name__]),
+                    ('Rescale (range):', lambda: f"{cov.rescale:.2f}"),
+                    ('Variance:', lambda: f"{cov.var:.2f}"),
+                    ('Nu:', lambda: f"{cov.nu:.2f}"),
+                    ('Latent dim.:', lambda: f"{cov.fem_solver.n_inner_points}"),
+                    ('Mesh box:', lambda: f"{cov.fem_solver.box}"),
+                    ('Mesh vertex', lambda: f"{cov.fem_solver.nvertex}, inner: {cov.fem_solver.n_inner_points}"),
+                    ('Mesh triangles:', lambda: f"{cov.fem_solver.nelements}"),
+                    ('Mesh lines:', lambda: f"{cov.fem_solver.nbElements}"),
+                    
+                ])
+                
+                # Generate the dictionaly        
+                temp = []
+                for item in cov_details.keys():
+                    temp.append( (item, cov_details[item]()))
+                
+                string_grid.append(self.format_info_table(temp, indent=0))
+                
+                if i == len(self._cov_matern) - 1:
+                    continue
+                else:
+                    string_grid.append('-' * len_sep)  # separator between grids
+        
+                
+        st = "\nReference:\n"
+        st += "="*len_sep + "\n"
+        st += "Rodeschini, Jacopo, Lorenzo Tedesco, Francesco Finazzi, Philipp Otto, and Alessandro Fassò. \"Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data.\" arXiv preprint arXiv:2509.12825 (2025).\n"
 
-        lines.append("-" * 60)
-        lines.append("Model structure:")
-        lines.append("-" * 60)
-        lines.append(self.model_structure(qdim))
+        string_grid.append(st)
+        
+        smry.add_extra_txt(string_grid)
 
-        lines.append("-" * 60)
-        lines.append(f"JAX backend        : {jax.default_backend()}")
-        lines.append(f"JAX devices        : {jax.devices()}")
+        return smry
 
+        
+        
+    def format_info_table(self, items, indent=0):
+        """
+        Format a list of (key, value) tuples into a clean aligned string.
+    
+        Parameters
+        ----------
+        items : list of tuples
+            [(key, value), ...]
+        indent : int
+            Number of spaces to indent each row.
+    
+        Returns
+        -------
+        str
+            Nicely formatted multi-line string.
+        """
+        # Compute longest key for alignment
+        max_key_len = max(len(str(k)) for k, _ in items)
+    
+        lines = []
+        pad = " " * indent
+    
+        for key, value in items:
+            key = str(key).rstrip(":") + ":"
+            
+            # Convert lists to readable string
+            if isinstance(value, list):
+                value = ", ".join(map(str, value))
+    
+            lines.append(f"{pad}{key:<{max_key_len+1}} {value}")
+    
         return "\n".join(lines)
-
-    def model_structure(self,  qdim):
-        """Return a formatted summary of the state-space structure."""
-
-        return (
-            "Observation equation:\n"
-            + f"  y(t) = X{getattr(self.Xbeta_train, 'shape', 'None')} beta + H({self.pdim},{qdim}) x(t)"
-            + f"+ e(t),  e(t) ~ N(0, R({self.pdim}, {self.pdim}))\n\n"
-            + "State equation:\n"
-            + f"  x(t) = F({qdim},{qdim}) x(t-1) "
-            + f"+ u(t),  u(t) ~ N(0, Q({qdim},{qdim}))\n"
-        )
         
     def print_info(self, msg):
         print(f"{time.time()} - {msg}")
