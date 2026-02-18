@@ -704,9 +704,6 @@ class StateSpaceModel:
         # return (x_T, P_T, P_T_1, res_filter.llf, res_filter.time_filter, td_smoother)
         
         return res_smooth
-        
-
-
 
     def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
 
@@ -720,7 +717,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    def sim(self, seed=1234, Xbeta=None) -> jnp.ndarray:
+    def sim(self, seed=1234, Xbeta=None, beta = None) -> jnp.ndarray:
 
         # def sim(keys, R, F, H, Q, x0, Sigma0, Xbeta, beta):
         """
@@ -738,9 +735,16 @@ class StateSpaceModel:
         # Get dimensions from input shapes
         if Xbeta is None:
             Xbeta = self.Xbeta
+            beta = self.beta
             T = self.T
         else:
-            T = Xbeta.shape[2]
+            self.set(Xbeta=Xbeta, beta=beta)
+
+            # Check parameters
+            flag, msg = self._check_parameters()
+            if not flag:
+                raise ValueError(msg)
+    
             # check Xbeta shape compatibility
             if Xbeta.shape[0] != self.p:
                 raise ValueError(
@@ -986,13 +990,17 @@ class StateSpaceModel:
             ('Model order:', lambda: [self.order if hasattr(self, 'order') else "None"]),
             ('Dep. Variable:', lambda: [self.yname]),
             ('Date:', lambda: [self._today]),
+            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
+            ('JAX devices:', lambda: [f"{jax.devices()}"])
             ])
         
         top_right = dict([
-            ('Shape (p, q, T) :', lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
-            ('JAX devices:', lambda: [f"{jax.devices()}"]),
-
+            ('Shape (p, q, T) :', lambda: f"(p = {p}, q = {q}, T = {T})"),
+            ('Diag. R', lambda: f"{jnp.mean(jnp.diag(self.R)):2f}" if self.R is not None else 'None'),
+            ('Diag. Q', lambda: f"{jnp.mean(jnp.diag(self.Q)):2f}" if self.Q is not None else 'None'),
+            ('Diag. F', lambda: f"{jnp.mean(jnp.diag(self.F)):2f}" if self.F is not None else 'None'),
+            ('mean x0', lambda: f"{jnp.mean(self.x0):2f}" if self.x0 is not None else 'None'),
+            ('mean Sigma0', lambda: f"{jnp.mean(jnp.diag(self.Sigma0)):2f}" if self.Sigma0 is not None else 'None'),
         ])
 
         # Generate the dictionaly        
@@ -1006,7 +1014,7 @@ class StateSpaceModel:
         
         # Generate the summary 
         smry = Summary()
-        smry.add_table_2cols(self,title="State Space Model results",
+        smry.add_table_2cols(self,title="State Space Model",
                              gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
         
         if print_output == "short":
