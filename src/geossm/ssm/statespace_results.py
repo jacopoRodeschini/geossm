@@ -25,7 +25,7 @@ ArrayLike = Optional[Any]
 
 
 @dataclass
-class SSMResults:
+class StateSpaceResults:
     # metadata
     model: Optional[Any]
     nobs: Optional[int] = None
@@ -57,7 +57,7 @@ class SSMResults:
     beta: ArrayLike = None
     xbeta_names: ArrayLike = None
     
-    # optional sufficient statistics from E-step
+    # optional sufficient statistics from the estimation (E-step)
     S11: ArrayLike = None
     S10: ArrayLike = None
     S00: ArrayLike = None

@@ -14,7 +14,7 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 
-from .statespace_results import SSMResults
+from .statespace_results import StateSpaceResults
 
 
 # %% JAX kernel functions for SSM
@@ -356,9 +356,9 @@ class StateSpaceModel:
         self._today = date.today()
         
         # Set the initial state starting values if not provided
-        if x0 is None:
+        if x0 is None and F is not None and Q is not None:
             x0 = np.zeros(F.shape[0])
-        if Sigma0 is None:
+        if Sigma0 is None and F is not None and Q is not None:
             Sigma0 = np.eye(F.shape[0])
 
         # Set default Xbeta and beta if not provided
@@ -376,14 +376,37 @@ class StateSpaceModel:
             if not flag:
                 raise ValueError(msg)
 
+    @ property
+    def xbeta_names(self):
+        return self._xbeta_names
+    
+    @ xbeta_names.setter
+    def xbeta_names(self, value):
+        self._xbeta_names = value
+    
+    @ property
+    def yname(self):
+        return self._yname
+    
+    @ yname.setter
+    def yname(self, value):
+        self._yname = value
 
     @property
     def type(self):
         return self._type
     
+    @type.setter
+    def type(self, value:str):
+        self._type = value
+    
     @property
     def order(self):
         return self._order
+    
+    @order.setter
+    def order(self, value):
+        self._order = value
     
     @property
     def shape(self):
@@ -419,7 +442,7 @@ class StateSpaceModel:
             F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
 
 
-    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names=None, yname=None):
+    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names: list=None, yname:list =None):
         """
         Helper function to update model parameters if provided.
         """
@@ -440,9 +463,15 @@ class StateSpaceModel:
 
         if x0 is not None:
             self._x0 = jnp.asarray(x0, dtype=self.dtype)
+        else:
+            if self.q is not None:
+                self._x0 = jnp.zeros(self.q, dtype=self.dtype)
 
         if Sigma0 is not None:
             self._Sigma0 = jnp.asarray(Sigma0, dtype=self.dtype)
+        else:
+            if self.q is not None:
+                self._Sigma0 = jnp.eye(self.q, dtype=self.dtype)
 
         if Xbeta is not None:
             self._Xbeta = jnp.asarray(Xbeta, dtype=self.dtype)
@@ -460,14 +489,17 @@ class StateSpaceModel:
                 self._b = None
         
         if xbeta_names is not None:
-            if len(xbeta_names) != len(self._b):
+            # Count total number of xbeta names across all the variables
+            len_xbeta_names = sum([len(xb_names) for xb_names in xbeta_names])
+
+            if len_xbeta_names != int(self._b):
                 raise ValueError(
-                    f"Expected {len(self._b)} xbeta names, got {len(xbeta_names)}."
+                    f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}."
                 )
             self._xbeta_names = xbeta_names
             
         else:
-            self._xbeta_names = [f"X_{i}" for i in range(self._b)]
+            self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
 
         if yname is not None:
             self._yname = yname
@@ -616,7 +648,7 @@ class StateSpaceModel:
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
         
-        results = SSMResults(
+        results = StateSpaceResults(
             y_hat=y_hat, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
             x_T=x_T, P_T=P_T, P_T_1=P_T_1, S11=S11, S10=S10, S00=S00, logL=logL,
             tdelta_filter=tdelta_filter, tdelta_smoother=tdelta_smoother, tdelta_expectation=tdelta_expectation
@@ -655,7 +687,7 @@ class StateSpaceModel:
             x_t, P_t, P_t_1)
         
 
-        results  = SSMResults(model=self, 
+        results  = StateSpaceResults(model=self, 
                               y_obs=y_t, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
                               x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
                               P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
