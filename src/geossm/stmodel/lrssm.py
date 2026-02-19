@@ -447,7 +447,7 @@ class LRStateSpaceModel(StateSpaceModel):
     def domain(self):
         return self._domain 
 
-    def setup(self, mesh_obj: list, domain: list = None):
+    def setup(self, mesh_obj: list = None, cov_fun: list = None, domain: list = None):
         
         # this domain is the domain on which the mesh is defined, and where the 
         # covariance function has a meaning
@@ -458,22 +458,104 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             domain  = self._domain
         
-        if len(mesh_obj) != len(domain):
-            raise ValueError(f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain)})")  
-    
         # mehs_obj = list of the latent domain
         self._cov_matern = []
-        for meshi, domi in zip(mesh_obj, domain):
+        
+        # Check the consistency of the inputs
+        if mesh_obj is None and cov_fun is None:
+            raise ValueError("Or mesh_obj or cov_fun must be provided")
+        
+        # If mesh_obj is provided, we create the covariance model of the matern for each domain, 
+        # and we store it in the list _cov_matern
+        if mesh_obj is not None:
 
-            # create the covariance model of the matern
-            temp = spdeAppoxCov(
-                [domi], latlon=False, nu=1, var=1, rescale=1)
-            self._cov_matern.append(temp.setup(meshi))
+            if len(mesh_obj) != len(domain):
+                raise ValueError(f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain)})")  
 
+            for meshi, domi in zip(mesh_obj, domain):
+
+                # create the covariance model of the matern
+                temp = spdeAppoxCov(
+                    [domi], latlon=False, nu=1, var=1, rescale=1)
+                self._cov_matern.append(temp.setup(meshi))
+
+
+        
+        # If cov_fun is provided, we check that it is a list of covariance functions of the same length
+        # as the number of domains, and we store it in the list _cov_matern
+        if cov_fun is not None:
+            
+            if len(cov_fun) != len(domain):
+                raise ValueError(f"Number of covariance functions ({len(cov_fun)}) must match number of domains ({len(domain)})")
+
+            for covi, domi in zip(cov_fun, domain):
+
+                # check if the covariance function is an instance of spdeAppoxCov
+                if not isinstance(covi, spdeAppoxCov):
+                    raise ValueError("Covariance function must be an instance of spdeAppoxCov")
+
+                self._cov_matern.append(covi)
+        
         self.nlat = len(self._cov_matern)
-
+        
         return self
-    
+
+
+    def sim(self, seed=1234, params: ModelParams = None):
+
+       #  params = self._parseParams(params)
+        
+        # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
+        A = params.A.value
+        s2e = params.s2e.value
+        f = params.f.value
+        beta = params.beta.value
+        ks = params.ks.value
+        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
+        qdim = jnp.array(
+            [cov.fem_solver.n_inner_points for cov in self.cov_function], dtype=jnp.int32)
+
+        # Get global constants
+        nvar = self.nvar  # len(self.pdim)
+        nlat = self.nlat
+
+        points = self.points
+        
+        # Compute the basis matrix (just one) - no boundary
+        basis = self._buildBasis_list(points, self.cov_function)
+        Phi = self._buildH_dense(
+            jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
+
+        # ---- build parametrised matrices
+        H = self._buildH_dense(A, basis)  # dense
+
+        # R, F = buildRF(est_s2e, est_f, pdim, qdim)
+        R, F = self._buildRF_dense(s2e, f, pdim, qdim)
+
+        # Compute the maginal precision matrix
+        invQ = []
+        for fcov in self.cov_function:
+            invQi = fcov.precision()
+
+            # index of the inner points (i.e. the points of the latent domain)
+            inx = fcov.fem_solver.inner
+            Q_11 = invQi[inx, :][:, inx]
+            Q_12 = invQi[inx, :][:, ~inx]
+            Q_22 = invQi[~inx, :][:, ~inx]
+
+            # Marginal precision matrix of the inner points (i.e. the points of the latent domain)
+            Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
+
+            invQ.append(Q_mar)
+
+        # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
+        Q = block_diag(
+            *[jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32)) for mt in invQ])
+
+        # Simulate the SSM using the parent class method (we need to pass the parameters to it)
+        y_sim, x_sim, tdelta = super().sim(seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=self.Xbeta, beta=beta)
+
+        return y_sim, x_sim, tdelta
 
     def fit(self, params0: ModelParams | None = None, options: FitOptions | None = None):
 
