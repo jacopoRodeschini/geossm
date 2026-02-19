@@ -31,7 +31,6 @@ from scipy.sparse.linalg import splu
 
 # %% Utility functions
 
-
 def meshio_to_mfem_mesh(meshio_mesh):
     """
     Converts a meshio.Mesh object to an mfem.Mesh object in memory
