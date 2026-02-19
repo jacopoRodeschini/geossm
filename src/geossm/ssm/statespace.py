@@ -749,9 +749,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    def sim(self, seed=1234, Xbeta=None, beta = None) -> jnp.ndarray:
-
-        # def sim(keys, R, F, H, Q, x0, Sigma0, Xbeta, beta):
+    def sim(self, seed=1234, Xbeta=None, beta = None, R=None, F=None, H=None, Q=None, x0=None, Sigma0=None) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
         This version does NOT use JIT compilation and is therefore slower.
@@ -764,26 +762,16 @@ class StateSpaceModel:
             y_t : (p, T) JAX array of simulated observations
             x_t : (q, T+1) JAX array of simulated state vectors [x_0, ..., x_T]
         """
-        # Get dimensions from input shapes
-        if Xbeta is None:
-            Xbeta = self.Xbeta
-            beta = self.beta
-            T = self.T
-        else:
-            self.set(Xbeta=Xbeta, beta=beta)
+        # Update parameters if provided
+        xbeta_names = None
+        yname = None
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+        
+        # Check parameters
+        flag, msg = self._check_parameters()
+        if not flag:
+            raise ValueError(msg)
 
-            # Check parameters
-            flag, msg = self._check_parameters()
-            if not flag:
-                raise ValueError(msg)
-    
-            # check Xbeta shape compatibility
-            if Xbeta.shape[0] != self.p:
-                raise ValueError(
-                    f"Xbeta first dimension must be {self.p}, got {Xbeta.shape[0]}")
-            if Xbeta.shape[1] != self.b:
-                raise ValueError(
-                    f"Xbeta second dimension must be {self.b}, got {Xbeta.shape[1]}")
 
         if isinstance(seed, KeyStream):
             keys = seed
