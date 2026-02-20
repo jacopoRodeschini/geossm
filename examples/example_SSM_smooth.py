@@ -117,7 +117,7 @@ plt.show()
 seed = jax.random.PRNGKey(1234)
 
 stream = KeyStream(seed)
-y_sim, x_sim, tdelta = model.sim(stream)
+y_sim, x_sim, tdelta = model.sim(seed = stream)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -143,7 +143,7 @@ class mystream(KeyStream):
 
 
 stream = mystream()
-y_sim, x_sim, tdelta = model.sim(stream, Xbeta)
+y_sim, x_sim, tdelta = model.sim(seed=stream)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))

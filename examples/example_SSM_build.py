@@ -94,7 +94,7 @@ print("Simulate stete x:", x_sim.shape)
 print("Computation time tDelta (s):", tdelta)
 
 
-# %% Simulate with new Xbeta
+# %% Simulate with some update paramites Xbeta
 
 Xbeta = np.random.normal(1, 2, size=(p, b, 100))
 y_sim, x_sim, tdelta = model.sim(seed=1234, Xbeta=Xbeta)

@@ -88,7 +88,7 @@ results = model.filter(y_sim)
 print(results)
 
 # print the summary of the results
-print(results.summary())
+print(results) # = print(results.summary())
 
 # %% Coverage probability of the state 
 
