@@ -120,33 +120,29 @@ class StateSpaceResults:
             if value is not None and not isinstance(value, np.ndarray):
                 setattr(self, attr, np.asarray(value))
 
-    # ---------- Utility methods ----------
-    def to_numpy(self) -> "StateSpaceResults":
-        """Convert stored arrays to NumPy in-place and return self."""
-        exclude = {"model"}
-
-        for name in self.__dataclass_fields__:
-            if name in exclude:
-                continue
-
-            val = getattr(self, name, None)
-            if val is not None and isinstance(val, jnp.ndarray):
-                setattr(self, name, self._to_numpy(val))
-        return self
-    
-
-    # Update function 
     def update(self, **kwargs) -> "StateSpaceResults":
         """
         Return a NEW StateSpaceResults with updated fields.
         """
-        valid_fields = set(self.__dataclass_fields__)
 
+        # Collect all current attributes (excluding private ones if desired)
+        current_data = {
+            k: v
+            for k, v in self.__dict__.items() if k not in ["today"] and not k.startswith("_")
+        }
+
+        # Validate keys
         for key in kwargs:
-            if key not in valid_fields:
-                raise AttributeError(f"{key} is not a valid field of StateSpaceResults")
+            if key not in current_data:
+                raise AttributeError(
+                    f"{key} is not a valid attribute of {self.__class__.__name__}"
+                )
 
-        return replace(self, **kwargs)
+        # Update values
+        current_data.update(kwargs)
+
+        # Create new instance
+        return self.__class__(**current_data)
 
 
     def _to_numpy(self, arr):
