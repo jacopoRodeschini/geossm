@@ -1,10 +1,5 @@
 """
 Convenience container for State Space Model outputs (filter + smoother).
-
-Improved SSMResults: safer defaults, clearer API, lazy conversions between
-JAX and NumPy, robust conf-int and diagnostics helpers, and a simple text
-summary. Keep this as a lightweight adapter — heavy inference (bootstrap,
-Hessian) should live in the fitter.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field, replace
@@ -23,69 +18,110 @@ import jax
 
 ArrayLike = Optional[Any]
 
-
-@dataclass
 class StateSpaceResults:
-    # metadata
-    model: Optional[Any]
-    nobs: Optional[int] = None
-    param_names: Optional[list] = None
+    """
+    Container for state-space model estimation results.
+    """
 
-    # main likelihood / info
-    llf: Optional[float] = None  # log-likelihood (scalar)
-    time_filter: Optional[float] = 0.0
-    time_smoother: Optional[float] = 0.0
-    time_expectation: Optional[float] = 0.0  
+    def __init__(
+        self,
+        # metadata
+        model: Optional[Any] = None,
+        nobs: Optional[int] = None,
+        param_names: Optional[list] = None,
 
-    # raw outputs (JAX or NumPy arrays). Keep None default to allow partial results.
-    y_obs: ArrayLike = None           # (p, T)
-    yname: ArrayLike = None
-    y_hat: ArrayLike = None           # (p, T), expected observation from smoothed states
-    x_filtered: ArrayLike = None      # (q, T+1) 
-    P_filtered: ArrayLike = None      # (q, q, T+1)
-    x_pred: ArrayLike = None          # (q, T)
-    P_pred: ArrayLike = None          # (q, q, T)
-    invP_pred: ArrayLike = None
-    K: ArrayLike = None               # Kalman gains (maybe last or full history)
-    x_smoothed: ArrayLike = None      # (q, T+1)
-    P_smoothed: ArrayLike = None      # (q, q, T+1)
-    P_pred_smoothed: ArrayLike = None           # (q, q, T)  lag-one covariances
+        # likelihood / info
+        llf: Optional[float] = None,
+        time_filter: float = 0.0,
+        time_smoother: float = 0.0,
+        time_expectation: float = 0.0,
 
-    Xbeta: ArrayLike = None           # (q, q, T)  lag-one covariances
+        # main arrays
+        y_obs: ArrayLike = None,
+        yname: ArrayLike = None,
+        y_hat: ArrayLike = None,
+        x_filtered: ArrayLike = None,
+        P_filtered: ArrayLike = None,
+        x_pred: ArrayLike = None,
+        P_pred: ArrayLike = None,
+        invP_pred: ArrayLike = None,
+        K: ArrayLike = None,
+        x_smoothed: ArrayLike = None,
+        P_smoothed: ArrayLike = None,
+        P_pred_smoothed: ArrayLike = None,
+        Xbeta: ArrayLike = None,
+
+        # regression outputs
+        beta: ArrayLike = None,
+        xbeta_names: ArrayLike = None,
+
+        # sufficient statistics
+        S11: ArrayLike = None,
+        S10: ArrayLike = None,
+        S00: ArrayLike = None):
+
+        # ---- metadata ----
+        self.model = model
+        self.nobs = nobs
+        self.param_names = param_names
+
+        # ---- likelihood ----
+        self.llf = llf
+        self.time_filter = time_filter
+        self.time_smoother = time_smoother
+        self.time_expectation = time_expectation
+
+        # ---- arrays ----
+        self.y_obs = y_obs
+        self.yname = yname
+        self.y_hat = y_hat
+        self.x_filtered = x_filtered
+        self.P_filtered = P_filtered
+        self.x_pred = x_pred
+        self.P_pred = P_pred
+        self.invP_pred = invP_pred
+        self.K = K
+        self.x_smoothed = x_smoothed
+        self.P_smoothed = P_smoothed
+        self.P_pred_smoothed = P_pred_smoothed
+        self.Xbeta = Xbeta
+
+        # ---- regression ----
+        self.beta = beta
+        self.xbeta_names = xbeta_names
+
+        # ---- sufficient stats ----
+        self.S11 = S11
+        self.S10 = S10
+        self.S00 = S00
+
+        # ---- metadata ----
+        self.today = date.today()
+
+        # ---- internal cache ----
+        self._residuals: Optional[np.ndarray] = None
+
+        # convert arrays if needed
+        self.to_numpy()
+
+    # Utility method to convert array-like inputs to numpy arrays
     
-    # optional regression outputs (if model includes exogenous regressors)
-    beta: ArrayLike = None
-    xbeta_names: ArrayLike = None
-    
-    # optional sufficient statistics from the estimation (E-step)
-    S11: ArrayLike = None
-    S10: ArrayLike = None
-    S00: ArrayLike = None
-
-    today = date.today()
-
-    # internal cache
-    _residuals: Optional[np.ndarray] = field(default=None, init=False, repr=False)
-
-    # Convert all quantity to numpy array 
-    def __post_init__(self):
-        self = self.to_numpy()
-
-    # Update function 
-    def update(self, **kwargs) -> "SSMResults":
+    def to_numpy(self):
         """
-        Return a NEW SSMResults with updated fields.
+        Convert array-like attributes to numpy arrays if needed.
         """
-        valid_fields = set(self.__dataclass_fields__)
-
-        for key in kwargs:
-            if key not in valid_fields:
-                raise AttributeError(f"{key} is not a valid field of SSMResults")
-
-        return replace(self, **kwargs)
+        for attr in [
+            "y_obs", "y_hat", "x_filtered", "P_filtered",
+            "x_pred", "P_pred", "invP_pred", "K",
+            "x_smoothed", "P_smoothed", "P_pred_smoothed",
+            "Xbeta", "beta", "S11", "S10", "S00"
+        ]:
+            value = getattr(self, attr)
+            if value is not None and not isinstance(value, np.ndarray):
+                setattr(self, attr, np.asarray(value))
 
     # ---------- Utility methods ----------
-    def to_numpy(self) -> "SSMResults":
+    def to_numpy(self) -> "StateSpaceResults":
         """Convert stored arrays to NumPy in-place and return self."""
         exclude = {"model"}
 
@@ -98,6 +134,20 @@ class StateSpaceResults:
                 setattr(self, name, self._to_numpy(val))
         return self
     
+
+    # Update function 
+    def update(self, **kwargs) -> "StateSpaceResults":
+        """
+        Return a NEW StateSpaceResults with updated fields.
+        """
+        valid_fields = set(self.__dataclass_fields__)
+
+        for key in kwargs:
+            if key not in valid_fields:
+                raise AttributeError(f"{key} is not a valid field of StateSpaceResults")
+
+        return replace(self, **kwargs)
+
 
     def _to_numpy(self, arr):
         if arr is None:
@@ -386,3 +436,4 @@ class StateSpaceResults:
             "diagnostics": self.diagnostics(),
             "S11": self.S11, "S10": self.S10, "S00": self.S00
         }
+    
