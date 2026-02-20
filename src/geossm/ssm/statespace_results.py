@@ -26,10 +26,9 @@ class StateSpaceResults:
     def __init__(
         self,
         # metadata
-        model: Optional[Any] = None,
-        nobs: Optional[int] = None,
-        param_names: Optional[list] = None,
-
+        model: Optional[Any],
+        y_hat,
+        
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
@@ -37,9 +36,6 @@ class StateSpaceResults:
         time_expectation: float = 0.0,
 
         # main arrays
-        y_obs: ArrayLike = None,
-        yname: ArrayLike = None,
-        y_hat: ArrayLike = None,
         x_filtered: ArrayLike = None,
         P_filtered: ArrayLike = None,
         x_pred: ArrayLike = None,
@@ -49,22 +45,21 @@ class StateSpaceResults:
         x_smoothed: ArrayLike = None,
         P_smoothed: ArrayLike = None,
         P_pred_smoothed: ArrayLike = None,
-        Xbeta: ArrayLike = None,
-
-        # regression outputs
-        beta: ArrayLike = None,
-        xbeta_names: ArrayLike = None,
-
+        
         # sufficient statistics
         S11: ArrayLike = None,
         S10: ArrayLike = None,
         S00: ArrayLike = None):
 
-        # ---- metadata ----
+        # ---- metadata from the model----
         self.model = model
-        self.nobs = nobs
-        self.param_names = param_names
+        self.param_names = getattr(model, 'param_names', None)
+        self.param_dim = getattr(model, 'param_dim', None)
+        self.yname = getattr(model, 'yname', None)
 
+        self.y_obs = getattr(model, 'y_train', None)  # observed data (from model)
+        self.Xbeta = getattr(model, 'Xbeta', None)  # regression covariates (from model)
+        
         # ---- likelihood ----
         self.llf = llf
         self.time_filter = time_filter
@@ -72,8 +67,6 @@ class StateSpaceResults:
         self.time_expectation = time_expectation
 
         # ---- arrays ----
-        self.y_obs = y_obs
-        self.yname = yname
         self.y_hat = y_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
@@ -84,12 +77,7 @@ class StateSpaceResults:
         self.x_smoothed = x_smoothed
         self.P_smoothed = P_smoothed
         self.P_pred_smoothed = P_pred_smoothed
-        self.Xbeta = Xbeta
-
-        # ---- regression ----
-        self.beta = beta
-        self.xbeta_names = xbeta_names
-
+        
         # ---- sufficient stats ----
         self.S11 = S11
         self.S10 = S10
@@ -111,10 +99,9 @@ class StateSpaceResults:
         Convert array-like attributes to numpy arrays if needed.
         """
         for attr in [
-            "y_obs", "y_hat", "x_filtered", "P_filtered",
+            "y_hat", "x_filtered", "P_filtered",
             "x_pred", "P_pred", "invP_pred", "K",
-            "x_smoothed", "P_smoothed", "P_pred_smoothed",
-            "Xbeta", "beta", "S11", "S10", "S00"
+            "x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00"
         ]:
             value = getattr(self, attr)
             if value is not None and not isinstance(value, np.ndarray):
@@ -331,11 +318,11 @@ class StateSpaceResults:
         # Ensure numpy arrays for summary stats
         
         self.results = np.array([0])
-        self.params = self.beta
-        self.param_names = self.xbeta_names
-        self.bse = np.zeros(len(self.beta))
-        self.tvalues = np.zeros(len(self.beta))
-        self.pvalues = np.zeros(len(self.beta))
+        # self.params = self.beta
+        # self.param_names = self.xbeta_names
+        # self.bse = np.zeros(len(self.beta))
+        # self.tvalues = np.zeros(len(self.beta))
+        # self.pvalues = np.zeros(len(self.beta))
 
         def conf_int_parmas(alpha=0.05):
             lower = self.params - 1.96 * self.bse

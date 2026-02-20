@@ -18,60 +18,116 @@ from dataclasses import dataclass
 ArrayLike = Optional[Any]
 
 
-# %% Class definition
-@dataclass
 class LRStateSpaceResults(StateSpaceResults):
+    """
+    Results container for LR State Space estimation.
+    """
 
-    # In a dataclass, fields must be declared using type annotations
-    params : ModelParams # parameter estimates ModelParams object
-    nstats: list # EM iterations until convergence
-    options: FitOptions  # options used for the estimation (for summary and other methods)
-    
-    # formulas : list = None
-    # cov_function: list = None    # Covariance function for the innovations
-    # points : list[np.ndarray] = None          # points used for training (for prediction)
-    
-    # Attribute of the results class
-    params_names = None     # Updated in __setattr__ when params is set (array-like)
-    params_dim = None       # Updated in __setattr__ when params is set (array-like)                    
-    cov_params = None       # Updated in __setattr__ when cov_function is set (array-like)
-    
-    
-    tvalues = None
-    pvalues = None
-    aic = None
-    bic = None
-    n_params = None # Number of parameters in the model (for AIC/BIC)
+    def __init__(self, model=None, params:ModelParams=None, nstats:list=None, options:FitOptions=None, **kwargs):
+        # Initialize base class
+        super().__init__(model=model, **kwargs)
 
-    p_block = None # indecis for the multivariate case (measurement equation) 
-    q_block = None # indecis for the multivariate case (state equation)
+        # overwrite the params and nstats with the ones provided in the constructor
+        # ---- Raw inputs ----
+        self.params = params
+        self.param_names = None  # will be processed from params
+        self.param_dim = None  # will be processed from params
+        self.param_names = None # will be processed from params
 
-    # Add attibute on inference results
-    hessian = None
-    llf = None
+        self.nstats = nstats
+        self.options = options
+
+        # ---- Derived quantities (initialized empty) ----
+        self.param_names = None
+        self.param_values = None
+        self.param_dim = None
+
+        self.iterations = 0
+        self.runtime_tot = 0.0
+        self.runtime_tot_estep = 0.0
+        self.runtime_tot_mstep = 0.0
+
+        self.llf_path = None  # log-likelihood across EM iterations
+
+        # Inference (see attributes and methods below)
+        self._cov_params = None
+        self._tvalues = None
+        self._pvalues = None
+        self._aic = None
+        self._bic = None
+        self._n_params = None
+        self._hessian = None
+
+        
+
+        self._p_block = None
+        self._q_block = None
+
+        # ---- Process inputs explicitly ----
+        if self.params is not None:
+            self._process_params()
+
+        if self.nstats is not None:
+            self._process_nstats()
     
 
-    def __setattr__(self, name, value):
-        if name == 'params': 
-            # Model parameters (ModelParams object) - extract the parameter names and dimensions for summary and other methods
+    def _process_params(self):
+        """
+        Extract parameter names, values, and dimensions from ModelParams dataclass.
+        """
+
+        param_fields = self.params.__dataclass_fields__
+
+        names = []
+        values = []
+        dims = []
+
+        for field in param_fields:
+            obj = getattr(self.params, field)
+            names.append(obj.name)
             
-            self.param_name = [getattr(value, par).name for par in value.__dataclass_fields__]
-            self.param_value = [getattr(value, par).value for par in value.__dataclass_fields__]
-            self.param_dim = [v.size if hasattr(v, 'size') else 1 for v in self.param_value]
+            # name is x0 of Sigma0, get the average
+            if obj.name in ['x0']:
+                values.append(np.mean(obj.value))
+                temp_dim = 1
             
-        # em iterations statistics
-        if name == 'nstats':
-            self.iterations = value[-1]['niter'] if value is not None and len(value) > 0 else 0
-            self.runtime_tot_each = [v['time_tot'] for v in value] 
-            self.runtime_tot_estep = [v['tdelta_E'] for v in value]
-            self.runtime_tot_mstep = [v['tdelta_M'] for v in value]
-            self.runtime_tot = sum(self.runtime_tot_each)
-            self.runtime_tot_estep = sum(self.runtime_tot_estep)
-            self.runtime_tot_mstep = sum(self.runtime_tot_mstep) 
+            elif obj.name in ['Sigma0']:
+                values.append(np.mean(np.diag(obj.value)))
+                temp_dim = 1
+            
+            else:
+                values.append(obj.value.flatten())
+                temp_dim =obj.value.flatten().size
+            
+            dims.append(temp_dim)
 
-            self.llf = [v['logL'] for v in value]
+        self.param_names = names
+        self.param_values = values
+        self.param_dim = dims
+        self.n_params = sum(dims)
 
-        super().__setattr__(name, value)
+    def _process_nstats(self):
+        """
+        Extract iteration statistics from EM output.
+        """
+
+        if not self.nstats:
+            return
+
+        self.iterations = self.nstats[-1]["niter"]
+
+        runtime_each = [v["time_tot"] for v in self.nstats]
+        runtime_estep = [v["tdelta_E"] for v in self.nstats]
+        runtime_mstep = [v["tdelta_M"] for v in self.nstats]
+
+        self.runtime_tot = sum(runtime_each)
+        self.runtime_tot_estep = sum(runtime_estep)
+        self.runtime_tot_mstep = sum(runtime_mstep)
+
+        self.llf_path = [v["logL"] for v in self.nstats]
+        self.llf = self.llf_path[-1]
+
+
 
     @property
     def bse(self):
@@ -107,8 +163,43 @@ class LRStateSpaceResults(StateSpaceResults):
     def bic(self):
         return self.compute_bic()
     
+        # Compute AIC and BIC
+    def compute_aic(self):
+        """Computes the AIC (Akaike Information Criterion)."""
+        llf = self.llf
+        
+        # number of estimated parameters: try to infer from model
+        k = getattr(self, 'n_params', None)
+        if k is None and hasattr(self.model, 'beta'):
+            k = np.size(np.array(self.model.beta))
+        k = int(k) if k is not None else 0
+        self.aic = 2 * k - 2 * llf
+        return self.aic
+    
+    def compute_bic(self):
+        """Computes the BIC (Bayesian Information Criterion)."""
+        llf = self.llf
+        
+        # number of estimated parameters: try to infer from model
+        k = getattr(self, 'n_params', None)
+        if k is None and hasattr(self.model, 'beta'):
+            k = np.size(np.array(self.model.beta))
+        k = int(k) if k is not None else 0
+        
+        n = self.nobs if self.nobs is not None else 1
+        self.bic = np.log(n) * k - 2 * llf
+        return self.bic
+    
 
     def summary(self):
+        
+        # self.results = np.array([0])
+        # self.params = self.beta
+        # self.param_names = self.xbeta_names
+        # self.bse = np.zeros(len(self.beta))
+        # self.tvalues = np.zeros(len(self.beta))
+        # self.pvalues = np.zeros(len(self.beta))
+
         smry = super().summary()
         # Add parameter estimates table
 
@@ -163,33 +254,6 @@ class LRStateSpaceResults(StateSpaceResults):
        
         return smry
     
-
-    # Compute AIC and BIC
-    def compute_aic(self):
-        """Computes the AIC (Akaike Information Criterion)."""
-        llf = self.llf
-        
-        # number of estimated parameters: try to infer from model
-        k = getattr(self, 'n_params', None)
-        if k is None and hasattr(self.model, 'beta'):
-            k = np.size(np.array(self.model.beta))
-        k = int(k) if k is not None else 0
-        self.aic = 2 * k - 2 * llf
-        return self.aic
-    
-    def compute_bic(self):
-        """Computes the BIC (Bayesian Information Criterion)."""
-        llf = self.llf
-        
-        # number of estimated parameters: try to infer from model
-        k = getattr(self, 'n_params', None)
-        if k is None and hasattr(self.model, 'beta'):
-            k = np.size(np.array(self.model.beta))
-        k = int(k) if k is not None else 0
-        
-        n = self.nobs if self.nobs is not None else 1
-        self.bic = np.log(n) * k - 2 * llf
-        return self.bic
     
     
     
