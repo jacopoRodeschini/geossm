@@ -738,8 +738,9 @@ class StateSpaceModel:
         
         # update the results object with the smoothed values and expected values
         res_smooth = res_filter.update(
-            x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=P_T_1, y_hat=y_hat, S11=S11, S10=S10, S00=S00, time_smoother=td_smoother, time_expectation=tdelta_expectation
-        )
+            x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=P_T_1, y_hat=y_hat, 
+            S11=S11, S10=S10, S00=S00, time_smoother=td_smoother, 
+            time_expectation=tdelta_expectation)
         
         # return (x_T, P_T, P_T_1, res_filter.llf, res_filter.time_filter, td_smoother)
         
@@ -793,7 +794,7 @@ class StateSpaceModel:
         # Call the simulation kernel to generate the time series
         tStart = time.time()
         y_t_sim, x_t_sim = _sim_kernelJAX(
-            keys, self.H, self.R, self.F, self.Q, self.x0, self.Sigma0, Xbeta, self.beta)
+            keys, self.H, self.R, self.F, self.Q, self.x0, self.Sigma0, self.Xbeta, self.beta)
 
         tdelta = time.time() - tStart
         return y_t_sim, x_t_sim, tdelta
