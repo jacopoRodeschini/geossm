@@ -53,10 +53,21 @@ class Param:
     def unfreeze(self):
         """Return unfrozen version of parameter."""
         return Param(self.name, self.value, False)
+    
+    @property
+    def shape(self):
+        return self.value.shape if self.value is not None else None
+    
+    @property
+    def size(self):
+        return self.value.size if self.value is not None else 0
+    
+    def __len__(self):
+        return self.size
 
     def __repr__(self):
         status = "fixed" if self.fixed else "free"
-        shape = getattr(self.value, "shape", None)
+        shape = self.shape
         return f"Param(name='{self.name}', shape={shape}, {status})"
 
 @dataclass
@@ -96,13 +107,26 @@ class ModelParams:
     def as_dict(self):
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}
 
+
     def free_params(self):
         return {
             k: getattr(self, k).value
             for k in self.__dataclass_fields__
             if not getattr(self, k).fixed
         }
+    
+    
+    def __len__(self):
+        return sum(getattr(self, k).size for k in self.__dataclass_fields__)
 
+    @property 
+    def size(self):
+        return self.__len__()
+    
+    @property
+    def shape(self):
+        return (self.size, )
+    
     def __str__(self):
         lines = ["ModelParams:"]
         
