@@ -642,20 +642,28 @@ class StateSpaceModel:
 
     def estimate(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
 
-        # run the smoother
-        x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        # run the smoother ( = filter + backward pass)
+        # x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        smooth_results = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+
+        x_T = smooth_results.x_smoothed
+        P_T = smooth_results.P_smoothed
+        P_T_1 = smooth_results.P_pred_smoothed
+        logL = smooth_results.llf
+        tdelta_filter = smooth_results.time_filter
+        tdelta_smoother = smooth_results.time_smoother
+
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
         
-        results = StateSpaceResults(
-            y_hat=y_hat, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
-            x_T=x_T, P_T=P_T, P_T_1=P_T_1, S11=S11, S10=S10, S00=S00, logL=logL,
-            tdelta_filter=tdelta_filter, tdelta_smoother=tdelta_smoother, tdelta_expectation=tdelta_expectation
+        # Create the results object with the expected values
+        # update the results object with the smoothed values and expected values
+        smooth_results = smooth_results.update(
+            y_hat=y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation
         )
         
-        return results
-
+        return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
     def filter(self, y_t, yname = None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
@@ -749,7 +757,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    def sim(self, seed=1234, Xbeta=None, beta = None, R=None, F=None, H=None, Q=None, x0=None, Sigma0=None) -> jnp.ndarray:
+    def sim(self, seed=1234, R=None, F=None, H=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta = None) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
         This version does NOT use JIT compilation and is therefore slower.
