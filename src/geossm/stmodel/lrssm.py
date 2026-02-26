@@ -578,7 +578,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Get the observed data
         y_obs = jnp.asarray(self.y_train, dtype=dtype)
-        Xbeta = jnp.asarray(self.Xbeta_train, dtype=dtype)
+        Xbeta = jnp.asarray(self.Xbeta, dtype=dtype)
 
         points = self.points
         p, T = y_obs.shape
@@ -589,7 +589,7 @@ class LRStateSpaceModel(StateSpaceModel):
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
 
         # Get the initial values
-        est_params = self._getInitialValues(y_obs, Xbeta,block_p, block_q)
+        est_params = self._getInitialValues(y_obs, Xbeta, block_p, block_q)
         
         # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
         est_params = self._updateParams0(params0, est_params)
@@ -597,7 +597,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Flag of the EM convergence
         flag = True
         niter = 0
-        logL_prev = -jnp.inf
+        logL_prev = 0
         logL_cur = 0
         delta_par = jnp.nan
         delta_lik = jnp.nan
@@ -657,16 +657,18 @@ class LRStateSpaceModel(StateSpaceModel):
             super().set(H=H, R=R, F=F, Q=Q, Xbeta=Xbeta, beta=est_params.beta.value, x0=est_params.x0.value, Sigma0=est_params.Sigma0.value)
             
             # ---- E step
-            y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
-                y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
+            # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
+            #    y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
+ 
+            y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(y_obs)
 
             # ---- M step, get the updated parameters
             update_params,  opt_success, tdelta_Mdet = self._M_step(
-                y_obs, y_hat, F, H, Xbeta, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi)
+                y_obs, y_hat, self.F, self.H, Xbeta, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi)
             
             # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
             delta_lik = logL_cur - logL_prev
-            relat_lik = jnp.abs(delta_lik / logL_prev)
+            relat_lik = delta_lik / abs(logL_prev) if logL_prev != 0 else jnp.inf
 
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
@@ -687,23 +689,24 @@ class LRStateSpaceModel(StateSpaceModel):
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
-            
         
 
-        # create the results object
-        results = LRStateSpaceResults(
-            formulas=self.formulas,
-            params=est_params,
-            Xbeta=Xbeta,
-            y_obs=y_obs,
-            points=points,
-            y_hat=y_hat, 
-            x_smoothed=x_T, 
-            P_smoothed=P_T, 
-            cov_function=self.cov_function, 
-            nstat=nstat)
+        return self.formulas, est_params, Xbeta, y_obs, points, y_hat, x_T, P_T, self.cov_function, nstat
+        # # create the results object
+        # results = LRStateSpaceResults(
+        #     formulas=self.formulas,
+        #     params=est_params,
+        #     Xbeta=Xbeta,
+        #     y_obs=y_obs,
+        #     points=points,
+        #     y_hat=y_hat, 
+        #     x_smoothed=x_T, 
+        #     P_smoothed=P_T, 
+        #     cov_function=self.cov_function, 
+        #     nstat=nstat)
+        
 
-        return results
+        # return results
     
     
     @property
@@ -1218,7 +1221,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
     def summary(self, print_output: str = "full") -> Summary:        
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
-        self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
+        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
         
         len_sep = 89
          
@@ -1228,7 +1231,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         # Generate the summary 
         smry = Summary()
         
-        # Header        
+        # Headser        
         top_left = dict([
             ('Model name:', lambda: [self.__class__.__name__]),
             ('Model type:', lambda: [self.type if hasattr(self, 'type') else "None"]),

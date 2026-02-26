@@ -200,56 +200,81 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.tvalues = np.zeros(len(self.beta))
         # self.pvalues = np.zeros(len(self.beta))
 
+        # update the computational time
+        time_filter = self.runtime_tot_estep
+        time_smoother = self.runtime_tot_mstep  
+        time_expectation = time_filter + time_smoother,
+
         smry = super().summary()
         # Add parameter estimates table
 
         # todo: Add the parameters table (measurement equation parameters)
-        self.measurement = [SimpleNamespace() for _ in range(self.nvar)]  # Create a list with one SimpleNamespace for compatibility with summary structure
+        self.measurement = [SimpleNamespace() for _ in range(self.model.nvar)]  # Create a list with one SimpleNamespace for compatibility with summary structure
         
+        
+        def conf_int_params(params, bse, alpha=0.05):
+            lower = m.params - 1.96 * m.bse
+            upper = m.params + 1.96 * m.bse
+            return np.column_stack([lower, upper])
+
+        # fixed effect
         for i, m in enumerate(self.measurement):
             m.results = np.array([0])  # Dummy results for compatibility
+            m.model = None
 
             # Get the parameter values for this variable and assign them to the model namespace
-            m.params_beta = self.beta[i]
-            m.error_params = self.s2e[i]
-            m.linear_params = self.A[:, i]
-
-            # Get the parameter names for this variable and assign them to the model namespace
-            m.beta_names = self.xbeta_names[i]
-            m.error_name = []
-            m.linear_names = [f"a_({i},{j+1})" for j in range(self.nlat)]
+            m.params = self.params.beta.value[0:2]
            
-            # Combine all parameters and names into a single list for the summary       
-            m.params = np.concatenate([m.params_beta, m.linear_params, m.error_params])
-            m.param_names = m.beta_names + m.linear_names + m.error_name
-        
+            # Get the parameter names for this variable and assign them to the model namespace
+            m.params_name = self.model.xbeta_names
+           
             m.bse = np.full(len(m.params), np.nan)  # Set standard errors to NaN (not available)
             m.tvalues = np.full(len(m.params), np.nan)  # Set t-values to NaN (not available)
             m.pvalues = np.full(len(m.params), np.nan)  # Set p-values to NaN (not available)
 
+            m.conf_int = lambda alpha=0.05: conf_int_params(m.params, m.bse, alpha)
+
+
+            smry.add_table_params(m, xname=m.params_name, alpha = 0.05)
+        
+        # Measrement error
+        temp = SimpleNamespace() 
+        temp.results = np.array([0])
+        temp.model = None
+        temp.params = np.hstack((self.params.s2e.value, self.params.A.value.flatten()))
+        temp.params_name = [f's2e_{i}' for i in range(self.params.s2e.size)] +  [f'A_{i,j}' for i in range(self.params.A.shape[0]) for j in range(self.params.A.shape[1])]               
+        temp.bse = np.full(len(temp.params), np.nan)  # Set standard errors to NaN (not available)
+        temp.tvalues = np.full(len(temp.params), np.nan)  # Set t-values to NaN (not available)
+        temp.pvalues = np.full(len(temp.params), np.nan)  # Set p-values to NaN (not available)
+        temp.conf_int = lambda alpha=0.05: conf_int_params(temp.params, temp.bse, alpha)
+        smry.add_table_params(temp, xname=temp.params_name, alpha = 0.05)
+        
+        # Latent variabel
+        
+        # Matern 
         
         # todo: add the parameters table (state equation parameters)
-        self.state = [SimpleNamespace() for _ in range(self.nlat)]  # Create a list with one SimpleNamespace for compatibility with summary structure
-        
-        for i, m in enumerate(self.state):
-            m.results = np.array([0])  # Dummy results for compatibility
+        temp = SimpleNamespace() # Create a list with one SimpleNamespace for compatibility with summary structure
+        temp.results = np.array([0])  # Dummy results for compatibility
+        temp.model = None
 
-            # Get the parameter values for this variable and assign them to the model namespace
-            m.matern_params = [cov.rescale for cov in self.cov_function]
-            m.markov_params = [self.f]
+        # Get the parameter values for this variable and assign them to the model namespace
+        temp.matern_params = np.array([cov.rescale for cov in self.model.cov_function])
+        temp.markov_params = self.params.f.value
+        temp.params = np.hstack((temp.matern_params, temp.markov_params))
 
-            m.matern_names = []
-            m.latent_names = []
+        temp.matern_names = [f"rescale_{j}" for j in range(len(self.model.cov_function))]
+        temp.latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
 
-            # Combine all parameters and names into a single list for the summary       
-            m.params = np.concatenate([m.matern_params, m.markov_params])
-            m.param_names = m.matern_names + m.latent_names
-        
-            m.bse = np.full(len(m.params), np.nan)  # Set standard errors to NaN (not available)
-            m.tvalues = np.full(len(m.params), np.nan)  # Set t-values to NaN (not available)
-            m.pvalues = np.full(len(m.params), np.nan)  # Set p-values to NaN (not available)
+        # Combine all parameters and names into a single list for the summary       
+        temp.param_names = temp.matern_names + temp.latent_names
+    
+        temp.bse = np.full(len(temp.params), np.nan)  # Set standard errors to NaN (not available)
+        temp.tvalues = np.full(len(temp.params), np.nan)  # Set t-values to NaN (not available)
+        temp.pvalues = np.full(len(temp.params), np.nan)  # Set p-values to NaN (not available)
 
-
+        temp.conf_int = lambda alpha=0.05: conf_int_params(temp.params, temp.bse, alpha)
+        smry.add_table_params(temp, xname=temp.param_names, alpha = 0.05)
 
        
         return smry
