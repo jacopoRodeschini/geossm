@@ -25,10 +25,16 @@ class StateSpaceResults:
 
     def __init__(
         self,
-        # metadata
         model: Optional[Any],
         y_hat,
-        
+
+        # optional metadata
+        params = None,
+        params_names = None,
+        params_dim = None,
+        y_obs = None,
+        yname = None,
+        Xbeta = None,
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
@@ -51,14 +57,31 @@ class StateSpaceResults:
         S10: ArrayLike = None,
         S00: ArrayLike = None):
 
-        # ---- metadata from the model----
+        # ---- Update the metadata from the model----
         self.model = model
-        self.param_names = getattr(model, 'param_names', None)
-        self.param_dim = getattr(model, 'param_dim', None)
-        self.yname = getattr(model, 'yname', None)
 
-        self.y_obs = getattr(model, 'y_train', None)  # observed data (from model)
-        self.Xbeta = getattr(model, 'Xbeta', None)  # regression covariates (from model)
+        # get the observed data from the model if available
+        if model is not None:
+            self.params = getattr(model, 'params', None)
+            self.params_names = getattr(model, 'params_names', None)
+            self.params_dim = getattr(model, 'params_dim', None)
+            self.yname = getattr(model, 'yname', None)
+            self.y_obs = getattr(model, 'y_t', None)  # observed data (from model)
+            self.Xbeta = getattr(model, 'Xbeta', None)
+        
+        if y_obs is not None:
+            self.y_obs = y_obs
+        if yname is not None:
+            self.yname = yname
+        if Xbeta is not None:
+            self.Xbeta = Xbeta
+        if params is not None:
+            self.params = params
+        if params_names is not None:
+            self.params_names = params_names
+        if params_dim is not None:
+            self.params_dim = params_dim
+            
         
         # ---- likelihood ----
         self.llf = llf
@@ -91,6 +114,7 @@ class StateSpaceResults:
 
         # convert arrays if needed
         self.to_numpy()
+
 
     # Utility method to convert array-like inputs to numpy arrays
     

@@ -343,6 +343,7 @@ class StateSpaceModel:
         self._R = None  # Observation noise covariance
         self._x0 = None  # Initial state estimate
         self._Sigma0 = None  # Initial covariance estimate
+        self._y_t = None  # observed data
         self._Xbeta = None  # Exogenous variables
         self._beta = None  # Coefficients for exogenous variables
         self._xbeta_names = None
@@ -354,6 +355,9 @@ class StateSpaceModel:
         self._type = 'Linear (Gaussian)'
         self._order = '(1, 0)'  # Placeholder for ARMA order if needed
         self._today = date.today()
+        self._params = None        # only the beta par. 
+        self._params_names = None
+        self._params_dim = None
         
         # Set the initial state starting values if not provided
         if x0 is None and F is not None and Q is not None:
@@ -376,21 +380,38 @@ class StateSpaceModel:
             if not flag:
                 raise ValueError(msg)
 
-    @ property
+    @property
+    def params(self):
+        return self._params
+
+    @property
+    def params_names(self):
+        return self._params_names
+
+    @property
+    def params_dim(self):
+        return self._params_dim
+
+    @property
     def xbeta_names(self):
         return self._xbeta_names
     
-    @ xbeta_names.setter
+    @xbeta_names.setter
     def xbeta_names(self, value):
         self._xbeta_names = value
+
+    @property
+    def y_t(self):
+        return self._y_t
     
-    @ property
+    @property
     def yname(self):
         return self._yname
     
     @ yname.setter
     def yname(self, value):
         self._yname = value
+
 
     @property
     def type(self):
@@ -421,7 +442,7 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
-    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, yname=None):
+    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, y_t=None, Xbeta=None, beta=None, xbeta_names=None, yname=None):
         """
         Set model parameters and matrices.
         @ return: None
@@ -431,6 +452,7 @@ class StateSpaceModel:
         @ param R: Observation noise covariance
         @ param x0: Initial state estimate
         @ param Sigma0: Initial covariance estimate
+        @ param y_t: Observed dataset
         @ param Xbeta: Exogenous variables
         @ param beta: Coefficients for exogenous variables
         @ param xbeta_names: Names for the exogenous variables (optional)
@@ -439,10 +461,10 @@ class StateSpaceModel:
         # Check parameters
 
         self._update_parameters(
-            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, y_t=y_t, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
 
 
-    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None,xbeta_names: list=None, yname:list =None):
+    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, y_t=None, Xbeta=None, beta=None,xbeta_names: list=None, yname:list =None):
         """
         Helper function to update model parameters if provided.
         """
@@ -501,11 +523,18 @@ class StateSpaceModel:
         else:
             self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
 
+        if y_t is not None:
+            self._y_t = jnp.asarray(y_t, dtype=self.dtype)
+
         if yname is not None:
             self._yname = yname
         else:
             self._yname = "y"
 
+        # update the params attributes
+        self._params = self._beta
+        self._params_names = self._xbeta_names
+        self._params_dim = len(self._beta)
 
         return True
 
@@ -640,6 +669,19 @@ class StateSpaceModel:
 
         return flag, "\n".join(messages)
 
+    def _check_y_t(self, y_t):
+        """
+        Check the shape of the observed data y_t.
+        """
+        flag = True
+        y_t_shape = y_t.shape
+        
+        expected_shape = (self.p, self.T)
+        msg = ""
+        if y_t_shape != expected_shape:
+            msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."  
+        return flag, msg
+    
     def estimate(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
 
         # run the smoother ( = filter + backward pass)
@@ -673,11 +715,16 @@ class StateSpaceModel:
         ========= References ==========
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
-        # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
-        
+                # Update parameters if provided
+        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, y_t=y_t, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+
         # Check parameters
         flag, msg = self._check_parameters()
+        if not flag:
+            raise ValueError(msg)
+        
+        # check y_t
+        flag, msg = self._check_y_t(y_t)
         if not flag:
             raise ValueError(msg)
 
@@ -696,10 +743,9 @@ class StateSpaceModel:
         
 
         results  = StateSpaceResults(model=self, 
-                              y_obs=y_t, Xbeta=self.Xbeta, beta=self.beta, xbeta_names=self.xbeta_names,
-                              x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
-                              P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
-                              y_hat = y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation)
+                            x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
+                            P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
+                            y_hat = y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation)
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
@@ -713,14 +759,7 @@ class StateSpaceModel:
         ========= References ==========
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
         """
-        # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
-
-        # Check parameters
-        flag, msg = self._check_parameters()
-        if not flag:
-            raise ValueError(msg)
-
+       
         # First, run the filter to get necessary inputs for the smoother
         res_filter = self.filter(
             y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
@@ -1004,8 +1043,8 @@ class StateSpaceModel:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
         self.model.results = np.array([0])
-        self.params = self.beta
-        self.param_names = self.xbeta_names
+        # self.params = self.beta
+        # self.param_names = self.xbeta_names
         self.model.bse = np.zeros(len(self.beta))
         self.model.tvalues = np.zeros(len(self.beta))
         self.model.pvalues = np.zeros(len(self.beta))
