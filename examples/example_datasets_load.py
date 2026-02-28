@@ -10,6 +10,7 @@ Created on Tue Feb 10 14:34:05 2026
 import numpy as np
 import matplotlib.pyplot as plt
 import geopandas as geodf
+from shapely import Point
 
 # %% import and check the version
 import geossm
@@ -30,7 +31,7 @@ print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
 
-Agrimonia = df.load_dataset('agrimonia')
+Agrimonia, _ = df.load_dataset('agrimonia')
 print(Agrimonia.columns)
 
 # %% From .csv to geopandas
