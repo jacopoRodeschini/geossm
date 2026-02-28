@@ -201,12 +201,38 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.pvalues = np.zeros(len(self.beta))
 
         # update the computational time
-        time_filter = self.runtime_tot_estep
-        time_smoother = self.runtime_tot_mstep  
-        time_expectation = time_filter + time_smoother,
-
+        time_e = self.runtime_tot_estep
+        time_m = self.runtime_tot_mstep
+          
+       
         smry = super().summary()
         # Add parameter estimates table
+
+        # Add the EM iteration statistics table
+        top_left = dict([
+            
+            ('EM iters :', lambda: [f"{self.iterations}"]),
+            ('Runtime total (s):', lambda: [f"{self.runtime_tot:.3g}"]),
+            ])
+        
+        top_right = {
+            "Runtime E-step (s):": lambda: f"{time_e:.3g}",
+            "Runtime M-step (s):": lambda: f"{time_m:.3g}",
+        }
+
+        # Generate the dictionaly        
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append( (item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append( (item, top_right[item]()))
+        
+        # Generate the summary 
+        smry.add_table_2cols(self,title="EM statistics",
+                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+
 
         # todo: Add the parameters table (measurement equation parameters)
         self.measurement = [SimpleNamespace() for _ in range(self.model.nvar)]  # Create a list with one SimpleNamespace for compatibility with summary structure

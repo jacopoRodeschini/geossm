@@ -13,6 +13,8 @@ from statsmodels.iolib.summary import Summary
 from jax import jit, lax
 import scipy.sparse as sp
 from functools import partial
+
+from datetime import datetime, timezone
 import time
 from jax.scipy.linalg import block_diag
 from scipy.linalg import block_diag as scyp_block_diag
@@ -561,12 +563,26 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # get the global options
         verbose = options.verbose if options is not None else True
+        if verbose:
+            smr = self.summary(print_output = "header")
+            print(smr)
+            msg = "Fitting the model with EM algorithm"
+            self.print_info(msg)
+
+        if verbose:
+            msg = "Parsing the estimation options (FitOptions|None)..."
+            self.print_info(msg)
+
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
         dtype = options.dtype if options is not None else jnp.float32
 
+
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
+        if verbose:
+            msg = "Parsing the initial parameters (ModelParams|None)..."
+            self.print_info(msg)
         params0 = self._parseParams(params0)
 
         # Get global constants
@@ -589,11 +605,30 @@ class LRStateSpaceModel(StateSpaceModel):
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
 
         # Get the initial values
+        if verbose:
+            msg = "Computing the initial parameter values..."
+            self.print_info(msg)
+
         est_params = self._getInitialValues(y_obs, Xbeta, block_p, block_q)
         
         # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
+        if verbose:
+            msg = "Updating the initial parameter values..."
+            self.print_info(msg)
         est_params = self._updateParams0(params0, est_params)
 
+        # Compute the basis matrix (just one) - no boundary
+        if verbose:
+            msg = "Computing the basis matrix..."
+            self.print_info(msg)
+
+        basis = self._buildBasis_list(points, self.cov_function)
+        Phi = self._buildH_dense(
+            jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
+
+        if verbose:
+            msg = "Starting the EM iterations..."
+            self.print_info(msg)
         # Flag of the EM convergence
         flag = True
         niter = 0
@@ -614,11 +649,6 @@ class LRStateSpaceModel(StateSpaceModel):
         if verbose:
             msg = self.logger(nstat[-1])
             print(msg)
-
-        # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(points, self.cov_function)
-        Phi = self._buildH_dense(
-            jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
 
         # Start EM iteration
         while flag:
@@ -661,7 +691,7 @@ class LRStateSpaceModel(StateSpaceModel):
             #    y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
  
             y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(y_obs)
-
+            
             # ---- M step, get the updated parameters
             update_params,  opt_success, tdelta_Mdet = self._M_step(
                 y_obs, y_hat, self.F, self.H, Xbeta, self.cov_function, block_p, block_q, x_T, P_T, S11, S10, S00, Phi)
@@ -685,13 +715,27 @@ class LRStateSpaceModel(StateSpaceModel):
             if verbose:
                 msg = self.logger(nstat[-1])
                 print(msg)
-
+                
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
         
 
-        return self.formulas, est_params, Xbeta, y_obs, points, y_hat, x_T, P_T, self.cov_function, nstat
+        results = LRStateSpaceResults(
+            model = self,
+            y_hat = y_hat,
+            params=est_params,
+            nstats=nstat, 
+            options=options)
+        
+
+        if verbose:
+            msg = "EM algorithm converged after {} iterations.".format(niter)
+            self.print_info(msg)
+
+        return results
+
+        # return self.formulas, est_params, Xbeta, y_obs, points, y_hat, x_T, P_T, self.cov_function, nstat
         # # create the results object
         # results = LRStateSpaceResults(
         #     formulas=self.formulas,
@@ -1264,6 +1308,8 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         smry.add_table_2cols(self, title="State Space Model",
                              gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
         
+        if print_output == "header":
+            return smry
 
         # todo: add the grid / fomula details (e.g., number of points, dimensions, etc.)
         string_grid = []
@@ -1377,7 +1423,9 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return "\n".join(lines)
         
     def print_info(self, msg):
-        print(f"{time.time()} - {msg}")
+
+        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
     
     
 
