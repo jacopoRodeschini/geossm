@@ -34,6 +34,7 @@ from geossm.covmodel import FEMSolver
 
 agri, shape = df.load_dataset('agrimonia')
 
+
 # %% From .csv to geopandas
 
 ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
@@ -48,6 +49,8 @@ buffer = list(domain.buffer(0.3).boundary.geoms)[0]
 # %% Build the model
 
 model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain = [Polygon(buffer)])
+print(model)
+
 
 # %% [Utils] build mesh with gmsh
 
@@ -104,7 +107,7 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
 # %% Build the mesh for the AQ_pm10 observed variable
 
 points = model.points[0]
-mesh_io = buildMesh(buffer, 0.5, points)
+mesh_io = buildMesh(buffer, 0.35, points)
 print(mesh_io)
 
 # plot the mesh (use the fem_solver utlities)
@@ -123,11 +126,13 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 
-est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit()
+results = model.fit()
+print(results) # resutls.summary()
 
-# plot the likelihood curve
+
+# %% Plot the likelihood curve
 fig, ax = plt.subplots()
-ax.plot([i['deltaL'] for i in nstat])
+ax.plot(-np.array(results.llf_path[1:]))
 ax.set_yscale('log')
 ax.set_xlabel('Iteration')
 ax.set_ylabel('Log Likelihood')
@@ -136,71 +141,46 @@ ax.grid()
 plt.show()
 
 
-# %% Estimate the model with other options  
+# %% Estimate the model with other options
 
 from geossm.stmodel import FitOptions
 
-opt = FitOptions()
-opt.max_iter = 5
+opt = FitOptions()  
+opt.max_iter = 50
+opt.tol_relat = 1e-4
 
 print(opt)
 
+results = model.fit(options=opt)
+print(results)
 
-est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(options=opt)
-
-# plot the likelihood curve
-fig, ax = plt.subplots()
-ax.plot([i['deltaL'] for i in nstat])
-ax.set_yscale('log')
-ax.set_xlabel('Iteration')
-ax.set_ylabel('Log Likelihood')
-ax.set_title('Log Likelihood Curve')
-ax.grid()
-plt.show()
 
 # %% Estimate the model with inital values
-from geossm.stmodel import FitOptions, ModelParams
-
-# set the option 
-opt = FitOptions()
-opt.max_iter = 20
-opt.tol_relat = 1e-4
+from geossm.stmodel import ModelParams
 
 # set the pars0
-par0 = ModelParams(beta=[10,1], s2e = 10)
+
+par0 = ModelParams(beta=[29, -0.5], s2e = 25, A = [[12]])
 print(par0)
 
 # % fit the model
-est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, options=opt)
+results = model.fit(params0=par0, options=opt)
 
-# print the estimate paramiters
-print(est_params)
-
+print(results)
 # %% More controll on the model paramiters
-from geossm.stmodel import Param, ModelParams
+from geossm.stmodel import Param
 
-b0 = Param("beta", [11,1], fixed=True)
+b0 = Param("beta", [29, -0.5], fixed=True)
 
 # set the pars0
 par0 = ModelParams(beta=b0, s2e = 10)
 print(par0)
 
 # % fit the model
-est_params, y_hat, x_T, P_T, cov_function, nstat = model.fit(params0=par0, options=opt)
+results = model.fit(params0=par0, options=opt)
 
 # print the estimate paramiters
-print(est_params)
-
-
-# plot the likelihood curve
-fig, ax = plt.subplots()
-ax.plot([i['deltaL'] for i in nstat])
-ax.set_yscale('log')
-ax.set_xlabel('Iteration')
-ax.set_ylabel('Log Likelihood')
-ax.set_title('Log Likelihood Curve')
-ax.grid()
-plt.show()
+print(results)
 
 
 
