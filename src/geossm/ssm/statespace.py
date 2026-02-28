@@ -169,7 +169,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         [jnp.diag(1/Sigma0.diagonal())[:, :, None], invP_t_1], axis=2)
     logL = -0.5 * final_logL
 
-    jax.block_until_ready(x_t)
+    # jax.block_until_ready(x_t)
 
     return x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL
 
@@ -284,7 +284,6 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
     # For P_T_1, the last element is special
     P_T_1 = jnp.concatenate([P_T_1_scanned, P_T_1_last[:, :, None]], axis=2)
 
-    jax.block_until_ready(x_T)
     return x_T, P_T, P_T_1
 
 @jit
@@ -320,7 +319,6 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     # P_T_1 is Cov(x_t, x_{t-1}), so the sum starts from t=1
     S10 = (x_t_slice @ x_tm1_slice.T) + jnp.sum(P_T_1[:, :, 1:], axis=2)
 
-    jax.block_until_ready(S00)
     return y_hat, S11, S10, S00
         
 
@@ -691,10 +689,7 @@ class StateSpaceModel:
         x_T = smooth_results.x_smoothed
         P_T = smooth_results.P_smoothed
         P_T_1 = smooth_results.P_pred_smoothed
-        logL = smooth_results.llf
-        tdelta_filter = smooth_results.time_filter
-        tdelta_smoother = smooth_results.time_smoother
-
+        
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_T, P_T, P_T_1)
@@ -734,7 +729,7 @@ class StateSpaceModel:
 
         x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(y_t, self.H, self.R, self.F, self.Q, self.x0, 
                                                                       self.Sigma0, self.Xbeta, self.beta)
-
+        jax.block_until_ready(x_t)
         tDelta = time.time() - tStart
 
         # compute expected values (given the filterd values)
@@ -769,6 +764,7 @@ class StateSpaceModel:
         x_T, P_T, P_T_1 = _smoother_kernelJAX(
             self.H, self.F, res_filter.x_filtered, res_filter.P_filtered, res_filter.K, res_filter.x_pred, res_filter.P_pred, res_filter.invP_pred)
         
+        jax.block_until_ready(x_T)
         td_smoother = time.time() - tStart
 
         # compute expected values (given the smoothed values)
@@ -793,6 +789,7 @@ class StateSpaceModel:
 
         y_hat, S11, S10, S00 = _compute_expected_values_kernelJAX(self.H, x_T, P_T, P_T_1, self.Xbeta, self.beta)
 
+        jax.block_until_ready(y_hat)
         tDelta = time.time() - tStart
 
         return (y_hat, S11, S10, S00, tDelta)
