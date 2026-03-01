@@ -3,9 +3,9 @@
     <!-- Dark mode -->
     <source srcset="docs/logo-dark.svg" media="(prefers-color-scheme: dark)">
     <!-- Light mode -->
-    <source srcset="docs/logo-light.svg" media="(prefers-color-scheme: light)">
+    <source srcset="docs/logo-white.svg" media="(prefers-color-scheme: light)">
     <!-- Fallback -->
-    <img src="docs/logo.svg" alt="GEOSSM Logo" width="320">
+    <img src="docs/logo-white.svg" alt="GEOSSM Logo" width="320">
   </picture>
 </p>
 
