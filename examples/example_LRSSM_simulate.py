@@ -6,30 +6,12 @@ Created on Tue Feb 10 13:38:28 2026
 @author: jacopo
 """
 
-
-import mfem.ser as mfem
-
 import numpy as np
-import matplotlib.tri as tri
 import matplotlib.pyplot as plt
-import scipy.sparse as sp
-import scipy as sc
-import gstools as gs
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
+from shapely.geometry import Point
 import numpy as np
-from gstools.covmodel import Matern
-import warnings
-
-from scipy.spatial import ConvexHull
-import meshio
 import pygmsh
 import gmsh
-
-from scipy.sparse.linalg import splu
-from scipy.spatial.distance import cdist
-
-from joblib import Parallel, delayed
-from tqdm import tqdm
 import geopandas as gpd 
 from datetime import date, timedelta
 

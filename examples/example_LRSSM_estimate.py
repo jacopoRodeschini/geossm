@@ -7,21 +7,11 @@ Created on Tue Feb 10 13:38:28 2026
 """
 
 
-import mfem.ser as mfem
 
-import numpy as np
-import matplotlib.tri as tri
 import matplotlib.pyplot as plt
-import scipy.sparse as sp
-import scipy as sc
-import gstools as gs
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
+from shapely.geometry import Point, Polygon
 import numpy as np
-from gstools.covmodel import Matern
-import warnings
 
-from scipy.spatial import ConvexHull
-import meshio
 import pygmsh
 import gmsh
 import geopandas as geodf
