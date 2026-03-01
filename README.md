@@ -1,10 +1,16 @@
 <p align="center">
-  <img src="docs/logo.svgz" alt="GEOSSM Logo" width="320"/>
+  <picture>
+    <!-- Dark mode -->
+    <source srcset="docs/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <!-- Light mode -->
+    <source srcset="docs/logo-light.svg" media="(prefers-color-scheme: light)">
+    <!-- Fallback -->
+    <img src="docs/logo.svg" alt="GEOSSM Logo" width="320">
+  </picture>
 </p>
 
-# GEOSSM
-
-> **Geo**statistics 🌍 with **S**tate **S**pace **M**odels
+# Geossm 🌍
+> **Geo**statistics with **S**tate **S**pace **M**odels
 
 **geossm** is a Python package for applying **state space models** to **spatial and spatiotemporal data**. It is tailored for modern **geostatistical workflows** and natively operates on `GeoDataFrame` objects from the `geopandas` library.
 
