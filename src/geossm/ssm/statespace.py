@@ -2,7 +2,6 @@
 State Space Models Module
 """
 
-from functools import partial
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import solve
@@ -10,10 +9,9 @@ from jax import jit
 import time
 from geossm.utils import KeyStream
 import numpy as np
-from datetime import date 
+from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
-
 from .statespace_results import StateSpaceResults
 
 
@@ -30,7 +28,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         y_t : (p, T) JAX array of simulated observations
         x_t : (q, T+1) JAX array of simulated state vectors
     """
-    
+
     p = R.shape[0]
     q = F.shape[0]
     T = Xbeta.shape[2]
@@ -76,9 +74,10 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     return final_y_t, final_x_t
 
+
 @jit
 def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    
+
     dtype = y_t.dtype.type()
     q = F.shape[0]
 
@@ -132,8 +131,12 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # 2. Pack carry for next step and outputs for this step
         next_carry = (x_upd, P_upd, logL_accum)
         outputs = {
-            "x_t": x_upd, "P_t": P_upd, "K": K,
-            "x_t_1": x_pred, "P_t_1": P_pred, "invP_t_1": invP_pred
+            "x_t": x_upd,
+            "P_t": P_upd,
+            "K": K,
+            "x_t_1": x_pred,
+            "P_t_1": P_pred,
+            "invP_t_1": invP_pred,
         }
         return next_carry, outputs
 
@@ -144,9 +147,10 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # y_t: [p, T] -> [T, p]
     # Xbeta: [p, b, T] -> [T, p, b]
     scan_inputs = (y_t.T, jnp.moveaxis(Xbeta, -1, 0))
-    
+
     (final_x, final_P, final_logL), history = jax.lax.scan(
-        kalman_step, initial_carry, scan_inputs)
+        kalman_step, initial_carry, scan_inputs
+    )
 
     # Post-process the results from the history dictionary
     # The outputs will have T as the leading dimension, so we move it back
@@ -159,23 +163,25 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     # Add the initial state to the beginning of the time series arrays
     x_t = jnp.concatenate([x0[:, None], x_t], axis=1)
-    x_t_1 = jnp.concatenate(
-        [jnp.zeros((q, 1), dtype=dtype), x_t_1], axis=1)
+    x_t_1 = jnp.concatenate([jnp.zeros((q, 1), dtype=dtype), x_t_1], axis=1)
 
     P_t = jnp.concatenate([Sigma0[:, :, None], P_t], axis=2)
     P_t_1 = jnp.concatenate(
-        [jnp.zeros(Sigma0.shape, dtype=dtype)[:, :, None], P_t_1], axis=2)
+        [jnp.zeros(Sigma0.shape, dtype=dtype)[:, :, None], P_t_1], axis=2
+    )
     invP_t_1 = jnp.concatenate(
-        [jnp.diag(1/Sigma0.diagonal())[:, :, None], invP_t_1], axis=2)
+        [jnp.diag(1 / Sigma0.diagonal())[:, :, None], invP_t_1], axis=2
+    )
     logL = -0.5 * final_logL
 
     # jax.block_until_ready(x_t)
 
     return x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL
 
+
 @jit
 def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
-    
+
     dtype = x_t.dtype.type()
     q = F.shape[0]
 
@@ -190,7 +196,15 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         # 2. Unpack the inputs for the current iteration (i.e., time t)
         # Note: The lag-one covariance calc needs P_t[t-2] and invP_t_1[t-1],
         # so we pass them in as well.
-        x_t_curr, P_t_curr, x_t_1_next, P_t_1_next, invP_t_1_next, P_t_prev, invP_t_1_curr = inputs
+        (
+            x_t_curr,
+            P_t_curr,
+            x_t_1_next,
+            P_t_1_next,
+            invP_t_1_next,
+            P_t_prev,
+            invP_t_1_curr,
+        ) = inputs
 
         # --- Core Smoother Logic (from your original loop) ---
         J_t_1 = P_t_curr @ F.T @ invP_t_1_next
@@ -218,8 +232,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
     x_T_last = x_t[:, -1]
     P_T_last = P_t[:, :, -1]
     # Lag-one cov at T is special
-    P_T_1_last = (jnp.eye(q, dtype=dtype) -
-                    Klast @ H) @ F @ P_t[:, :, -2]
+    P_T_1_last = (jnp.eye(q, dtype=dtype) - Klast @ H) @ F @ P_t[:, :, -2]
     init_carry = (x_T_last, P_T_last, P_T_1_last)
 
     # 2. Prepare the arrays to be scanned over (`xs`)
@@ -246,8 +259,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
     # P_t_prev needs one pad, invP_t_1_curr needs one pad
     q_q_pad = jnp.zeros((q, q, 1), dtype=dtype)
     P_t_prev_padded = jnp.concatenate([q_q_pad, xs_P_t_prev], axis=2)
-    invP_t_1_curr_padded = jnp.concatenate(
-        [q_q_pad, xs_invP_t_1_curr], axis=2)
+    invP_t_1_curr_padded = jnp.concatenate([q_q_pad, xs_invP_t_1_curr], axis=2)
 
     # Now, put them into a tuple and reverse for the backward pass
     # Transposing to (T, ...) shape for scan
@@ -258,15 +270,13 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         jnp.moveaxis(xs_P_t_1, 2, 0),
         jnp.moveaxis(xs_invP_t_1, 2, 0),
         jnp.moveaxis(P_t_prev_padded, 2, 0),
-        jnp.moveaxis(invP_t_1_curr_padded, 2, 0)
+        jnp.moveaxis(invP_t_1_curr_padded, 2, 0),
     )
     # Reverse time axis for backward pass
     xs_reversed = jax.tree.map(lambda x: jnp.flip(x, axis=0), xs)
 
     # --- Run the scan ---
     # The final carry is not needed, we use the stacked outputs
-    tStart = time.time()
-
     _, (x_T_scanned, P_T_scanned, P_T_1_scanned) = jax.lax.scan(
         smoother_step, init_carry, xs_reversed
     )
@@ -286,20 +296,21 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
 
     return x_T, P_T, P_T_1
 
+
 @jit
-def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta): 
-    """ JIT-compiled kernel for computing expected values needed for M-step in EM. This is a straightforward implementation that can be optimized further if needed. """
-    
+def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
+    """JIT-compiled kernel for computing expected values needed for M-step in EM. This is a straightforward implementation that can be optimized further if needed."""
+
     # Slices of the smoothed states
     # x_t terms range from t=1 to T
     # x_{t-1} terms range from t=0 to T-1
-    x_t_slice = x_T[:, 1:]      # Shape: [q, T]
-    x_tm1_slice = x_T[:, :-1]   # Shape: [q, T]
+    x_t_slice = x_T[:, 1:]  # Shape: [q, T]
+    x_tm1_slice = x_T[:, :-1]  # Shape: [q, T]
 
     # --- 1. Compute predicted observations (y_hat) ---
     # The term Xbeta @ beta can be computed efficiently using einsum.
     # y_hat_t = Xbeta_t @ beta + H @ x_t
-    y_hat_covariate_term = jnp.einsum('pkt,k->pt', Xbeta, beta)
+    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
     y_hat_state_term = H @ x_t_slice
     y_hat = y_hat_covariate_term + y_hat_state_term
 
@@ -320,7 +331,7 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     S10 = (x_t_slice @ x_tm1_slice.T) + jnp.sum(P_T_1[:, :, 1:], axis=2)
 
     return y_hat, S11, S10, S00
-        
+
 
 # %% State Space Model Class
 class StateSpaceModel:
@@ -328,7 +339,19 @@ class StateSpaceModel:
     A class representing a State Space Model with Kalman filtering capabilities.
     """
 
-    def __init__(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names=None, dtype=jnp.float32):
+    def __init__(
+        self,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+        dtype=jnp.float32,
+    ):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
@@ -350,13 +373,13 @@ class StateSpaceModel:
         self._q = None  # number of state equation
         self._b = None  # number of regression coefficent
 
-        self._type = 'Linear (Gaussian)'
-        self._order = '(1, 0)'  # Placeholder for ARMA order if needed
+        self._type = "Linear (Gaussian)"
+        self._order = "(1, 0)"  # Placeholder for ARMA order if needed
         self._today = date.today()
-        self._params = None        # only the beta par. 
+        self._params = None  # only the beta par.
         self._params_names = None
         self._params_dim = None
-        
+
         # Set the initial state starting values if not provided
         if x0 is None and F is not None and Q is not None:
             x0 = np.zeros(F.shape[0])
@@ -370,67 +393,30 @@ class StateSpaceModel:
             beta = np.zeros(Xbeta.shape[1])
 
         # Update parameters without checking (we will check after setting all parameters)
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        self.set(
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+        )
 
         # Check parameters only if the key parameters are set (alow for partial initialization)
-        if self.H is not None and self.F is not None and self.Q is not None and self.R is not None:
+        if (
+            self.H is not None
+            and self.F is not None
+            and self.Q is not None
+            and self.R is not None
+        ):
             flag, msg = self._check_parameters()
             if not flag:
                 raise ValueError(msg)
 
-    @property
-    def params(self):
-        return self._params
-
-    @property
-    def params_names(self):
-        return self._params_names
-
-    @property
-    def params_dim(self):
-        return self._params_dim
-
-    @property
-    def xbeta_names(self):
-        return self._xbeta_names
     
-    @xbeta_names.setter
-    def xbeta_names(self, value):
-        self._xbeta_names = value
-
-    @property
-    def y_t(self):
-        return self._y_t
-    
-    @property
-    def yname(self):
-        return self._yname
-    
-    @ yname.setter
-    def yname(self, value):
-        self._yname = value
-
-
-    @property
-    def type(self):
-        return self._type
-    
-    @type.setter
-    def type(self, value:str):
-        self._type = value
-    
-    @property
-    def order(self):
-        return self._order
-    
-    @order.setter
-    def order(self, value):
-        self._order = value
-    
-    @property
-    def shape(self):
-        return (self._p, self._q, self._T)
-
     def __call__(self, y_t):
         """
         Docstring for __call__
@@ -440,7 +426,20 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
-    def set(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, y_t=None, Xbeta=None, beta=None, xbeta_names=None, yname=None):
+    def set(
+        self,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        y_t=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+        yname=None,
+    ):
         """
         Set model parameters and matrices.
         @ return: None
@@ -459,10 +458,33 @@ class StateSpaceModel:
         # Check parameters
 
         self._update_parameters(
-            F=F, H=H, Q=Q, R=R, x0=x0, Sigma0=Sigma0, y_t=y_t, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+            F=F,
+            H=H,
+            Q=Q,
+            R=R,
+            x0=x0,
+            Sigma0=Sigma0,
+            y_t=y_t,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+            yname=yname,
+        )
 
-
-    def _update_parameters(self, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, y_t=None, Xbeta=None, beta=None,xbeta_names: list=None, yname:list =None):
+    def _update_parameters(
+        self,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        y_t=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names: list = None,
+        yname: list = None,
+    ):
         """
         Helper function to update model parameters if provided.
         """
@@ -507,7 +529,7 @@ class StateSpaceModel:
                 self._b = int(self._beta.shape[0])
             except Exception:
                 self._b = None
-        
+
         if xbeta_names is not None:
             # Count total number of xbeta names across all the variables
             len_xbeta_names = sum([len(xb_names) for xb_names in xbeta_names])
@@ -517,7 +539,7 @@ class StateSpaceModel:
                     f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}."
                 )
             self._xbeta_names = xbeta_names
-            
+
         else:
             self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
 
@@ -564,7 +586,8 @@ class StateSpaceModel:
             flag = False
         if T is None:
             messages.append(
-                "Number of time steps `T` is not set (inferred from Xbeta).")
+                "Number of time steps `T` is not set (inferred from Xbeta)."
+            )
             flag = False
         if b is None:
             messages.append("Number of regression coefficients `b` is not set.")
@@ -588,8 +611,7 @@ class StateSpaceModel:
         # Sigma0: should be (q, q)
         sigma0_shape = shape_str(self.Sigma0)
         if sigma0_shape not in [(q, q), (q,), (q,)]:
-            messages.append(
-                f"Sigma0 must be shape ({q},{q}), got {sigma0_shape}.")
+            messages.append(f"Sigma0 must be shape ({q},{q}), got {sigma0_shape}.")
             flag = False
 
         # H: (p, q)
@@ -602,13 +624,13 @@ class StateSpaceModel:
         R_shape = shape_str(self.R)
         if not (R_shape == (p, p) or (p == 1 and R_shape in [(1,), (1, 1)])):
             messages.append(
-                f"R must be shape ({p},{p}) (or scalar for p=1), got {R_shape}.")
+                f"R must be shape ({p},{p}) (or scalar for p=1), got {R_shape}."
+            )
             flag = False
         else:
             if p > 1:
                 if not is_pos_semidef(self.R):
-                    messages.append(
-                        "R must be symmetric positive semidefinite.")
+                    messages.append("R must be symmetric positive semidefinite.")
                     flag = False
             else:
                 # scalar case
@@ -642,8 +664,7 @@ class StateSpaceModel:
         # Sigma0: (q, q)
         Sigma0_shape = shape_str(self.Sigma0)
         if Sigma0_shape != (q, q):
-            messages.append(
-                f"Sigma0 must be shape ({q},{q}), got {Sigma0_shape}.")
+            messages.append(f"Sigma0 must be shape ({q},{q}), got {Sigma0_shape}.")
             flag = False
         # Check positive semidefinite
         # else:
@@ -655,8 +676,7 @@ class StateSpaceModel:
         # Xbeta: (p, b, T)
         Xbeta_shape = shape_str(self.Xbeta)
         if Xbeta_shape != (p, b, T):
-            messages.append(
-                f"Xbeta must be shape ({p},{b},{T}), got {Xbeta_shape}.")
+            messages.append(f"Xbeta must be shape ({p},{b},{T}), got {Xbeta_shape}.")
             flag = False
 
         # beta: (b,)
@@ -673,112 +693,222 @@ class StateSpaceModel:
         """
         flag = True
         y_t_shape = y_t.shape
-        
+
         expected_shape = (self.p, self.T)
         msg = ""
         if y_t_shape != expected_shape:
-            msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."  
+            msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."
         return flag, msg
-    
-    def estimate(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None):
+
+    def estimate(
+        self,
+        y_t,
+        yname=None,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+    ):
 
         # run the smoother ( = filter + backward pass)
         # x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
-        smooth_results = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
+        smooth_results = self.smoother(
+            y_t,
+            yname=yname,
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+        )
 
         x_T = smooth_results.x_smoothed
         P_T = smooth_results.P_smoothed
         P_T_1 = smooth_results.P_pred_smoothed
-        
+
         # compute expected values
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-            x_T, P_T, P_T_1)
-        
+            x_T, P_T, P_T_1
+        )
+
         # Create the results object with the expected values
         # update the results object with the smoothed values and expected values
         smooth_results = smooth_results.update(
             y_hat=y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation
         )
-        
+
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
-    def filter(self, y_t, yname = None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
+    def filter(
+        self,
+        y_t,
+        yname=None,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+    ) -> tuple:
         """
         Kalman Filter using jax.lax.scan for variable-length inputs.
 
         ========= References ==========
-        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
+        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.
         """
-                # Update parameters if provided
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, y_t=y_t, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
+        # Update parameters if provided
+        self.set(
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            y_t=y_t,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+            yname=yname,
+        )
 
         # Check parameters
         flag, msg = self._check_parameters()
         if not flag:
             raise ValueError(msg)
-        
+
         # check y_t
         flag, msg = self._check_y_t(y_t)
         if not flag:
             raise ValueError(msg)
 
-
         # Run the scan
         tStart = time.time()
 
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(y_t, self.H, self.R, self.F, self.Q, self.x0, 
-                                                                      self.Sigma0, self.Xbeta, self.beta)
+        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(
+            y_t,
+            self.H,
+            self.R,
+            self.F,
+            self.Q,
+            self.x0,
+            self.Sigma0,
+            self.Xbeta,
+            self.beta,
+        )
         jax.block_until_ready(x_t)
         tDelta = time.time() - tStart
 
         # compute expected values (given the filterd values)
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-            x_t, P_t, P_t_1)
-        
+            x_t, P_t, P_t_1
+        )
 
-        results  = StateSpaceResults(model=self, 
-                            x_filtered=x_t, P_filtered=P_t, K=K, x_pred=x_t_1, 
-                            P_pred=P_t_1, invP_pred=invP_t_1, llf =logL, time_filter=tDelta,
-                            y_hat = y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation)
+        results = StateSpaceResults(
+            model=self,
+            x_filtered=x_t,
+            P_filtered=P_t,
+            K=K,
+            x_pred=x_t_1,
+            P_pred=P_t_1,
+            invP_pred=invP_t_1,
+            llf=logL,
+            time_filter=tDelta,
+            y_hat=y_hat,
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            time_expectation=tdelta_expectation,
+        )
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
-    def smoother(self, y_t, yname=None, H=None, R=None, F=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta=None, xbeta_names = None) -> tuple:
+    def smoother(
+        self,
+        y_t,
+        yname=None,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+    ) -> tuple:
         """
         Kalman smoother using jax.lax.scan for efficient, T-independent compilation.
 
         description: filtering and smoothing algorithm for linear state space models
 
         ========= References ==========
-        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press. 
+        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.
         """
-       
+
         # First, run the filter to get necessary inputs for the smoother
         res_filter = self.filter(
-            y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta)
-        
+            y_t,
+            yname=yname,
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            Xbeta=Xbeta,
+            beta=beta,
+        )
+
         # Now run the smoother
-        tStart = time.time() 
+        tStart = time.time()
         x_T, P_T, P_T_1 = _smoother_kernelJAX(
-            self.H, self.F, res_filter.x_filtered, res_filter.P_filtered, res_filter.K, res_filter.x_pred, res_filter.P_pred, res_filter.invP_pred)
-        
+            self.H,
+            self.F,
+            res_filter.x_filtered,
+            res_filter.P_filtered,
+            res_filter.K,
+            res_filter.x_pred,
+            res_filter.P_pred,
+            res_filter.invP_pred,
+        )
+
         jax.block_until_ready(x_T)
         td_smoother = time.time() - tStart
 
         # compute expected values (given the smoothed values)
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-            x_T, P_T, P_T_1)
-        
+            x_T, P_T, P_T_1
+        )
+
         # update the results object with the smoothed values and expected values
         res_smooth = res_filter.update(
-            x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=P_T_1, y_hat=y_hat, 
-            S11=S11, S10=S10, S00=S00, time_smoother=td_smoother, 
-            time_expectation=tdelta_expectation)
-        
+            x_smoothed=x_T,
+            P_smoothed=P_T,
+            P_pred_smoothed=P_T_1,
+            y_hat=y_hat,
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            time_smoother=td_smoother,
+            time_expectation=tdelta_expectation,
+        )
+
         # return (x_T, P_T, P_T_1, res_filter.llf, res_filter.time_filter, td_smoother)
-        
+
         return res_smooth
 
     def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
@@ -787,14 +917,27 @@ class StateSpaceModel:
         # to ensure inputs have the correct dtype before calling a JIT-compiled function.
         tStart = time.time()
 
-        y_hat, S11, S10, S00 = _compute_expected_values_kernelJAX(self.H, x_T, P_T, P_T_1, self.Xbeta, self.beta)
+        y_hat, S11, S10, S00 = _compute_expected_values_kernelJAX(
+            self.H, x_T, P_T, P_T_1, self.Xbeta, self.beta
+        )
 
         jax.block_until_ready(y_hat)
         tDelta = time.time() - tStart
 
         return (y_hat, S11, S10, S00, tDelta)
 
-    def sim(self, seed=1234, R=None, F=None, H=None, Q=None, x0=None, Sigma0=None, Xbeta=None, beta = None) -> jnp.ndarray:
+    def sim(
+        self,
+        seed=1234,
+        R=None,
+        F=None,
+        H=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+    ) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
         This version does NOT use JIT compilation and is therefore slower.
@@ -810,13 +953,23 @@ class StateSpaceModel:
         # Update parameters if provided
         xbeta_names = None
         yname = None
-        self.set(H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, yname=yname)
-        
+        self.set(
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+            yname=yname,
+        )
+
         # Check parameters
         flag, msg = self._check_parameters()
         if not flag:
             raise ValueError(msg)
-
 
         if isinstance(seed, KeyStream):
             keys = seed
@@ -830,7 +983,16 @@ class StateSpaceModel:
         # Call the simulation kernel to generate the time series
         tStart = time.time()
         y_t_sim, x_t_sim = _sim_kernelJAX(
-            keys, self.H, self.R, self.F, self.Q, self.x0, self.Sigma0, self.Xbeta, self.beta)
+            keys,
+            self.H,
+            self.R,
+            self.F,
+            self.Q,
+            self.x0,
+            self.Sigma0,
+            self.Xbeta,
+            self.beta,
+        )
 
         tdelta = time.time() - tStart
         return y_t_sim, x_t_sim, tdelta
@@ -862,6 +1024,54 @@ class StateSpaceModel:
         return self._y_t
     
     @property
+    def params(self):
+        return self._params
+
+    @property
+    def params_names(self):
+        return self._params_names
+
+    @property
+    def params_dim(self):
+        return self._params_dim
+
+    @property
+    def xbeta_names(self):
+        return self._xbeta_names
+
+    @xbeta_names.setter
+    def xbeta_names(self, value):
+        self._xbeta_names = value
+
+    @property
+    def yname(self):
+        return self._yname
+
+    @yname.setter
+    def yname(self, value):
+        self._yname = value
+
+    @property
+    def type(self):
+        return self._type
+
+    @type.setter
+    def type(self, value: str):
+        self._type = value
+
+    @property
+    def order(self):
+        return self._order
+
+    @order.setter
+    def order(self, value):
+        self._order = value
+
+    @property
+    def shape(self):
+        return (self._p, self._q, self._T)
+
+    @property
     def Xbeta(self):
         """Returns the observation matrix H."""
         return self._Xbeta
@@ -870,7 +1080,7 @@ class StateSpaceModel:
     def Xbeta(self, value):
         """Sete the Xbeta matrix."""
         self.set(Xbeta=value)
-     
+
     @property
     def beta(self):
         """Returns the observation matrix H."""
@@ -900,7 +1110,7 @@ class StateSpaceModel:
     def R(self, value):
         """Sete the R matrix."""
         self.set(R=value)
-    
+
     @property
     def F(self):
         """Returns the state transition matrix F."""
@@ -909,7 +1119,7 @@ class StateSpaceModel:
     @F.setter
     def F(self, value):
         """Sete the F matrix."""
-        self.set(F=value)   
+        self.set(F=value)
 
     @property
     def Q(self):
@@ -917,10 +1127,9 @@ class StateSpaceModel:
         return self._Q
 
     @Q.setter
-    def Q(self, value):         
+    def Q(self, value):
         """Sete the Q matrix."""
-        self.set(Q=value)   
-
+        self.set(Q=value)
 
     @property
     def x0(self):
@@ -933,14 +1142,10 @@ class StateSpaceModel:
         return self._Sigma0
 
     @property
-    def shape(self):
-        return (self.p, self.q, self.T)
-
-    @ property
     def xbeta_names(self):
         return self._xbeta_names
-    
-    @ property
+
+    @property
     def yname(self):
         return self._yname
 
@@ -950,6 +1155,7 @@ class StateSpaceModel:
 
         Convert JAX arrays to NumPy arrays and store basic metadata.
         """
+
         def to_np(x):
             if x is None:
                 return None
@@ -959,20 +1165,20 @@ class StateSpaceModel:
                 return x
 
         state = {
-            'F': to_np(self._F),
-            'H': to_np(self._H),
-            'Q': to_np(self._Q),
-            'R': to_np(self._R),
-            'x0': to_np(self._x0),
-            'Sigma0': to_np(self._Sigma0),
-            'Xbeta': to_np(self._Xbeta),
-            'beta': to_np(self._beta),
-            'T': self._T,
-            'p': self._p,
-            'q': self._q,
-            'b': self._b,
+            "F": to_np(self._F),
+            "H": to_np(self._H),
+            "Q": to_np(self._Q),
+            "R": to_np(self._R),
+            "x0": to_np(self._x0),
+            "Sigma0": to_np(self._Sigma0),
+            "Xbeta": to_np(self._Xbeta),
+            "beta": to_np(self._beta),
+            "T": self._T,
+            "p": self._p,
+            "q": self._q,
+            "b": self._b,
             # store dtype name for robust restoration
-            'dtype': getattr(self.dtype, 'name', str(self.dtype)),
+            "dtype": getattr(self.dtype, "name", str(self.dtype)),
         }
         return state
 
@@ -982,7 +1188,7 @@ class StateSpaceModel:
         Arrays are converted back to JAX arrays with the original dtype.
         """
         # Restore dtype first
-        dt_name = state.get('dtype', None)
+        dt_name = state.get("dtype", None)
         try:
             self.dtype = jnp.dtype(dt_name) if dt_name is not None else jnp.float32
         except Exception:
@@ -1001,42 +1207,41 @@ class StateSpaceModel:
                 return x
 
         # Restore arrays and metadata
-        self._F = to_jax(state.get('F', None))
-        self._H = to_jax(state.get('H', None))
-        self._Q = to_jax(state.get('Q', None))
-        self._R = to_jax(state.get('R', None))
-        self._x0 = to_jax(state.get('x0', None))
-        self._Sigma0 = to_jax(state.get('Sigma0', None))
-        self._Xbeta = to_jax(state.get('Xbeta', None))
-        self._beta = to_jax(state.get('beta', None))
+        self._F = to_jax(state.get("F", None))
+        self._H = to_jax(state.get("H", None))
+        self._Q = to_jax(state.get("Q", None))
+        self._R = to_jax(state.get("R", None))
+        self._x0 = to_jax(state.get("x0", None))
+        self._Sigma0 = to_jax(state.get("Sigma0", None))
+        self._Xbeta = to_jax(state.get("Xbeta", None))
+        self._beta = to_jax(state.get("beta", None))
 
-        self._T = state.get('T', None)
-        self._p = state.get('p', None)
-        self._q = state.get('q', None)
-        self._b = state.get('b', None)
+        self._T = state.get("T", None)
+        self._p = state.get("p", None)
+        self._q = state.get("q", None)
+        self._b = state.get("b", None)
 
         # Ensure other attributes exist with sensible defaults
-        if not hasattr(self, 'dtype'):
+        if not hasattr(self, "dtype"):
             self.dtype = jnp.float32
-        if not hasattr(self, '_F'):
+        if not hasattr(self, "_F"):
             self._F = None
-        if not hasattr(self, '_H'):
+        if not hasattr(self, "_H"):
             self._H = None
-        if not hasattr(self, '_Q'):
+        if not hasattr(self, "_Q"):
             self._Q = None
-        if not hasattr(self, '_R'):
+        if not hasattr(self, "_R"):
             self._R = None
-        if not hasattr(self, '_x0'):
+        if not hasattr(self, "_x0"):
             self._x0 = None
-        if not hasattr(self, '_Sigma0'):
+        if not hasattr(self, "_Sigma0"):
             self._Sigma0 = None
-        if not hasattr(self, '_Xbeta'):
+        if not hasattr(self, "_Xbeta"):
             self._Xbeta = None
-        if not hasattr(self, '_beta'):
+        if not hasattr(self, "_beta"):
             self._beta = None
 
-
-    def summary(self, print_output: str = "full") -> Summary:        
+    def summary(self, print_output: str = "full") -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
         self.model.results = np.array([0])
@@ -1047,62 +1252,108 @@ class StateSpaceModel:
         self.model.pvalues = np.zeros(len(self.beta))
 
         # top-left / top-right small tables
-        p, q, T  = self.shape if hasattr(self, 'shape') else (None, None, None)
-        
-        top_left = dict([
-            ('Model name:', lambda: [self.__class__.__name__]),
-            ('Model type:', lambda: [self.type if hasattr(self, 'type') else "None"]),
-            ('Model order:', lambda: [self.order if hasattr(self, 'order') else "None"]),
-            ('Dep. Variable:', lambda: [self.yname]),
-            ('Date:', lambda: [self._today]),
-            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
-            ('JAX devices:', lambda: [f"{jax.devices()}"])
-            ])
-        
-        top_right = dict([
-            ('Shape (p, q, T) :', lambda: f"(p = {p}, q = {q}, T = {T})"),
-            ('Diag. R', lambda: f"{jnp.mean(jnp.diag(self.R)):2f}" if self.R is not None else 'None'),
-            ('Diag. Q', lambda: f"{jnp.mean(jnp.diag(self.Q)):2f}" if self.Q is not None else 'None'),
-            ('Diag. F', lambda: f"{jnp.mean(jnp.diag(self.F)):2f}" if self.F is not None else 'None'),
-            ('mean x0', lambda: f"{jnp.mean(self.x0):2f}" if self.x0 is not None else 'None'),
-            ('mean Sigma0', lambda: f"{jnp.mean(jnp.diag(self.Sigma0)):2f}" if self.Sigma0 is not None else 'None'),
-        ])
+        p, q, T = self.shape if hasattr(self, "shape") else (None, None, None)
 
-        # Generate the dictionaly        
+        top_left = dict(
+            [
+                ("Model name:", lambda: [self.__class__.__name__]),
+                (
+                    "Model type:",
+                    lambda: [self.type if hasattr(self, "type") else "None"],
+                ),
+                (
+                    "Model order:",
+                    lambda: [self.order if hasattr(self, "order") else "None"],
+                ),
+                ("Dep. Variable:", lambda: [self.yname]),
+                ("Date:", lambda: [self._today]),
+                ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
+                ("JAX devices:", lambda: [f"{jax.devices()}"]),
+            ]
+        )
+
+        top_right = dict(
+            [
+                ("Shape (p, q, T) :", lambda: f"(p = {p}, q = {q}, T = {T})"),
+                (
+                    "Diag. R",
+                    lambda: (
+                        f"{jnp.mean(jnp.diag(self.R)):2f}"
+                        if self.R is not None
+                        else "None"
+                    ),
+                ),
+                (
+                    "Diag. Q",
+                    lambda: (
+                        f"{jnp.mean(jnp.diag(self.Q)):2f}"
+                        if self.Q is not None
+                        else "None"
+                    ),
+                ),
+                (
+                    "Diag. F",
+                    lambda: (
+                        f"{jnp.mean(jnp.diag(self.F)):2f}"
+                        if self.F is not None
+                        else "None"
+                    ),
+                ),
+                (
+                    "mean x0",
+                    lambda: (
+                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else "None"
+                    ),
+                ),
+                (
+                    "mean Sigma0",
+                    lambda: (
+                        f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
+                        if self.Sigma0 is not None
+                        else "None"
+                    ),
+                ),
+            ]
+        )
+
+        # Generate the dictionaly
         gen_top_left = []
         for item in top_left.keys():
-            gen_top_left.append( (item, list(top_left[item]())))
+            gen_top_left.append((item, list(top_left[item]())))
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append( (item, top_right[item]()))
-        
-        # Generate the summary 
+            gen_top_right.append((item, top_right[item]()))
+
+        # Generate the summary
         smry = Summary()
-        smry.add_table_2cols(self,title="State Space Model",
-                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
-        
+        smry.add_table_2cols(
+            self,
+            title="State Space Model",
+            gleft=gen_top_left,
+            gright=gen_top_right,
+            yname=None,
+            xname=None,
+        )
+
         if print_output == "short":
             return smry
-        else: 
+        else:
             st = "Methods:\n"
-            st += "-"*60 + "\n"
+            st += "-" * 60 + "\n"
             st += ".filter(): A recursive algorithm to estimate the state \n"
             st += ".smoother(): Aprovides smoothed estimates of the state \n"
-            st += ".estimate(): A method that runs the smoother and computes expected values \n" 
+            st += ".estimate(): A method that runs the smoother and computes expected values \n"
             st += ".sim(): Simulates data from the model given the parameters \n"
             st += "\n"
-        
 
             st += "Reference:\n"
-            st += "-"*60 + "\n"
+            st += "-" * 60 + "\n"
             st += "Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.\n"
 
             smry.add_extra_txt([st])
 
             return smry
-
-
 
     def __str__(self):
         """String representation of the model."""
@@ -1111,5 +1362,3 @@ class StateSpaceModel:
 
     def __repr__(self):
         return self.__str__()
-
-

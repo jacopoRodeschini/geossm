@@ -1,22 +1,20 @@
 """
 Convenience container for State Space Model outputs (filter + smoother).
 """
+
 from __future__ import annotations
-from dataclasses import dataclass, field, replace
 from typing import Optional, Any, Tuple, Dict
 
 import numpy as np
-import jax.numpy as jnp
 from scipy.stats import norm
 from statsmodels.iolib.summary import Summary
 from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
-from datetime import date, datetime
+from datetime import date
 import jax
 
-
-
 ArrayLike = Optional[Any]
+
 
 class StateSpaceResults:
     """
@@ -27,20 +25,18 @@ class StateSpaceResults:
         self,
         model: Optional[Any],
         y_hat,
-
         # optional metadata
-        params = None,
-        params_names = None,
-        params_dim = None,
-        y_obs = None,
-        yname = None,
-        Xbeta = None,
+        params=None,
+        params_names=None,
+        params_dim=None,
+        y_obs=None,
+        yname=None,
+        Xbeta=None,
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
         time_smoother: float = 0.0,
         time_expectation: float = 0.0,
-
         # main arrays
         x_filtered: ArrayLike = None,
         P_filtered: ArrayLike = None,
@@ -51,24 +47,24 @@ class StateSpaceResults:
         x_smoothed: ArrayLike = None,
         P_smoothed: ArrayLike = None,
         P_pred_smoothed: ArrayLike = None,
-        
         # sufficient statistics
         S11: ArrayLike = None,
         S10: ArrayLike = None,
-        S00: ArrayLike = None):
+        S00: ArrayLike = None,
+    ):
 
         # ---- Update the metadata from the model----
         self.model = model
 
         # get the observed data from the model if available
         if model is not None:
-            self.params = getattr(model, 'params', None)
-            self.params_names = getattr(model, 'params_names', None)
-            self.params_dim = getattr(model, 'params_dim', None)
-            self.yname = getattr(model, 'yname', None)
-            self.y_obs = getattr(model, 'y_t', None)  # observed data (from model)
-            self.Xbeta = getattr(model, 'Xbeta', None)
-        
+            self.params = getattr(model, "params", None)
+            self.params_names = getattr(model, "params_names", None)
+            self.params_dim = getattr(model, "params_dim", None)
+            self.yname = getattr(model, "yname", None)
+            self.y_obs = getattr(model, "y_t", None)  # observed data (from model)
+            self.Xbeta = getattr(model, "Xbeta", None)
+
         if y_obs is not None:
             self.y_obs = y_obs
         if yname is not None:
@@ -81,8 +77,7 @@ class StateSpaceResults:
             self.params_names = params_names
         if params_dim is not None:
             self.params_dim = params_dim
-            
-        
+
         # ---- likelihood ----
         self.llf = llf
         self.time_filter = time_filter
@@ -100,7 +95,7 @@ class StateSpaceResults:
         self.x_smoothed = x_smoothed
         self.P_smoothed = P_smoothed
         self.P_pred_smoothed = P_pred_smoothed
-        
+
         # ---- sufficient stats ----
         self.S11 = S11
         self.S10 = S10
@@ -115,17 +110,26 @@ class StateSpaceResults:
         # convert arrays if needed
         self.to_numpy()
 
-
     # Utility method to convert array-like inputs to numpy arrays
-    
+
     def to_numpy(self):
         """
         Convert array-like attributes to numpy arrays if needed.
         """
         for attr in [
-            "y_hat", "x_filtered", "P_filtered",
-            "x_pred", "P_pred", "invP_pred", "K",
-            "x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00"
+            "y_hat",
+            "x_filtered",
+            "P_filtered",
+            "x_pred",
+            "P_pred",
+            "invP_pred",
+            "K",
+            "x_smoothed",
+            "P_smoothed",
+            "P_pred_smoothed",
+            "S11",
+            "S10",
+            "S00",
         ]:
             value = getattr(self, attr)
             if value is not None and not isinstance(value, np.ndarray):
@@ -139,7 +143,8 @@ class StateSpaceResults:
         # Collect all current attributes (excluding private ones if desired)
         current_data = {
             k: v
-            for k, v in self.__dict__.items() if k not in ["today"] and not k.startswith("_")
+            for k, v in self.__dict__.items()
+            if k not in ["today"] and not k.startswith("_")
         }
 
         # Validate keys
@@ -154,7 +159,6 @@ class StateSpaceResults:
 
         # Create new instance
         return self.__class__(**current_data)
-
 
     def _to_numpy(self, arr):
         if arr is None:
@@ -193,13 +197,13 @@ class StateSpaceResults:
             return float("nan")
         if which == "global":
             valid = err[~np.isnan(err)]
-            return float(np.mean(valid ** 2)) if valid.size else float("nan")
+            return float(np.mean(valid**2)) if valid.size else float("nan")
         if which == "space":
             # average across time axis -> shape (p,)
-            return np.nanmean(err ** 2, axis=1)
+            return np.nanmean(err**2, axis=1)
         if which == "time":
             # average across space axis -> shape (T,)
-            return np.nanmean(err ** 2, axis=0)
+            return np.nanmean(err**2, axis=0)
         raise ValueError("which must be one of {'global','space','time'}")
 
     def rmse(self, which: str = "global") -> float:
@@ -209,7 +213,9 @@ class StateSpaceResults:
         return float(np.sqrt(v))
 
     # ---------- Confidence intervals ----------
-    def conf_int_state(self, which: str = "smoothed", alpha: float = 0.05) -> Tuple[np.ndarray, np.ndarray]:
+    def conf_int_state(
+        self, which: str = "smoothed", alpha: float = 0.05
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Return (lower, upper) CI arrays for states.
         which: 'smoothed'|'filtered' -> uses P_smoothed or P_filtered and corresponding means.
         """
@@ -231,12 +237,14 @@ class StateSpaceResults:
         upper = np.zeros_like(mean)
         for t in range(mean.shape[1]):
             std = np.sqrt(np.diag(cov[:, :, t]))
-            lower[:,t] = mean[:, t] - z * std
-            upper[:,t] = mean[:, t] + z * std
-            
+            lower[:, t] = mean[:, t] - z * std
+            upper[:, t] = mean[:, t] + z * std
+
         return lower, upper
 
-    def conf_int_y(self, alpha: float = 0.05, prediction: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+    def conf_int_y(
+        self, alpha: float = 0.05, prediction: bool = False
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """Confidence intervals for y_hat. If prediction True include measurement noise R when available."""
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
@@ -248,49 +256,52 @@ class StateSpaceResults:
         p, T = y_hat.shape
 
         model = getattr(self, "model", None)
-                
+
         Psm = None
         if self.P_smoothed is not None:
             Psm = self.P_smoothed
         elif self.P_filtered is not None:
-            Psm = self.P_filtered # fallback to filtered covariances if smoothed not available
+            Psm = (
+                self.P_filtered
+            )  # fallback to filtered covariances if smoothed not available
         else:
             Psm = None
-         
 
         if model is not None and hasattr(model, "H") and Psm is not None:
             H = np.asarray(model.H)
-            R = np.asarray(getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0)))
+            R = np.asarray(
+                getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0))
+            )
             # std = np.zeros((p, T))
             lower = np.zeros((p, T))
             upper = np.zeros((p, T))
-            
+
             for t in range(T):
-                var_y = H @ Psm[:, :, t+1] @ H.T
+                var_y = H @ Psm[:, :, t + 1] @ H.T
                 if prediction:
                     var_y = var_y + R
-                
+
                 std_t = np.sqrt(np.diag(var_y))
-            
+
                 lower[:, t] = y_hat[:, t] - z * std_t
                 upper[:, t] = y_hat[:, t] + z * std_t
             return lower, upper
 
-
         # fallback to residual std
         err = self._compute_residuals()
         if err is None:
-            raise ValueError("Cannot compute y confidence intervals: no residuals and no model covariance.")
+            raise ValueError(
+                "Cannot compute y confidence intervals: no residuals and no model covariance."
+            )
         resid_std = np.nanstd(err)
         lower = y_hat - z * resid_std
         upper = y_hat + z * resid_std
         return lower, upper
-    
 
-    def coverage_probability(self, alpha: float = 0.05, which='global'):
+    def coverage_probability(self, alpha: float = 0.05, which="global"):
         return self._coverage_probability(alpha, which)
 
-    def _coverage_probability(self, alpha: float = 0.05, which='global'):
+    def _coverage_probability(self, alpha: float = 0.05, which="global"):
         """
         Compute empirical coverage probability of prediction intervals.
 
@@ -300,47 +311,51 @@ class StateSpaceResults:
         """
         y_true = self.y_obs
 
-        lower, upper = self.conf_int_y(alpha, prediction  = True)
-        
+        lower, upper = self.conf_int_y(alpha, prediction=True)
+
         inside = (y_true >= lower) & (y_true <= upper)
-        
-        
+
         if which == "global":
             return np.nanmean(inside)
         elif which == "space":
-            return np.nanmean(inside, axis = 1)
+            return np.nanmean(inside, axis=1)
         elif which == "time":
-            return np.nanmean(inside, axis = 0)
+            return np.nanmean(inside, axis=0)
         else:
             raise ValueError("which must be 'smoothed' or 'filtered'")
-
 
     # ---------- Diagnostics & summary ----------
     def diagnostics(self) -> Dict[str, float]:
         """Return a small diagnostics dict computed on residuals (numpy)."""
-        
-        err = getattr(self, 'residuals', None)
+
+        err = getattr(self, "residuals", None)
         if err is None:
             err = self._compute_residuals()
-            
+
         flat = err.flatten()
         flat = flat[~np.isnan(flat)]
         jb, jbpv = jarque_bera(flat, nan_policy="omit")
-        
+
         sk = skew(flat, nan_policy="omit")
         kt = kurtosis(flat, nan_policy="omit")
-        
+
         omni, omnipv = omni_normtest(flat)
 
         dw = durbin_watson(flat)
-        return {"jb": float(jb), "jb_pvalue": float(jbpv), "omni": float(omni), "omni_pvalue": float(omnipv), "dw": float(dw),
-                "skew": float(sk), "kurtosis": float(kt)}
-    
+        return {
+            "jb": float(jb),
+            "jb_pvalue": float(jbpv),
+            "omni": float(omni),
+            "omni_pvalue": float(omnipv),
+            "dw": float(dw),
+            "skew": float(sk),
+            "kurtosis": float(kt),
+        }
 
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
         # Ensure numpy arrays for summary stats
-        
+
         self.results = np.array([0])
         # self.params = self.beta
         # self.param_names = self.xbeta_names
@@ -353,9 +368,8 @@ class StateSpaceResults:
             upper = self.params + 1.96 * self.bse
             return np.column_stack([lower, upper])
 
-
         self.conf_int = lambda alpha: conf_int_parmas(alpha)
-       
+
         self.nobs = self.y_obs.size
         self.nspace, self.ntime = self.y_obs.shape
         self.missing = np.sum(np.isnan(self.y_obs))
@@ -363,67 +377,92 @@ class StateSpaceResults:
 
         # self.df_model = str(100)
         # self.df_resid = str(100)
-        
+
         # Compute residual diagnostics
-        err = getattr(self, 'residuals', None)
+        err = getattr(self, "residuals", None)
         if err is None:
             err = self._compute_residuals()
-        
+
         stats = self.diagnostics()
 
         # top-left / top-right small tables
-        p, q, T  = self.model.shape if hasattr(self.model, 'shape') else (None, None, None)
-        
-        top_left = dict([
-            ('Model name:', lambda: [self.model.__class__.__name__]),
-            ('Model type:', lambda: [self.model.type if hasattr(self.model, 'type') else "None"]),
-            ('Model order:', lambda: [self.model.order if hasattr(self.model, 'order') else "None"]),
-            ('Dep. Variable:', lambda: [self.yname]),
-            ('Date:', lambda: [self.today]),
-            # ('Number of obs:', lambda: [self.nobs]),
-            # ('Number of series:', lambda: [self.nspace]),
-            #('Time length:', lambda: [self.ntime]),
-            ('Shape (p, q, T) :', lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-            ('# missing:', lambda: [self.missing]),
-            ('Log-Likelihood:', lambda: ["%#8.5g" % self.llf]),
-            ('JAX backend:', lambda: [f"{jax.default_backend()}"]),
-            ('JAX devices:', lambda: [f"{jax.devices()}"]),
-            ('Runtime total (s):', lambda: [f"{(self.time_filter or 0) + (self.time_smoother or 0) + (self.time_expectation or 0):.3g}"]),
-            ])
-        
+        p, q, T = (
+            self.model.shape if hasattr(self.model, "shape") else (None, None, None)
+        )
+
+        top_left = dict(
+            [
+                ("Model name:", lambda: [self.model.__class__.__name__]),
+                (
+                    "Model type:",
+                    lambda: [
+                        self.model.type if hasattr(self.model, "type") else "None"
+                    ],
+                ),
+                (
+                    "Model order:",
+                    lambda: [
+                        self.model.order if hasattr(self.model, "order") else "None"
+                    ],
+                ),
+                ("Dep. Variable:", lambda: [self.yname]),
+                ("Date:", lambda: [self.today]),
+                # ('Number of obs:', lambda: [self.nobs]),
+                # ('Number of series:', lambda: [self.nspace]),
+                # ('Time length:', lambda: [self.ntime]),
+                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+                ("# missing:", lambda: [self.missing]),
+                ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
+                ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
+                ("JAX devices:", lambda: [f"{jax.devices()}"]),
+                (
+                    "Runtime total (s):",
+                    lambda: [
+                        f"{(self.time_filter or 0) + (self.time_smoother or 0) + (self.time_expectation or 0):.3g}"
+                    ],
+                ),
+            ]
+        )
+
         top_right = {
-            'Jarque-Bera:': lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
-            'Omnibus test:': lambda: f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})",
-            'Durbin-Watson:': lambda: f"{stats['dw']:.2f}",
-            'Skewness:': lambda: f"{stats['skew']:.2f}",
-            'Kurtosis:': lambda: f"{stats['kurtosis']:.2f}",
-            'MSE:': lambda: f"{self.mse():.2f}",
-            'RMSE:': lambda: f"{self.rmse():.2f}",
-            'Coverage Prob.:': lambda: f"{self._coverage_probability():.2f}, (alpha = 0.05)",
+            "Jarque-Bera:": lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
+            "Omnibus test:": lambda: f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})",
+            "Durbin-Watson:": lambda: f"{stats['dw']:.2f}",
+            "Skewness:": lambda: f"{stats['skew']:.2f}",
+            "Kurtosis:": lambda: f"{stats['kurtosis']:.2f}",
+            "MSE:": lambda: f"{self.mse():.2f}",
+            "RMSE:": lambda: f"{self.rmse():.2f}",
+            "Coverage Prob.:": lambda: f"{self._coverage_probability():.2f}, (alpha = 0.05)",
             "Runtime filter (s):": lambda: f"{self.time_filter:.3g}",
             "Runtime smoother (s):": lambda: f"{self.time_smoother:.3g}",
             "Runtime expectation (s):": lambda: f"{self.time_expectation:.3g}",
         }
 
-        # Generate the dictionaly        
+        # Generate the dictionaly
         gen_top_left = []
         for item in top_left.keys():
-            gen_top_left.append( (item, list(top_left[item]())))
+            gen_top_left.append((item, list(top_left[item]())))
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append( (item, top_right[item]()))
-        
-        # Generate the summary 
+            gen_top_right.append((item, top_right[item]()))
+
+        # Generate the summary
         smry = Summary()
-        smry.add_table_2cols(self,title="State Space Model results",
-                             gleft = gen_top_left, gright = gen_top_right, yname=None, xname=None)
+        smry.add_table_2cols(
+            self,
+            title="State Space Model results",
+            gleft=gen_top_left,
+            gright=gen_top_right,
+            yname=None,
+            xname=None,
+        )
 
         return smry
-    
+
     def __str__(self):
         return str(self.summary())
-    
+
     def __repr__(self):
         return str(self.summary())
 
@@ -441,6 +480,7 @@ class StateSpaceResults:
             "mse": self.mse("global"),
             "rmse": self.rmse("global"),
             "diagnostics": self.diagnostics(),
-            "S11": self.S11, "S10": self.S10, "S00": self.S00
+            "S11": self.S11,
+            "S10": self.S10,
+            "S00": self.S00,
         }
-    

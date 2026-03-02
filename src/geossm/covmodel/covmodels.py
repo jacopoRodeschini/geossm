@@ -1,35 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Nov 17 10:44:06 2025
-
 @author: jacopo
-
 """
-import matplotlib.tri as mtri  # For Triangulation object
-import scipy.spatial
-from scipy.spatial import Delaunay
-from scipy.spatial.distance import cdist
-import mfem.ser as mfem
 
+import matplotlib.tri as mtri  # For Triangulation object
+import mfem.ser as mfem
 import numpy as np
-import matplotlib.tri as tri
 import matplotlib.pyplot as plt
 import scipy.sparse as sp
 import scipy as sc
 import gstools as gs
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
-
-from gstools.covmodel import Matern
-import warnings
-
-from scipy.spatial import ConvexHull
 import meshio
-
-
-from scipy.sparse.linalg import splu
+from scipy.spatial.distance import cdist
+from shapely.geometry import Point, Polygon
+from gstools.covmodel import Matern
+from scipy.spatial import ConvexHull
 
 # %% Utility functions
+
 
 def meshio_to_mfem_mesh(meshio_mesh):
     """
@@ -38,12 +27,13 @@ def meshio_to_mfem_mesh(meshio_mesh):
     """
     # 1. Determine dimension and prepare vertices
     if meshio_mesh.points.shape[1] == 2:
-        dim = 2
+        # dim = 2
         # MFEM internally works with 3D coordinates, so pad 2D points with zeros
-        vertices_mfem = np.hstack([meshio_mesh.points, np.zeros(
-            (meshio_mesh.points.shape[0], 1))]).astype(np.float64)
+        vertices_mfem = np.hstack(
+            [meshio_mesh.points, np.zeros((meshio_mesh.points.shape[0], 1))]
+        ).astype(np.float64)
     elif meshio_mesh.points.shape[1] == 3:
-        dim = 3
+        # dim = 3
         vertices_mfem = meshio_mesh.points.astype(np.float64)
     else:
         raise ValueError("meshio_mesh.points must have 2 or 3 columns.")
@@ -71,15 +61,15 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
     if cells_data is None or cell_type_mfem == -1:
         raise ValueError(
-            "No supported 2D or 3D cells found in meshio_mesh (e.g., triangle, quad, tetra, hexa).")
+            "No supported 2D or 3D cells found in meshio_mesh (e.g., triangle, quad, tetra, hexa)."
+        )
 
     # 3. Create an empty MFEM mesh
     # The default constructor mfem.Mesh(dim, num_vertices, num_elements, type, gen_edges=True)
     # is generally for very simple, uniform meshes or when you're building elements later.
     # We will use the mfem.Mesh() default constructor and add elements.
     # mfem_mesh = mfem.Mesh()
-    mfem_mesh = mfem.Mesh(
-        2, vertices_mfem.shape[0], cells_data.shape[0], 0, 2)
+    mfem_mesh = mfem.Mesh(2, vertices_mfem.shape[0], cells_data.shape[0], 0, 2)
 
     # 4. Add vertices to the MFEM mesh
     for i, vert_coord in enumerate(vertices_mfem):
@@ -88,11 +78,12 @@ def meshio_to_mfem_mesh(meshio_mesh):
     # 5. Add elements to the MFEM mesh
     # Assign element attributes (e.g., 1 for the domain)
     # This assumes all domain elements get the same attribute for simplicity.
-    element_attribute = 1  # Common attribute for domain cells
+    # element_attribute = 1  # Common attribute for domain cells
     all_triangles = cells_data
     for i in range(len(all_triangles)):
         mfem_mesh.AddTriangle(
-            all_triangles[i, 0], all_triangles[i, 1], all_triangles[i, 2])
+            all_triangles[i, 0], all_triangles[i, 1], all_triangles[i, 2]
+        )
 
     # 6. Finalize the mesh
     # This step is crucial. It builds connectivity tables, boundary elements, etc.
@@ -109,6 +100,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
     # For now, MFEM's `FinalizeMesh()` will auto-detect boundaries and assign default attributes.
 
     return mfem_mesh
+
 
 # %% FEM solver class
 
@@ -129,8 +121,7 @@ class FEMSolver:
         except Exception as e:
             raise RuntimeError(f"Error loading mesh: {str(e)}") from e
 
-
-        if not hasattr(mesh, 'Dimension'):
+        if not hasattr(mesh, "Dimension"):
             raise TypeError(
                 f"mesh must be an mfem.Mesh object, got {type(mesh).__name__}"
             )
@@ -141,14 +132,13 @@ class FEMSolver:
             for poly in domain:
                 if not isinstance(poly, Polygon):
                     raise ValueError(
-                        f"Each domain element must be a shapely Polygon, "
+                        "Each domain element must be a shapely Polygon, "
                         f"got {type(poly).__name__}"
                     )
 
         # Store mesh
         self._mesh = mesh
-        self._domain = domain if domain is not None else ConvexHull(
-            self.vertex[:, :2])
+        self._domain = domain if domain is not None else ConvexHull(self.vertex[:, :2])
 
         # Initialize matrices as None (will be computed)
         self._fespace = None
@@ -187,9 +177,7 @@ class FEMSolver:
             return fespace
 
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to build finite element space: {str(e)}"
-            )
+            raise RuntimeError(f"Failed to build finite element space: {str(e)}")
 
     def isinner(self, points=None):
         """Classify vertices as interior or boundary based on domain."""
@@ -199,10 +187,12 @@ class FEMSolver:
         else:
             phy_points = np.asarray(self.vertex, dtype=np.float64)
 
-        inner = np.logical_or.reduce([
-            np.array([poly.contains(Point(p)) for p in phy_points])
-            for poly in self._domain
-        ])
+        inner = np.logical_or.reduce(
+            [
+                np.array([poly.contains(Point(p)) for p in phy_points])
+                for poly in self._domain
+            ]
+        )
         return inner
 
     def _compute_mass_stiff(self):
@@ -229,8 +219,7 @@ class FEMSolver:
         # Therefore, be careful not to access after the matrix is freed.
         # [n x 1] since LinearForm results in a vector rather than a full matrix
         temp = c.GetDataArray()
-        mass = sp.diags(temp, offsets=0, shape=(
-            self.ndofs, self.ndofs), format="csr")
+        mass = sp.diags(temp, offsets=0, shape=(self.ndofs, self.ndofs), format="csr")
 
         # 1) Create the bilinear form for the stiff matrix (with the one coefficient)
         # 2) Add a diffusion integrator to compute <Grad(phi_i), Grad(phi_j)>
@@ -249,16 +238,20 @@ class FEMSolver:
         # GetIArray, GetJArray, and GetDataArray. These methods give NumPy array of CSR
         # matrix data.
 
-        i = spmat.GetIArray()       # Row pointers (cumulative sums of non-zero elements per row)
-        j = spmat.GetJArray()       # get index of j (column)
-        dt = spmat.GetDataArray()   # Non zero values of the sparse matrix
+        i = (
+            spmat.GetIArray()
+        )  # Row pointers (cumulative sums of non-zero elements per row)
+        j = spmat.GetJArray()  # get index of j (column)
+        dt = spmat.GetDataArray()  # Non zero values of the sparse matrix
 
         # Build the stifness sparse matrix G using the CSR format
-        stiff = sp.csr_matrix(
-            (dt, j, i), shape=(self.ndofs, self.ndofs), copy=True)
+        stiff = sp.csr_matrix((dt, j, i), shape=(self.ndofs, self.ndofs), copy=True)
 
         # cut on the effective dofs
-        return mass[:self.effective_dofs, :][:, :self.effective_dofs], stiff[:self.effective_dofs, :][:, :self.effective_dofs]
+        return (
+            mass[: self.effective_dofs, :][:, : self.effective_dofs],
+            stiff[: self.effective_dofs, :][:, : self.effective_dofs],
+        )
 
     def getBasis(self, phy_points=None):
         count, notfindInx, H = self._compute_basis(phy_points)
@@ -269,8 +262,7 @@ class FEMSolver:
 
         # Create the list of pysical points
         if phy_points is None:
-            phy_points = np.asarray(
-                self.vertex, dtype=np.float64)  # total grid points
+            phy_points = np.asarray(self.vertex, dtype=np.float64)  # total grid points
         else:
             phy_points = np.asarray(phy_points, dtype=np.float64)
 
@@ -350,12 +342,17 @@ class FEMSolver:
 
         notfindInx = np.asarray(notfindInx)
 
-        return count, notfindInx, H[:, :self.effective_dofs]
+        return count, notfindInx, H[:, : self.effective_dofs]
 
-    def plot_mesh(self, ax=None, figsize=(10, 8), title="Title",
-                  alpha_vertex=1,
-                  alpha_triangle=0.5,
-                  alpha_border=0.5):
+    def plot_mesh(
+        self,
+        ax=None,
+        figsize=(10, 8),
+        title="Title",
+        alpha_vertex=1,
+        alpha_triangle=0.5,
+        alpha_border=0.5,
+    ):
 
         # Convert the vertex array to a numpy array
         vertex = self.vertex
@@ -383,13 +380,11 @@ class FEMSolver:
 
         # Handle the 'ax' argument
         if ax is None:
-            fig, ax = plt.subplots(figsize=figsize)
-            new_fig_created = True
+            _, ax = plt.subplots(figsize=figsize)
         else:
-            fig = ax.figure  # Get the figure from the provided axes
-            new_fig_created = False
-
-        ax.triplot(triang, 'k-', lw=0.3, alpha=0.5, label='All Mesh Edges')
+            _ = ax.figure  # Get the figure from the provided axes
+            
+        ax.triplot(triang, "k-", lw=0.3, alpha=0.5, label="All Mesh Edges")
 
         # Plot the interior vertices
         # ax.plot(vertex[self.inner, 0], vertex[self.inner, 1],
@@ -397,10 +392,20 @@ class FEMSolver:
         # ax.plot(vertex[~self.inner, 0], vertex[~self.inner, 1],
         #         'xg', label=f'Outer vertices ({sum(~self.inner)}) ', alpha=alpha_vertex)
 
-        ax.plot(vertex[self.inner, 0], vertex[self.inner, 1],
-                'xm', label=f'Interior vertices', alpha=alpha_vertex)
-        ax.plot(vertex[~self.inner, 0], vertex[~self.inner, 1],
-                'xg', label=f'Outer vertices', alpha=alpha_vertex)
+        ax.plot(
+            vertex[self.inner, 0],
+            vertex[self.inner, 1],
+            "xm",
+            label="Interior vertices",
+            alpha=alpha_vertex,
+        )
+        ax.plot(
+            vertex[~self.inner, 0],
+            vertex[~self.inner, 1],
+            "xg",
+            label="Outer vertices",
+            alpha=alpha_vertex,
+        )
 
         # Plot the boundary vertices
         # ax.plot(self.outer_points[:, 0], self.outer_points[:, 1],
@@ -410,11 +415,11 @@ class FEMSolver:
         for edge in boundary_edge:
             x_coords = vertex[edge, 0]
             y_coords = vertex[edge, 1]
-            ax.plot(x_coords, y_coords, '--r', alpha=alpha_border)
+            ax.plot(x_coords, y_coords, "--r", alpha=alpha_border)
 
         for poly in self.domain:
             x, y = poly.exterior.xy
-            ax.plot(x, y, '-', color='orange', alpha=1)
+            ax.plot(x, y, "-", color="orange", alpha=1)
 
         # Add a legend
         ax.legend()
@@ -423,14 +428,18 @@ class FEMSolver:
         ax.set_title(title)
         ax.set_xlabel("X-coordinate")
         ax.set_ylabel("Y-coordinate")
-        ax.legend(loc='best')
-        ax.grid(True, linestyle=':', alpha=0.6)
+        ax.legend(loc="best")
+        ax.grid(True, linestyle=":", alpha=0.6)
         # plt.show()
         return ax
 
     def get_distance(self, points=None):
         """Get the distance between the (vertex, points) or (vertex, vertex)"""
-        return cdist(self.vertex, self.vertex) if points is None else cdist(points, self.vertex)
+        return (
+            cdist(self.vertex, self.vertex)
+            if points is None
+            else cdist(points, self.vertex)
+        )
 
     def distance(self, points=None):
         """Get the distance between the (vertex, points) or (vertex, vertex)"""
@@ -460,7 +469,8 @@ class FEMSolver:
         for i in range(self._mesh.GetNE()):
             # Get the global vertex indices for the current element
             element_vertex_indices = self._mesh.GetElementVertices(
-                i)  # This should return a Python list
+                i
+            )  # This should return a Python list
 
             # Add these to our set of unique DOF-associated vertex indices
             for v_idx in element_vertex_indices:
@@ -492,7 +502,7 @@ class FEMSolver:
             # For a triangle mesh, this will always return 3 integers
             triangles.append(self.mesh.GetElementVertices(i))
 
-           # 3. Convert to a structured NumPy array
+        # 3. Convert to a structured NumPy array
         triangles_array = np.array(triangles)
 
         return triangles_array
@@ -603,7 +613,7 @@ class FEMSolver:
         return (self.nvertex, self.nelements, self.nbElements)
 
     def __str__(self):
-        s = f"FEMSolver object with: \n"
+        s = "FEMSolver object with: \n"
         s += f" - Number of vertices: {self.nvertex} \n"
         s += f" - Number of elements: {self.nelements} \n"
         s += f" - Number of boundary elements: {self.nbElements} \n"
@@ -714,23 +724,24 @@ class FEMSolver:
 class spdeAppoxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
-    Notes
-    -----
-    This model is given by the following correlation function
+     Notes
+     -----
+     This model is given by the following correlation function
 
-    Using Neumann boundary conditions
+     Using Neumann boundary conditions
 
-    References
-   ----------
-   .. [Rasmussen2003] Rasmussen, C. E.,
-          "Gaussian processes in machine learning." Summer school on
-          machine learning. Springer, Berlin, Heidelberg, (2003)
+     References
+    ----------
+    .. [Rasmussen2003] Rasmussen, C. E.,
+           "Gaussian processes in machine learning." Summer school on
+           machine learning. Springer, Berlin, Heidelberg, (2003)
 
 
     """
 
-    def __init__(self, domain,  latlon=True, geo_scale=gs.DEGREE_SCALE,
-                 nu=1, var=1, rescale=0.1):
+    def __init__(
+        self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0
+    ):
 
         # update the geo matern parameter
         # self._nu = nu         # smoothness
@@ -759,24 +770,30 @@ class spdeAppoxCov(Matern):
 
         # Initialize parent Matern class
         super().__init__(
-            dim=2, var=var, len_scale=1.0, nugget=0.0, anis=1.0,
-            angles=0.0, integral_scale=None, rescale=rescale,
-            latlon=latlon, geo_scale=geo_scale, temporal=False,
-            spatial_dim=2, var_raw=None, hankel_kw=None
+            dim=2,
+            var=var,
+            len_scale=1.0,
+            nugget=0.0,
+            anis=1.0,
+            angles=0.0,
+            rescale=rescale,
+            latlon=latlon,
+            geo_scale=geo_scale,
+            temporal=False,
+            spatial_dim=2,
+            nu=nu,
         )
 
     @property
     def meshIO(self):
         if self._meshIO is None:
-            raise RuntimeError(
-                "Mesh not loaded. Call setup() with a mesh first.")
+            raise RuntimeError("Mesh not loaded. Call setup() with a mesh first.")
         return self._meshIO
 
     @property
     def fem_solver(self):
         if self._fem_solver is None:
-            raise RuntimeError(
-                "FEM solver not initialized. Call setup() first.")
+            raise RuntimeError("FEM solver not initialized. Call setup() first.")
         return self._fem_solver
 
     def __str__(self):
@@ -838,9 +855,7 @@ class spdeAppoxCov(Matern):
             self._fem_solver = FEMSolver(mesh_obj, domain=self._domain)
 
         except Exception as e:
-            raise RuntimeError(
-                f"Failed to initialize FEM solver: {str(e)}"
-            ) from e
+            raise RuntimeError(f"Failed to initialize FEM solver: {str(e)}") from e
 
         return self
 
@@ -860,8 +875,12 @@ class spdeAppoxCov(Matern):
         effective_dofs = self.fem_solver.effective_dofs
 
         # Compute the inverse of the mass matrix
-        Cinv = sp.diags(1/self.fem_solver.mass.diagonal(), offsets=0, shape=(
-            effective_dofs, effective_dofs), format="csr")
+        Cinv = sp.diags(
+            1 / self.fem_solver.mass.diagonal(),
+            offsets=0,
+            shape=(effective_dofs, effective_dofs),
+            format="csr",
+        )
 
         # Compute the K matrix
         k = self.rescale
@@ -889,8 +908,8 @@ class spdeAppoxCov(Matern):
     # property:: spatial process
     @property
     def emp_range(self):
-        """Return the empirical range paramiter  """
-        return np.sqrt(8*self.nu) / self.rescale
+        """Return the empirical range paramiter"""
+        return np.sqrt(8 * self.nu) / self.rescale
 
     @property
     def sigma2k(self):
@@ -898,7 +917,9 @@ class spdeAppoxCov(Matern):
         Return the marginal variance of the standardise approximate spatial SPDE process
         Variance of the aproximate field x(u). Eq. 2 and Eq. 9
         """
-        return sc.special.gamma(1) / (sc.special.gamma(2) * 4*np.pi * (self.rescale**2))
+        return sc.special.gamma(1) / (
+            sc.special.gamma(2) * 4 * np.pi * (self.rescale**2)
+        )
 
     @property
     def domain(self):
@@ -910,7 +931,7 @@ class spdeAppoxCov(Matern):
         # Create a dictionary of the object's state excluding non-picklable attributes
         state = self.__dict__.copy()
         # Exclude the attributes that can't be pickled
-        excluded_attrs = ['_fem_solver', '_mesh']
+        excluded_attrs = ["_fem_solver", "_mesh"]
         for attr in excluded_attrs:
             if attr in state:
                 del state[attr]

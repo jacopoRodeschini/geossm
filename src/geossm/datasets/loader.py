@@ -3,17 +3,14 @@ import pandas as pd
 import geopandas as geopd
 
 _AVAILABLE = {
-    "agrimonia": {
-        "data": "agrimonia.csv",
-        "geometry": "lombardy"   # optional
-    }
+    "agrimonia": {"data": "agrimonia.csv", "geometry": "lombardy"}  # optional
 }
+
 
 def load_dataset(name: str, return_geometry: bool = True):
     if name not in _AVAILABLE:
         raise ValueError(
-            f"Unknown dataset '{name}'. "
-            f"Available datasets: {list(_AVAILABLE)}"
+            f"Unknown dataset '{name}'. " f"Available datasets: {list(_AVAILABLE)}"
         )
 
     base_data = resources.files("geossm.datasets.data")
@@ -25,16 +22,18 @@ def load_dataset(name: str, return_geometry: bool = True):
         df = pd.read_csv(f, low_memory=False)
 
     if "geometry" in dataset:
-        shp_path = base_shape.joinpath(f"{dataset['geometry']}/{dataset['geometry']}.shp")
+        shp_path = base_shape.joinpath(
+            f"{dataset['geometry']}/{dataset['geometry']}.shp"
+        )
         gdf = geopd.read_file(shp_path)
-    
+
     if return_geometry:
         return df, gdf
     else:
         return df
 
 
-def list_datasets(): 
+def list_datasets():
     """
     List available example datasets bundled with the package.
 
@@ -43,7 +42,7 @@ def list_datasets():
     str
         Formatted table with dataset name, file extension and size in MB.
     """
-    
+
     base_data = resources.files("geossm.datasets.data")
     base_shape = resources.files("geossm.datasets.shapefiles")
 
@@ -53,32 +52,26 @@ def list_datasets():
     rows = [header, sep]
 
     # Add a flag if the dataset is larger than 10 MB
-    
+
     for name in sorted(_AVAILABLE):
-        filename = _AVAILABLE[name]['data']
+        filename = _AVAILABLE[name]["data"]
         path = base_data.joinpath(filename)
         size_mb = path.stat().st_size / 1024**2
         ext = path.suffix.lstrip(".")
 
         flag = " *" if size_mb > 10 else ""
-        rows.append(
-            f"{name:<15} {'data':<10} {ext:<6} {size_mb:>10.3f}{flag}"
-        )
+        rows.append(f"{name:<15} {'data':<10} {ext:<6} {size_mb:>10.3f}{flag}")
 
     for name in sorted(_AVAILABLE):
-        if 'geometry' not in _AVAILABLE[name]:
+        if "geometry" not in _AVAILABLE[name]:
             continue
-        
-        filename = _AVAILABLE[name]['geometry']
+
+        filename = _AVAILABLE[name]["geometry"]
         path = base_shape.joinpath(f"{filename}/{filename}.shp")
         size_mb = path.stat().st_size / 1024**2
         ext = path.suffix.lstrip(".")
 
         flag = " *" if size_mb > 10 else ""
-        rows.append(
-            f"{name:<15} {'geometry':<10} {ext:<6} {size_mb:>10.3f}{flag}"
-        )
-    
-
+        rows.append(f"{name:<15} {'geometry':<10} {ext:<6} {size_mb:>10.3f}{flag}")
 
     return "\n".join(rows)

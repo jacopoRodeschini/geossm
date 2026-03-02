@@ -1,6 +1,5 @@
 from src.ssm import StateSpaceModel as ssm
 import jax.numpy as jnp
-import numpy as np
 
 # Define dimensions
 p = 2  # Observation dimension

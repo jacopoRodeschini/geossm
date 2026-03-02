@@ -10,6 +10,7 @@ import psutil
 
 # %% [Utils] key stream
 
+
 class KeyStream:
     """A simple helper class to manage JAX random keys."""
 
@@ -23,14 +24,15 @@ class KeyStream:
         if num is None:
             new_key, self._key = jax.random.split(self._key)
         else:
-            keys = jax.random.split(self._key, num=num+1)
+            keys = jax.random.split(self._key, num=num + 1)
             new_key = keys[:-1]
             self._key = keys[-1]
 
         return new_key
-    
+
 
 # %% Compute the block diagonal 3D
+
 
 def block_diag_3D(*arrs):
     """
@@ -51,8 +53,7 @@ def block_diag_3D(*arrs):
     total_shape_2 = arrs[0].shape[2]
 
     # Initialize the block diagonal matrix with zeros
-    block_diag_matrix = np.zeros(
-        (total_shape_0, total_shape_1, total_shape_2))
+    block_diag_matrix = np.zeros((total_shape_0, total_shape_1, total_shape_2))
 
     # Current start index for the first two dimensions
     current_index_0 = 0
@@ -60,17 +61,21 @@ def block_diag_3D(*arrs):
 
     for arr in arrs:
         shape_0, shape_1, shape_2 = arr.shape
-        block_diag_matrix[current_index_0:current_index_0+shape_0,
-                          current_index_1:current_index_1+shape_1,
-                          :] = arr
+        block_diag_matrix[
+            current_index_0 : current_index_0 + shape_0,
+            current_index_1 : current_index_1 + shape_1,
+            :,
+        ] = arr
         current_index_0 += shape_0
         current_index_1 += shape_1
 
     return block_diag_matrix
 
+
 # % Write the model information into a file
 
-def write(filename, grid_obs, ssm_model, mode='a'):
+
+def write(filename, grid_obs, ssm_model, mode="a"):
     # write the class into a file
 
     # Get current date and time
@@ -78,7 +83,7 @@ def write(filename, grid_obs, ssm_model, mode='a'):
     s = f"Current Time: {current_time} \n"
 
     s += "OBSERVATION GRID \n"
-    s += ''.join([gr.__str__() for gr in grid_obs])
+    s += "".join([gr.__str__() for gr in grid_obs])
     s += "\n"
 
     s += "SSM REPRESENTATION \n"
@@ -96,7 +101,9 @@ def write(filename, grid_obs, ssm_model, mode='a'):
 
     return filename, mode
 
+
 # % Get Hardware infromation
+
 
 def getHardware():
 
@@ -111,9 +118,8 @@ def getHardware():
 
     # Get memory info
     virtual_memory = psutil.virtual_memory()
-    total_memory = virtual_memory.total / (1024 ** 3)  # Convert to GB
-    available_memory = virtual_memory.available / \
-        (1024 ** 3)  # Convert to GB
+    total_memory = virtual_memory.total / (1024**3)  # Convert to GB
+    available_memory = virtual_memory.available / (1024**3)  # Convert to GB
 
     # Get system info
     system = platform.system()
@@ -123,14 +129,16 @@ def getHardware():
     node = platform.node()
 
     # Compile all information into a string
-    info = (f"System: {system} {release} {version}\n"
-            f"Node Name: {node}\n"
-            f"Machine: {machine}\n"
-            f"Architecture: {architecture}\n"
-            f"CPU: {cpu_name}\n"
-            f"Physical CPUs: {cpu_count}\n"
-            f"Logical CPUs: {cpu_count_logical}\n"
-            f"Current CPU Frequency: {cpu_freq:.2f} MHz\n"
-            f"Total Memory: {total_memory:.2f} GB\n"
-            f"Available Memory: {available_memory:.2f} GB\n")
+    info = (
+        f"System: {system} {release} {version}\n"
+        f"Node Name: {node}\n"
+        f"Machine: {machine}\n"
+        f"Architecture: {architecture}\n"
+        f"CPU: {cpu_name}\n"
+        f"Physical CPUs: {cpu_count}\n"
+        f"Logical CPUs: {cpu_count_logical}\n"
+        f"Current CPU Frequency: {cpu_freq:.2f} MHz\n"
+        f"Total Memory: {total_memory:.2f} GB\n"
+        f"Available Memory: {available_memory:.2f} GB\n"
+    )
     return info

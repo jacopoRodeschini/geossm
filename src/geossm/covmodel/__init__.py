@@ -2,5 +2,4 @@
 
 from .covmodels import spdeAppoxCov, FEMSolver
 
-
-__all__ = ['spdeAppoxCov', 'FEMSolver']
+__all__ = ["spdeAppoxCov", "FEMSolver"]
