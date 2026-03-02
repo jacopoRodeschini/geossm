@@ -134,6 +134,12 @@ import geossm
 print(geossm.__version__)
 ```
 
+### Delete the environment
+Remove an entire environment
+```bash
+conda remove -n geossm --all
+```
+
 ## Quick Start
 
 ### Loading Data
