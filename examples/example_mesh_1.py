@@ -1,48 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Mon Nov 17 10:44:06 2025
-
 @author: jacopo
-
-create the mesh and the associate covariane function 
 """
 
-
-import math
 import pickle
 import gmsh
 import pygmsh
-import matplotlib.tri as mtri  # For Triangulation object
-import scipy.spatial
-from scipy.spatial import Delaunay
-from scipy.spatial.distance import cdist
-import mfem.ser as mfem
-
 import numpy as np
-import matplotlib.tri as tri
 import matplotlib.pyplot as plt
-import scipy.sparse as sp
-import scipy as sc
-import gstools as gs
-from shapely.geometry import LineString, Point, Polygon, MultiPoint
-import numpy as np
-from gstools.covmodel import Matern
-import warnings
-
-from scipy.spatial import ConvexHull
-import meshio
-
-from scipy.sparse.linalg import splu
-
-
-# %% import the geossm package
-
 import geossm
-
-# print("Version: ", geossm.__version__)
-print("Load from: ", geossm.__file__)
-
+from shapely.geometry import Polygon
 
 # %% Import the Matern model based on the SPDE approach R^2
 
@@ -59,12 +27,11 @@ points = np.random.uniform(0, 1, size=(n, 2))
 
 # plot the poitns
 fix, ax = plt.subplots()
-ax.plot(points[:, 0], points[:, 1], 'x', label='Random Points')
-ax.plot(domain.exterior.xy[0], domain.exterior.xy[1],
-        'r-', label='Domain Boundary')
-ax.set_title('Random Points in [0,1]^2')
-ax.set_xlabel('X-axis')
-ax.set_ylabel('Y-axis')
+ax.plot(points[:, 0], points[:, 1], "x", label="Random Points")
+ax.plot(domain.exterior.xy[0], domain.exterior.xy[1], "r-", label="Domain Boundary")
+ax.set_title("Random Points in [0,1]^2")
+ax.set_xlabel("X-axis")
+ax.set_ylabel("Y-axis")
 ax.legend()
 plt.show()
 
@@ -77,9 +44,10 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         if lc_buffer is None:
             lc_buffer = lc
 
-        coords = np.array(poly.buffer(
-            lc_buffer).simplify(lc_buffer).exterior.coords[:-1])
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer*0.1)
+        coords = np.array(
+            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
+        )
+        domain = geom.add_polygon(coords, mesh_size=lc_buffer * 0.1)
 
         # 2. Add physical group for the domain surface (good practice)
         geom.add_physical(domain, label="surface_domain")
@@ -152,8 +120,8 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
 mesh = buildMesh(domain, 1, points)
 
 print(mesh)
-print(len(mesh.cells_dict['triangle']))
-print(len(mesh.cells_dict['vertex']))
+print(len(mesh.cells_dict["triangle"]))
+print(len(mesh.cells_dict["vertex"]))
 
 # save the mesh on local disk
 # mesh.write("mesh.vtu", mesh)     # VTK XML
@@ -197,14 +165,14 @@ Q = cov_matern.precision(rescale=1)
 # %% Save the covariance to local disk
 # pickable object
 
-filename = 'matern_rescale_1.pkl'
+filename = "matern_rescale_1.pkl"
 
-with open(filename, 'wb') as f:
+with open(filename, "wb") as f:
     pickle.dump(cov_matern, f)
 
 
 # load
-with open(filename, 'rb') as f:
+with open(filename, "rb") as f:
     cov_load = pickle.load(f)
 
 # check the load covariance
@@ -218,7 +186,7 @@ fix, axs = plt.subplots(1, len(lc_list), figsize=(15, 5))
 
 for lc, ax in zip(lc_list, axs):
 
-    mesh = buildMesh(domain, lc, points, lc_buffer=lc*2)
+    mesh = buildMesh(domain, lc, points, lc_buffer=lc * 2)
 
     cov_matern = cov_matern.setup(mesh)
 

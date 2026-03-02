@@ -31,26 +31,24 @@ print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
 
-Agrimonia, _ = df.load_dataset('agrimonia')
+Agrimonia, _ = df.load_dataset("agrimonia")
 print(Agrimonia.columns)
 
 # %% From .csv to geopandas
 
 ct = np.array([Agrimonia.Longitude.to_numpy(), Agrimonia.Latitude.to_numpy()]).T
-Agrimonia['geometry'] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
+Agrimonia["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
 
 Agrimonia = geodf.GeoDataFrame(Agrimonia, crs=4326)
 
 # %% Aggregate the monthly data to get the average yield per location
-mean_pm10_space = Agrimonia.groupby(['IDStations']).agg({
-    'AQ_pm10': 'mean',
-    'geometry': lambda x: x.iloc[0]
-})
+mean_pm10_space = Agrimonia.groupby(["IDStations"]).agg(
+    {"AQ_pm10": "mean", "geometry": lambda x: x.iloc[0]}
+)
 
-mean_pm25_space = Agrimonia.groupby(['IDStations']).agg({
-    'AQ_pm25': 'mean',
-    'geometry': lambda x: x.iloc[0]
-})
+mean_pm25_space = Agrimonia.groupby(["IDStations"]).agg(
+    {"AQ_pm25": "mean", "geometry": lambda x: x.iloc[0]}
+)
 
 # %% Plot monthly dataset (scatter plot)
 
@@ -58,13 +56,17 @@ mean_pm25_space = Agrimonia.groupby(['IDStations']).agg({
 fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
 
 # Ensure same color scale across both plots
-vmin = min(mean_pm10_space['AQ_pm10'].min(), mean_pm25_space['AQ_pm25'].min())
-vmax = max(mean_pm10_space['AQ_pm10'].max(), mean_pm25_space['AQ_pm25'].max())
+vmin = min(mean_pm10_space["AQ_pm10"].min(), mean_pm25_space["AQ_pm25"].min())
+vmax = max(mean_pm10_space["AQ_pm10"].max(), mean_pm25_space["AQ_pm25"].max())
 
 # --- PM10 ---
 sc1 = axes[0].scatter(
-    mean_pm10_space.geometry.values.x, mean_pm10_space.geometry.values.y,
-    c=mean_pm10_space['AQ_pm10'], cmap='viridis', vmin=vmin, vmax=vmax
+    mean_pm10_space.geometry.values.x,
+    mean_pm10_space.geometry.values.y,
+    c=mean_pm10_space["AQ_pm10"],
+    cmap="viridis",
+    vmin=vmin,
+    vmax=vmax,
 )
 axes[0].set_title("Annual Mean $PM_{10}$")
 axes[0].set_xlabel("Longitude")
@@ -73,14 +75,17 @@ axes[0].grid(True, linestyle="--", alpha=0.6)
 
 # --- PM2.5 ---
 sc2 = axes[1].scatter(
-    mean_pm25_space.geometry.values.x, mean_pm25_space.geometry.values.y,
-    c=mean_pm25_space['AQ_pm25'], cmap='viridis', vmin=vmin, vmax=vmax
+    mean_pm25_space.geometry.values.x,
+    mean_pm25_space.geometry.values.y,
+    c=mean_pm25_space["AQ_pm25"],
+    cmap="viridis",
+    vmin=vmin,
+    vmax=vmax,
 )
 axes[1].set_title("Annual Mean $PM_{2.5}$")
 axes[1].set_xlabel("Longitude")
 axes[1].grid(True, linestyle="--", alpha=0.6)
 
 # --- One shared colorbar ---
-cbar = fig.colorbar(sc2, ax=axes, orientation='vertical',
-                    fraction=0.035, pad=0.02)
-cbar.set_label(r'$\mu g / m^3$', fontsize=12)
+cbar = fig.colorbar(sc2, ax=axes, orientation="vertical", fraction=0.035, pad=0.02)
+cbar.set_label(r"$\mu g / m^3$", fontsize=12)

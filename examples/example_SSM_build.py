@@ -5,16 +5,16 @@ Created on Fri Jan  2 23:41:43 2026
 
 @author: jacopo
 """
+
 # %%
 import numpy as np
 import matplotlib.pyplot as plt
-import jax
 import pickle
+import geossm
 
 # %% import and check the version
 # pip install -e geossm
 
-import geossm
 
 print("Version: ", geossm.__version__)
 print("Load from: ", geossm.__file__)
@@ -37,7 +37,7 @@ T = 10
 F = 0.85 * np.eye(q)
 
 # mapping matrix
-H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q-1))))
+H = np.hstack((np.ones((p, 1)), np.random.binomial(1, 0.5, size=(p, q - 1))))
 
 # measueremtent error covaraince matrix
 R = 0.2 * np.eye(p)
@@ -50,8 +50,7 @@ Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
 
 # %% Build the model
-model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta,
-            x0=None, Sigma0=None, dtype=np.float32)
+model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
 
 # %% print the model summary
 print(model)
@@ -60,11 +59,11 @@ print(model.summary())
 # %% Save the model using pickle
 filename = "model.pkl"
 
-with open(filename, 'wb') as file:
+with open(filename, "wb") as file:
     pickle.dump(model, file)
 
 # load the model
-with open(filename, 'rb') as file:
+with open(filename, "rb") as file:
     mymodel = pickle.load(file)
     print(mymodel)
 
@@ -105,14 +104,10 @@ print("Computation time tDelta (s):", tdelta)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[0, :], label='Simulated observation (y)')
-ax.plot(x_sim[0, :], ':', label='Simulated state (x)')
-ax.set_title('Simulated Time Series')
-ax.set_xlabel('Time')
-ax.set_ylabel('Value')
+ax.plot(y_sim[0, :], label="Simulated observation (y)")
+ax.plot(x_sim[0, :], ":", label="Simulated state (x)")
+ax.set_title("Simulated Time Series")
+ax.set_xlabel("Time")
+ax.set_ylabel("Value")
 ax.legend()
 plt.show()
-
-
-
-
