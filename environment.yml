@@ -29,7 +29,8 @@ dependencies:
   - ipywidgets=8.1.5
   - pandoc=3.4
   - markdown-it-py=3.0.0
-  - pip
+  - gstools=1.7.0
+  - black=26.1.0
   - pip:
     - mfem==4.8.0.1
     - .               # Install geossm in editable mode (pip install -e .)

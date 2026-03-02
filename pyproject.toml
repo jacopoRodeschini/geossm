@@ -53,11 +53,13 @@ test = [
   "pytest>=8.0",
   "pytest-cov>=5.0"
 ]
+
 docs = [
   "mkdocs>=1.6",
   "mkdocs-material>=9.5",
   "mkdocstrings[python]>=0.25"
 ]
+
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
@@ -87,9 +89,19 @@ Issues = "https://github.com/jacopoRodeschini/geossm/issues"
 [tool.setuptools.packages.find]
 where = ["src"]      
 include = ["geossm*"]
-exclude = ["old*", "tests*", "docs*"]
+exclude = ["old*", "tests*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+
+# [tool.ruff.lint]
+# select = ["E", "F", "I"]
 
