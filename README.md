@@ -98,7 +98,21 @@ git clone https://github.com/yourusername/geossm.git
 cd geossm
 ```
 
-2. **Create the conda environment** (named `geossm`) with all required packages:
+2. **Create the conda environment** (named `geossm`) with all required packages. 
+Before creating the environment, make sure your **Conda installation is updated to the latest version** and configured to use the faster `libmamba` solver (recommended for significantly faster dependency resolution).
+
+- Update Conda (recommended)
+```bash
+# Enable the faster libmamba solver
+conda config --set solver libmamba
+
+# Update conda in the base environment
+conda update -n base -c defaults conda
+```
+
+- Create the environment
+Once Conda is updated, create the environment (named `geossm`) using:
+
 ```bash
 conda env create -f environment.yml
 ```
@@ -125,35 +139,121 @@ print(geossm.__version__)
 ### Loading Data
 
 ```python
-import geossm
-import geossm.datasets as datasets
+import matplotlib.pyplot as plt
+from shapely.geometry import Point, Polygon
+import numpy as np
 
-# List available datasets
-print(datasets.list_datasets())
+import pygmsh
+import gmsh
+import geopandas as geodf
+import geossm.datasets as df
+from geossm.stmodel import LRStateSpaceModel as lrssm
+from geossm.covmodel import FEMSolver
 
-# Load the Agrimonia dataset
-agrimonia_gdf, shapefile = datasets.load_dataset('agrimonia')
-print(agrimonia_gdf.head())
-print(agrimonia_gdf.columns)
-```
 
-### Building a State Space Model
+# %% Load the agrimonia dataset
+agri, shape = df.load_dataset('agrimonia')
 
-```python
-from geossm.ssm import StateSpaceModel
-from geossm.stmodel import LRSSM
 
-# Initialize a Low-Rank State Space Model (LRSSM)
-model = LRSSM(data=agrimonia_gdf, 
-              spatial_column='geometry',
-              response_column='your_variable',
-              rank=50)
+# %% From .csv to geopandas
+ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
+agri['geometry'] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
 
-# Fit the model
-model.fit()
+agri = geodf.GeoDataFrame(agri, crs=4326)
 
-# Get predictions
-predictions = model.predict(agrimonia_gdf)
+domain = list(shape.geometry[0].geoms)[0].boundary
+buffer = list(domain.buffer(0.3).boundary.geoms)[0]
+
+
+# %% Build the model
+model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain = [Polygon(buffer)])
+print(model)
+
+
+# %% [Utils] build mesh with gmsh
+def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
+    with pygmsh.occ.Geometry() as geom:
+
+        if lc_buffer is None:
+            lc_buffer = lc
+
+        coords = np.array(poly.buffer(
+            lc_buffer).simplify(lc_buffer).exterior.coords[:-1])
+        domain = geom.add_polygon(coords, mesh_size=lc_buffer*0.1)
+
+        # 2. Add physical group for the domain surface (good practice)
+        geom.add_physical(domain, label="surface_domain")
+
+        # Add points for the boundary
+        embedded_tags = []
+        for p in points:
+            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
+            embedded_tags.append(t)
+
+        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
+
+        # fix the points
+        # gmsh.model.mesh.embed(
+        #     0, embedded_tags, 2, domain._id)
+
+        gmsh.option.setNumber("Mesh.Algorithm", 6)
+
+        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+
+        # Allow triangles to be very large
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
+        # Only limit the absolute minimum to prevent crashes
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
+
+        # 5. Generate
+        gmsh.model.mesh.generate(2)
+
+        gmsh.model.mesh.optimize("Laplace2D")
+        gmsh.option.setNumber("Mesh.Smoothing", 10)
+
+        # # This allows the optimizer to move nodes more freely
+        gmsh.option.setNumber("Mesh.Optimize", 1)
+        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+
+        mesh = geom.generate_mesh()
+
+    return mesh
+
+# %% Build the mesh for the AQ_pm10 observed variable
+points = model.points[0]
+mesh_io = buildMesh(buffer, 0.35, points)
+print(mesh_io)
+
+# plot the mesh (use the fem_solver utlities)
+fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
+
+# plot the mesh using the utilities 
+fig, ax = plt.subplots(figsize=(8, 8))
+fem_solver.plot_mesh(ax=ax)
+
+# %% Set up the lrssm model (univiarte latent)
+
+# add the mesh object and the domain where the laten domain is defined
+# if None it is assumed to be the same of the observation  
+model = model.setup([mesh_io])
+
+# %% Estimate the Model (default estimation options)
+results = model.fit()
+print(results) # resutls.summary()
+
+
+# %% Plot the likelihood curve
+fig, ax = plt.subplots()
+ax.plot(-np.array(results.llf_path[1:]))
+ax.set_yscale('log')
+ax.set_xlabel('Iteration')
+ax.set_ylabel('Log Likelihood')
+ax.set_title('Log Likelihood Curve')
+ax.grid()
+plt.show()
+
 ```
 
 ## Examples
