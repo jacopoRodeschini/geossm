@@ -1,0 +1,24 @@
+### Core project metadata
+include README.md
+include LICENSE
+include pyproject.toml
+include environment.yml
+
+### Source package
+graft src/geossm
+
+### Tests and examples (useful in sdist)
+graft examples
+
+### Optional docs assets
+graft docs
+
+### Exclude build artifacts and caches
+prune build
+prune old
+prune src/geossm.egg-info
+
+global-exclude __pycache__
+global-exclude *.py[cod]
+global-exclude .DS_Store
+global-exclude *.so

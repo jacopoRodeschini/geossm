@@ -134,7 +134,12 @@ import geossm
 print(geossm.__version__)
 ```
 
-### Delete the environment
+### Remove the package and the environment
+Remove the package
+```bash
+pip uninstall geossm
+```
+
 Remove an entire environment
 ```bash
 conda remove -n geossm --all
@@ -157,7 +162,7 @@ print(agrimonia_gdf.head())
 print(agrimonia_gdf.columns)
 ```
 
-### Building a State Space Model
+### Building a Low-Rank State Space Model
 
 ```python
 import matplotlib.pyplot as plt
