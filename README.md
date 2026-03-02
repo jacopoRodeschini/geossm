@@ -139,6 +139,21 @@ print(geossm.__version__)
 ### Loading Data
 
 ```python
+import geossm
+import geossm.datasets as datasets
+
+# List available datasets
+print(datasets.list_datasets())
+
+# Load the Agrimonia dataset
+agrimonia_gdf, shapefile = datasets.load_dataset('agrimonia')
+print(agrimonia_gdf.head())
+print(agrimonia_gdf.columns)
+```
+
+### Building a State Space Model
+
+```python
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon
 import numpy as np
