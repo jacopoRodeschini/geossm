@@ -9,6 +9,7 @@ DesignMatrices class encapsulates the design matrices and related metadata.
 DataPreparation class handles the preparation of the DesignMatrices object.
 
 """
+
 import numpy as np
 from scipy.spatial.distance import cdist
 from patsy import ModelDesc, dmatrices
@@ -18,8 +19,18 @@ import pandas as pd
 
 class DesignMatrices:
 
-    def __init__(self, y: np.array, y_design_info, X: np.array, X_design_info, formula: str,
-                 csr, geometry, timestamps, time_col_name='Time'):
+    def __init__(
+        self,
+        y: np.array,
+        y_design_info,
+        X: np.array,
+        X_design_info,
+        formula: str,
+        csr,
+        geometry,
+        timestamps,
+        time_col_name="Time",
+    ):
         """
         Design Matrices for spatial-temporal modeling.
         Construct while inittialized.
@@ -27,18 +38,18 @@ class DesignMatrices:
         """
         self.y = y  # target variables, np.array [N x T]
         self.X = X  # covariates, np.array [N x P x T]
-        self.y_design_info =  y_design_info # design info for y (patsy)
+        self.y_design_info = y_design_info  # design info for y (patsy)
         self.X_design_info = X_design_info  # design info for X (patsy)
         self.formula = formula  # formula string
         self.crs = csr  # coordinate reference system
         self.geometry = geometry  # obervations geometries
-        self.geometry_id = 'geometry_id'  # geometry id column name
+        self.geometry_id = "geometry_id"  # geometry id column name
         self.time_col_name = time_col_name  # time column name
         self.timestamps = timestamps  # observations timestamps
         # number of points, number of covariates, number of timestamps
         self.N, self.b, self.T = X.shape
         self.terms = ModelDesc.from_formula(formula)
-    
+
     def __str__(self):
         description = """Design matrices object
 ----------------------------------
@@ -48,8 +59,12 @@ y name : {y_name}
 X: {x_shape}                    
 X name: {x_name}
 ----------------------------------
-""".format(y_shape=self.y.shape, y_name=self.y_design_info.column_names,
-                x_shape=self.X.shape, x_name=self.X_design_info.column_names)
+""".format(
+            y_shape=self.y.shape,
+            y_name=self.y_design_info.column_names,
+            x_shape=self.X.shape,
+            x_name=self.X_design_info.column_names,
+        )
         return description
 
 
@@ -100,7 +115,8 @@ class data_preparation:
 
         # Check the time column (timestmap / delta / complete - NAN)
         flag, msg = self._checkTimeColumn(
-            geodf, self.response_name, self.geometry_id, self.time_col_name)
+            geodf, self.response_name, self.geometry_id, self.time_col_name
+        )
 
         if not flag:
             raise ValueError(msg)
@@ -112,8 +128,11 @@ class data_preparation:
 
         # convert to dytype object
         numeric_col = self._numeric_column(self.geodf)
-        self.geodf[numeric_col] = self.geodf[numeric_col].apply(
-            lambda col: pd.to_numeric(col, errors='coerce')).astype(dtype)
+        self.geodf[numeric_col] = (
+            self.geodf[numeric_col]
+            .apply(lambda col: pd.to_numeric(col, errors="coerce"))
+            .astype(dtype)
+        )
 
         return True
 
@@ -132,7 +151,8 @@ class data_preparation:
     def _numeric_column(self, geodf):
         # check numeric value to dtype
         numeric_col = [
-            col for col in geodf.columns if pd.api.types.is_numeric_dtype(geodf[col])]
+            col for col in geodf.columns if pd.api.types.is_numeric_dtype(geodf[col])
+        ]
 
         return numeric_col
 
@@ -140,8 +160,24 @@ class data_preparation:
 
         # Create new dataset & compute the designed matrix (spatiotemporal matrix)
 
-        self.geodf, self.idPoint, self.y, self._y_design_info, self.X, self._x_design_info, self.N, self.T, self.timestamps = self._computedesignMatrix(
-            self.geodf, self.geometry_id, self.time_col_name, self.response_name, self.formula)
+
+        (
+            self.geodf,
+            self.idPoint,
+            self.y,
+            self._y_design_info,
+            self.X,
+            self._x_design_info,
+            self.N,
+            self.T,
+            self.timestamps,
+        ) = self._computedesignMatrix(
+            self.geodf,
+            self.geometry_id,
+            self.time_col_name,
+            self.response_name,
+            self.formula,
+        )
 
         # Objcet geometry metrics attributes
         self.box = self.geodf.total_bounds
@@ -154,15 +190,28 @@ class data_preparation:
         # Get the points of the response variable and distace
         self.points = self._getPoints(self.geodf, self.geometry_id)
 
-        return DesignMatrices(self.y, self._y_design_info, self.X, self._x_design_info, self.formula ,self.crs, self.geometry, self.timestamps)
+        return DesignMatrices(
+            self.y,
+            self._y_design_info,
+            self.X,
+            self._x_design_info,
+            self.formula,
+            self.crs,
+            self.geometry,
+            self.timestamps,
+        )
 
-    def _computedesignMatrix(self, geodf, geometry_id, time_col_name, response_name, formula=None, terms=None):
+    def _computedesignMatrix(
+        self, geodf, geometry_id, time_col_name, response_name, formula=None, terms=None
+    ):
 
         flag = True
         msg = ""
 
-        if ((formula is None) and (terms is None)) or ((formula is not None) and (terms is not None)):
-            fag = False
+        if ((formula is None) and (terms is None)) or (
+            (formula is not None) and (terms is not None)
+        ):
+            flag = False
             msg += "Formula or terms must be provided"
 
         # sort the dataset by time
@@ -181,9 +230,11 @@ class data_preparation:
             # Check the ID statin with measure always nan (and merge same sites)
 
             group_cols = [geometry_id]
-            stp = geodf.groupby(group_cols, observed=True).agg({
-                response_name: lambda x: np.nansum(x)
-            }).reset_index()
+            stp = (
+                geodf.groupby(group_cols, observed=True)
+                .agg({response_name: lambda x: np.nansum(x)})
+                .reset_index()
+            )
 
             idS = stp[stp[response_name] > 0].index
 
@@ -197,7 +248,8 @@ class data_preparation:
             geodf.loc[geodf[response_name].isna(), response_name] = np.inf
 
             ytemp, Xtemp = dmatrices(
-                formula, data=geodf, NA_action='raise', return_type='matrix')
+                formula, data=geodf, NA_action="raise", return_type="matrix"
+            )
 
             # replace inf with nan
             ytemp[np.isinf(ytemp)] = np.nan
@@ -212,7 +264,17 @@ class data_preparation:
             for i in range(0, Xtemp.shape[1]):
                 Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
 
-            return geodf, point, y, ytemp.design_info, Xbeta, Xtemp.design_info, N, T, time
+            return (
+                geodf,
+                point,
+                y,
+                ytemp.design_info,
+                Xbeta,
+                Xtemp.design_info,
+                N,
+                T,
+                time,
+            )
 
     def _checkFormula(self, formula: str):
 
@@ -222,7 +284,7 @@ class data_preparation:
 
         m = ModelDesc.from_formula(formula)
 
-        return True, msg, m.lhs_termlist[0].name()
+        return flag, msg, m.lhs_termlist[0].name()
 
     def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name):
 
@@ -238,11 +300,14 @@ class data_preparation:
         time_col_name = None
 
         # check if time is in dataset
-        if not 'Time' in geodf:
+        if not "Time" in geodf:
 
             # check other columns with datatime dtype
             time_col = [
-                col for col in geodf.columns if pd.api.types.is_datetime64_any_dtype(geodf[col])]
+                col
+                for col in geodf.columns
+                if pd.api.types.is_datetime64_any_dtype(geodf[col])
+            ]
 
             if len(time_col) == 0:
                 msg += "The 'Time' column not found \n"
@@ -251,33 +316,25 @@ class data_preparation:
             else:
                 time_col_name = time_col[0]
                 msg += "'Time' column found: {col} \n".format(col=time_col)
-                msg += "Keeped 'Time' column: {col} \n".format(
-                    col=time_col_name)
+                msg += "Keeped 'Time' column: {col} \n".format(col=time_col_name)
 
         else:
-            time_col_name = 'Time'
+            time_col_name = "Time"
 
         return flag, msg, time_col_name
 
     def _getPoints(self, geodf, geometry_id):
 
-        if not 'geometry' in geodf:
-            raise ValueError(f"Geometry column not found in the dataset")
-        
+        if "geometry" not in geodf:
+            raise ValueError("Geometry column not found in the dataset")
+
         gdf_metric = geodf.to_crs(geodf.estimate_utm_crs())
 
-        centroids = (
-            gdf_metric.geometry
-            .drop_duplicates()
-            .centroid
-            .to_crs(geodf.crs)
-        )
-        
+        centroids = gdf_metric.geometry.drop_duplicates().centroid.to_crs(geodf.crs)
+
         return np.column_stack([centroids.x, centroids.y])
-                
-       
-            
-    def _computeDistance(self, points, pt=None, distance='euclidean'):
+
+    def _computeDistance(self, points, pt=None, distance="euclidean"):
 
         if pt is None:
 
@@ -293,12 +350,14 @@ class data_preparation:
         flag = True
 
         # Check the type of the dataset obj
-        if type(geodf) != geopd.geodataframe.GeoDataFrame:
-            msg += "Type of dataset must be geopandas.geodataframe see: (lint to doc) \n"
+        if not isinstance(geodf, geopd.geodataframe.GeoDataFrame):
+            msg += (
+                "Type of dataset must be geopandas.geodataframe see: (lint to doc) \n"
+            )
             flag = False
 
         # Check the crs[already done]
-        if geodf.crs == None:
+        if geodf.crs is None:
             msg += "Dataset CRS not found: (lint to doc) \n"
             flag = False
 
@@ -309,23 +368,23 @@ class data_preparation:
             flag = False
 
         # Rename geometry
-        if not ('geometry' in geodf):
+        if "geometry" not in geodf:
             msg += "Rename the column with the geometry 'geometry' \n"
             flag = False
 
         geodf.set_geometry("geometry")
 
         # Create unique code (categorical) to idendify a point (from geometry)
-        geometry_id = 'geometry_id'
-        ct = pd.Categorical(geodf['geometry'],
-                            categories=geodf.geometry.unique())
+        geometry_id = "geometry_id"
+        ct = pd.Categorical(geodf["geometry"], categories=geodf.geometry.unique())
         geodf[geometry_id] = ct.codes
 
         # Check the geometry type (now just single resolution)
         mask = np.unique(geodf.geom_type)
         if not mask.shape == (1,):
             msg += "Just one spatial geometry is supported. Currently found geometries {maks} \n".format(
-                maks=mask)
+                maks=mask
+            )
             flag = False
 
         return flag, msg, geometry_id
@@ -357,13 +416,21 @@ y name : {y_name}
 X: {x_shape}
 X name: {x_name}
 ----------------------------------
-""".format(formula=self.formula, time_name=self.time_col_name, space_name="geometry",
-           crs_name=self.crs.name, ptType=np.unique(self.geometry), N=self.N, box=self.box,
-           T=self.T, tmin=self.timestamps.min(), tmax=self.timestamps.max(),
-           y_shape=self.y.shape,
-           y_name=self._y_design_info.column_names,
-           x_shape=self.X.shape,
-           x_name=self._x_design_info.column_names
-           )
+""".format(
+            formula=self.formula,
+            time_name=self.time_col_name,
+            space_name="geometry",
+            crs_name=self.crs.name,
+            ptType=np.unique(self.geometry),
+            N=self.N,
+            box=self.box,
+            T=self.T,
+            tmin=self.timestamps.min(),
+            tmax=self.timestamps.max(),
+            y_shape=self.y.shape,
+            y_name=self._y_design_info.column_names,
+            x_shape=self.X.shape,
+            x_name=self._x_design_info.column_names,
+        )
 
         return description
