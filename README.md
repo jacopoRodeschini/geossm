@@ -40,7 +40,7 @@ State space models (SSMs) are powerful statistical tools for modeling dynamic sy
 
 The package is built on the research presented in the PhD thesis: *A State-Space Modelling Framework in Geostatistics with Application to Environmental Data* by Jacopo Rodeschini.
 
-### Progect folder
+### Progect structure
 ```
 geossm/
 ├── pyproject.toml      <-- All package config
@@ -50,9 +50,37 @@ geossm/
 ├── src/                <-- The "Source" folder
 │   └── geossm/         <-- The actual package folder
 │       ├── __init__.py
-│       └── core.py
+|       ├── datasets    <-- Submodule for the dataset
+|       ├── ssm         <-- Submodule for the State-Space model
+|       ├── stmodels    <-- Submodule for the Spatio-temporal model
+│       └── covmodel    <-- Submodule for the covariance functions
+|
 └── tests/            
 ```
+
+### Available Datasets
+The **geossm** package includes spatio-temporal datasets for benchmarking and testing different modelling approaches.
+
+- **Agrimonia Dataset**: Fassò, Alessandro, et al.  
+*"Agrimonia: a dataset on livestock, meteorology and air quality in the Lombardy region, Italy."*  
+Scientific Data 10.1 (2023): 143.
+
+```python
+import geossm
+import geossm.datasets as datasets
+
+# List available datasets
+print(datasets.list_datasets())
+
+# Output
+Dataset         Type       Ext     Size (MB)
+--------------------------------------------
+agrimonia       data       csv        10.551 *
+agrimonia       geometry   shp         0.005
+```
+The `*` symbol indicates dataset more than 10MB.
+
+
 
 ## 🔍 Key Features
 
@@ -333,16 +361,22 @@ For questions or bug reports, please open an [Issue](../../issues).
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
 
+## References
+
+- Rodeschini, J. (2025). *A State-Space Modelling Framework in Geostatistics with Application to Environmental Data*. PhD Thesis, University of Bergamo.
+
+- Rodeschini, J., Tedesco, L., Finazzi, F., Otto, P., & Fassò, A. (2025). *Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data*. arXiv:2509.12825.
+
 ## Citation
 
-If you use GEOSSM in your research, please cite:
+If you use **GEOSSM** in your research, please cite:
 
 ```bibtex
-@phdthesis{rodeschini2025,
-  author = {Rodeschini, Jacopo},
-  title = {A State-Space Modelling Framework in Geostatistics with Application to Environmental Data},
-  school = {University of Bergamo},
-  year = {2025}
+@article{rodeschini2025multivariate,
+  title={Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data},
+  author={Rodeschini, Jacopo and Tedesco, Lorenzo and Finazzi, Francesco and Otto, Philipp and Fass{\`o}, Alessandro},
+  journal={arXiv preprint arXiv:2509.12825},
+  year={2025}
 }
 ```
 
