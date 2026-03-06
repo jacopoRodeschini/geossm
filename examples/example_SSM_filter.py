@@ -138,12 +138,13 @@ print("MSE space:", mse_space.mean())
 print("MSE time:", mse_time.mean())
 
 # plot the mse in time
-plt.plot(mse_time, label="MSE time")
-plt.xlabel("Time")
-plt.ylabel("MSE")
-plt.title("Mean Squared Error Over Time")
-plt.legend()
-plt.grid()
+fig, ax = plt.subplots(figsize=(10, 6))
+ax.plot(mse_time,'x', linestyle='--', label="MSE time")
+ax.set_xlabel("Time")
+ax.set_ylabel("MSE")
+ax.set_title("Mean Squared Error Over Time")
+ax.legend()
+ax.grid()
 plt.show()
 
 # %% Get the prediction and confidence interval

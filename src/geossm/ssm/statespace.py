@@ -1274,44 +1274,38 @@ class StateSpaceModel:
 
         top_right = dict(
             [
-                ("Shape (p, q, T) :", lambda: f"(p = {p}, q = {q}, T = {T})"),
+                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.R)):2f}"
+                    lambda: [f"{jnp.mean(jnp.diag(self.R)):2f}"
                         if self.R is not None
-                        else "None"
-                    ),
+                        else "None"]
                 ),
                 (
                     "Diag. Q",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.Q)):2f}"
+                    lambda: [f"{jnp.mean(jnp.diag(self.Q)):2f}"
                         if self.Q is not None
-                        else "None"
-                    ),
+                        else "None"],
                 ),
                 (
                     "Diag. F",
-                    lambda: (
+                    lambda: [
                         f"{jnp.mean(jnp.diag(self.F)):2f}"
                         if self.F is not None
-                        else "None"
-                    ),
+                        else "None"],
                 ),
                 (
                     "mean x0",
-                    lambda: (
-                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else "None"
-                    ),
-                ),
+                    lambda: [
+                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else "None"],
+               ),
                 (
                     "mean Sigma0",
-                    lambda: (
+                    lambda: [
                         f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
                         if self.Sigma0 is not None
                         else "None"
-                    ),
+                    ],
                 ),
             ]
         )
@@ -1323,7 +1317,7 @@ class StateSpaceModel:
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         # Generate the summary
         smry = Summary()

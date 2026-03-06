@@ -425,17 +425,17 @@ class StateSpaceResults:
         )
 
         top_right = {
-            "Jarque-Bera:": lambda: f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})",
-            "Omnibus test:": lambda: f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})",
-            "Durbin-Watson:": lambda: f"{stats['dw']:.2f}",
-            "Skewness:": lambda: f"{stats['skew']:.2f}",
-            "Kurtosis:": lambda: f"{stats['kurtosis']:.2f}",
-            "MSE:": lambda: f"{self.mse():.2f}",
-            "RMSE:": lambda: f"{self.rmse():.2f}",
-            "Coverage Prob.:": lambda: f"{self._coverage_probability():.2f}, (alpha = 0.05)",
-            "Runtime filter (s):": lambda: f"{self.time_filter:.3g}",
-            "Runtime smoother (s):": lambda: f"{self.time_smoother:.3g}",
-            "Runtime expectation (s):": lambda: f"{self.time_expectation:.3g}",
+            "Jarque-Bera:": lambda: [f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})"],
+            "Omnibus test:": lambda: [f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})"],
+            "Durbin-Watson:": lambda: [f"{stats['dw']:.2f}"],
+            "Skewness:": lambda: [f"{stats['skew']:.2f}"],
+            "Kurtosis:": lambda: [f"{stats['kurtosis']:.2f}"],
+            "MSE:": lambda: [f"{self.mse():.2f}"],
+            "RMSE:": lambda: [f"{self.rmse():.2f}"],
+            "Coverage Prob.:": lambda: [f"{self._coverage_probability():.2f}, (alpha = 0.05)"],
+            "Runtime filter (s):": lambda: [f"{self.time_filter:.3g}"],
+            "Runtime smoother (s):": lambda: [f"{self.time_smoother:.3g}"],
+            "Runtime expectation (s):": lambda: [f"{self.time_expectation:.3g}"],
         }
 
         # Generate the dictionaly
@@ -445,7 +445,7 @@ class StateSpaceResults:
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         # Generate the summary
         smry = Summary()
