@@ -15,8 +15,6 @@ import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
 import geossm
-from geossm.covmodel import spdeAppoxCov as matern
-from geossm.stmodel import ModelParams
 
 
 
@@ -31,6 +29,8 @@ print("Load from: ", geossm.__file__)
 
 if geossm.__file__:
     # import lrssm
+    from geossm.covmodel import spdeAppoxCov as matern_spde
+    from geossm.stmodel import ModelParams
     from geossm.stmodel import LRStateSpaceModel as lrssm
 
 
@@ -118,7 +118,7 @@ print(mesh_io)
 
 # %% Create the covariance function
 
-cov_fun = matern([circle], latlon=False, nu=1, var=2, rescale=4)
+cov_fun = matern_spde([circle], latlon=False, nu=1, var=2, rescale=4)
 cov_fun = cov_fun.setup(mesh_io)
 
 # PLot the mesh behind the cov. function
@@ -191,17 +191,15 @@ model = model.setup(cov_fun=[cov_fun], domain=[circle])
 print(model)
 
 # %% Create the model parameters for the simulation
-params = ModelParams(beta=[0.0, 0.0], A=np.array([[0.8]]), s2e=[0.5], ks=[5], f=[0.9])
+params = ModelParams(beta=[0.1, 0.5], A=np.array([[2]]), s2e=[0.5], ks=[2], f=[0.9])
 
 # %% Simulate from the model
-
 y_sim, x_sim, tdelta = model.sim(params=params)
 print(y_sim.shape)
 print(x_sim.shape)
 
 
 # %% Plot the simulated data for the time = 1, 10, 20
-
 T = model.T
 
 pt = np.array(model.points[0])
@@ -218,12 +216,12 @@ for i, t in enumerate([0, 3, 6, 9, 12, 19]):
     ax[row, col].set_title(f"Simulated $PM_{{10}}$ at Time Step {t+1}")
     ax[row, col].legend()
     ax[row, col].axis("equal")
-plt.colorbar(
+"""plt.colorbar(
     ax[1, 2].collections[0],
     ax=ax,
     orientation="vertical",
     fraction=0.035,
     pad=0.02,
     label="Simulated $PM_{10}$",
-)
+)"""
 plt.show()
