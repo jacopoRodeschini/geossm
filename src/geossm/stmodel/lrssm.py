@@ -537,8 +537,8 @@ class LRStateSpaceModel(StateSpaceModel):
         
         # set the covarriance rescale paramiter to the value of ks (if provided, otherwise it will be set to 1)
         if ks is not None:
-            for cov in self.cov_function:
-                cov.rescale = ks
+            for cov, ksi in zip(self.cov_function, ks):
+                cov.rescale = ksi
         
         # Get the dimensions of the model
         pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
