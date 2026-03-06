@@ -5,7 +5,8 @@ Created on Tue Feb 10 13:38:28 2026
 
 @author: jacopo
 """
-
+# %% 
+from matplotlib.lines import lineStyles
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
@@ -14,6 +15,10 @@ import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
 import geossm
+from geossm.covmodel import spdeAppoxCov as matern
+from geossm.stmodel import ModelParams
+
+
 
 # %% import the geossm package
 
@@ -36,7 +41,7 @@ center = (0, 0)
 radius = 1
 circle = Point(center).buffer(radius)
 
-points = np.random.uniform(-radius, radius, (100, 2))
+points = np.random.uniform(-radius, radius, (1000, 2))
 
 # take the mask of the points that are inside the circle
 mask = np.array([circle.contains(Point(p)) for p in points])
@@ -113,8 +118,6 @@ print(mesh_io)
 
 # %% Create the covariance function
 
-from geossm.covmodel import spdeAppoxCov as matern
-
 cov_fun = matern([circle], latlon=False, nu=1, var=2, rescale=4)
 cov_fun = cov_fun.setup(mesh_io)
 
@@ -136,49 +139,59 @@ plt.show()
 n = points.shape[0]
 T = 20
 
-points = np.tile(points, (T, 1, 1)).reshape(
-    -1, 2
-)  # repeat the points T times for the temporal dimension
+# repeat the points T times for the temporal dimension
+_points = np.tile(points, (T, 1, 1)).reshape(-1, 2) 
 
 d = np.linspace(0, 2 * np.pi, n)
 
-temperature = (
-    np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-).reshape(
-    -1,
-)
-humidity = (
-    1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-).reshape(
-    -1,
-)
+t2m = np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+t2m = t2m.reshape(-1, )
+
+humidity = 1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+humidity = humidity.reshape(-1, )
 
 tstart = date(2020, 1, 1)
-time = np.tile([tstart + timedelta(days=d) for d in range(T)], n)
+time = np.sort(np.tile([tstart + timedelta(days=d) for d in range(T)], n))
 
 # Create a GeoDataFrame from the points
-gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(points[:, 0], points[:, 1]))
-gdf["temperature"] = temperature
+gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(_points[:, 0], _points[:, 1]))
+gdf["temperature"] = t2m
 gdf["humidity"] = humidity
 gdf["Time"] = time
 gdf.crs = "EPSG:4326"  # Set the coordinate reference system
+
+
+# %% Plot the covariates
+
+inx = gdf.geometry == gdf.geometry[0]
+
+# plot the temperature and humidity for the firs points
+fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+ax.plot(gdf[inx]["humidity"],'o', linestyle='--', label="Humidity")
+ax.set_title("Humidity")
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+plt.grid(True, linestyle="--", alpha=0.6)
+ax.legend()
+plt.show()
 
 
 # %% build the lrssm and set the covariance function
 
 
 model = lrssm(
-    df=gdf, formulas=["humidity ~ 1 + temperature"], domain=[circle], verbose=True
-)
+    df=gdf, 
+    formulas=["humidity ~ 1 + temperature"], 
+    domain=[circle], 
+    verbose=True)
 print(model)
 
+# Set up the model cov. 
 model = model.setup(cov_fun=[cov_fun], domain=[circle])
 print(model)
 
 # %% Create the model parameters for the simulation
-from geossm.stmodel import ModelParams
-
-params = ModelParams(beta=[0.5, 1.0], A=np.array([[0.8]]), s2e=[0.5], ks=[0.5], f=[0.9])
+params = ModelParams(beta=[0.0, 0.0], A=np.array([[0.8]]), s2e=[0.5], ks=[5], f=[0.9])
 
 # %% Simulate from the model
 
@@ -189,19 +202,24 @@ print(x_sim.shape)
 
 # %% Plot the simulated data for the time = 1, 10, 20
 
+T = model.T
+
 pt = np.array(model.points[0])
 
-fix, ax = plt.subplots(1, 3, figsize=(18, 6))
-for i, t in enumerate([0, 9, 19]):
-    ax[i].scatter(pt[:, 0], pt[:, 1], c=y_sim[:, t], cmap="viridis")
-    ax[i].plot(*circle.boundary.xy, color="red", label="Domain Boundary")
-    ax[i].set_xlabel("X-axis")
-    ax[i].set_ylabel("Y-axis")
-    ax[i].set_title(f"Simulated $PM_{{10}}$ at Time Step {t+1}")
-    ax[i].legend()
-    ax[i].axis("equal")
+fix, ax = plt.subplots(2,3, figsize=(18, 12))
+
+for i, t in enumerate([0, 3, 6, 9, 12, 19]):
+    row = i // 3
+    col = i % 3
+    ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[:, t], cmap="viridis")
+    ax[row, col].plot(*circle.boundary.xy, color="red", label="Domain Boundary")
+    ax[row, col].set_xlabel("X-axis")
+    ax[row, col].set_ylabel("Y-axis")
+    ax[row, col].set_title(f"Simulated $PM_{{10}}$ at Time Step {t+1}")
+    ax[row, col].legend()
+    ax[row, col].axis("equal")
 plt.colorbar(
-    ax[2].collections[0],
+    ax[1, 2].collections[0],
     ax=ax,
     orientation="vertical",
     fraction=0.035,

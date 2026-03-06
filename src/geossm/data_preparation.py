@@ -86,7 +86,7 @@ class data_preparation:
 
         """
 
-        self.geodf = geodf
+        self.geodf = geodf.copy()
         self.formula = formula
 
         if self._check(self.geodf, dtype):
@@ -226,19 +226,19 @@ class data_preparation:
             time = np.unique(geodf[time_col_name])
             T = time.shape[0]
 
-            # TODO: not all point measure the variable (remove this point)
-            # Check the ID statin with measure always nan (and merge same sites)
+            # Not all point measure the variable (remove this point)
+            # Check the ID statin with measure always nan or zero-inflated
 
-            group_cols = [geometry_id]
             stp = (
-                geodf.groupby(group_cols, observed=True)
-                .agg({response_name: lambda x: np.nansum(x)})
-                .reset_index()
+                geodf.groupby(geometry_id, observed=True)[response_name]
+                .count()                      # counts non-NA values
+                .reset_index(name="n_obs")
             )
-
-            idS = stp[stp[response_name] > 0].index
-
-            geodf = geodf[geodf.geometry_id.isin(idS)]
+                        
+            # Get only the observed sites (with at least one observation) and filter the dataset
+            observed_sites = stp.loc[stp["n_obs"] > 0, geometry_id].tolist()
+            
+            geodf = geodf[geodf[geometry_id].isin(observed_sites)]
 
             # check the number of point available
             point = geodf.geometry.unique()
