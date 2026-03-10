@@ -133,7 +133,7 @@ class DesignMatrices:
             ("Formula",        [self.formula]),
             ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name]),
             ("Covariates (X)", [", ".join(self.x_names)]),
-            ("[min, max, mean, std]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}, {np.nanstd(y_np):.4g}]"]),  
+            ("[min, max, mean]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"]),  
             ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"]),
             ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"]),
             ("Transformed (y)",       [", ".join(self.y_expr) if self.y_expr else "No"]),
