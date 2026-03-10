@@ -29,7 +29,7 @@ except ImportError:
     __version__ = "1.1.1"
 
 # Core utilities
-from .data_preparation import DesignMatrices, data_preparation
+from .data_preparation import DesignMatrices, DesignMatricesBuilder
 from .utils import block_diag_3D, write, getHardware
 
 # Submodules
@@ -57,6 +57,7 @@ __all__ = [
     # Core utilities
     "data_preparation",
     "DesignMatrices",
+    "DesignMatricesBuilder",
     "block_diag_3D",
     "write",
     "getHardware",
