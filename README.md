@@ -1,11 +1,11 @@
 <p align="center">
   <picture>
     <!-- Dark mode -->
-    <source src="docs/logo-dark.svg" media="(prefers-color-scheme: dark)">
+    <source src="docs/images/logo-dark.svg" media="(prefers-color-scheme: dark)">
     <!-- Light mode -->
-    <source src="docs/logo-white.svg" media="(prefers-color-scheme: light)">
+    <source src="docs/images/logo-white.svg" media="(prefers-color-scheme: light)">
     <!-- Fallback -->
-    <img src="docs/logo-white.svg" alt="GEOSSM Logo" width="320">
+    <img src="docs/images/logo-white.svg" alt="GEOSSM Logo" width="320">
   </picture>
 </p>
 
@@ -80,6 +80,13 @@ agrimonia       geometry   shp         0.005
 ```
 The `*` symbol indicates dataset more than 10MB.
 
+### How to build the regression dataset
+
+1. Create a GeoPandas DataFrame with `geometry` and `time` columns.
+2. Create the `Builder` object.
+3. Call the `.build()` method.
+
+<img src="docs/images/workflow_data_process.png" alt="data process" width="320">
 
 
 ## 🔍 Key Features
