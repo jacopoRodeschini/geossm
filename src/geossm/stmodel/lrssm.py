@@ -418,7 +418,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def __init__(self, df, formulas, domain=None, verbose=True):
 
-        self.df = df
+        self.df = df.copy()
         self.formulas = formulas
 
         # Overwrite the model attributes
