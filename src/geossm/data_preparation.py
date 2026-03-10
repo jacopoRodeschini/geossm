@@ -10,200 +10,350 @@ DataPreparation class handles the preparation of the DesignMatrices object.
 
 """
 
+from datetime import datetime, timezone
+import re
+import time
 import numpy as np
 from scipy.spatial.distance import cdist
 from patsy import ModelDesc, dmatrices
 import geopandas as geopd
 import pandas as pd
 
+from dataclasses import dataclass, field
+from typing import Literal
 
+from statsmodels.iolib.summary import Summary
+
+
+try:
+    import jax.numpy as jnp
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+
+
+@dataclass
 class DesignMatrices:
+    y: np.ndarray
+    y_design_info: object
+    y_name: str
+    y_expr: list[str]
+    X: np.ndarray
+    X_design_info: object
+    x_names: list[str]
+    x_exprs: list[str]
+    formula: str
+    crs: object
+    box: object
+    geometry: object
+    timestamps: np.ndarray
+    delta: int
+    unit: str
+    time_col_name: str = "Time"
+    geometry_id: str = field(default="geometry_id", init=False)
+    dtype: np.dtype = field(default=np.float64)
+    backend: Literal["numpy", "jax"] = field(default="numpy")
 
-    def __init__(
-        self,
-        y: np.array,
-        y_design_info,
-        X: np.array,
-        X_design_info,
-        formula: str,
-        csr,
-        geometry,
-        timestamps,
-        time_col_name="Time",
-    ):
-        """
-        Design Matrices for spatial-temporal modeling.
-        Construct while inittialized.
-        Supposed to be return from data_preparation class.
-        """
-        self.y = y  # target variables, np.array [N x T]
-        self.X = X  # covariates, np.array [N x P x T]
-        self.y_design_info = y_design_info  # design info for y (patsy)
-        self.X_design_info = X_design_info  # design info for X (patsy)
-        self.formula = formula  # formula string
-        self.crs = csr  # coordinate reference system
-        self.geometry = geometry  # obervations geometries
-        self.geometry_id = "geometry_id"  # geometry id column name
-        self.time_col_name = time_col_name  # time column name
-        self.timestamps = timestamps  # observations timestamps
-        # number of points, number of covariates, number of timestamps
-        self.N, self.b, self.T = X.shape
-        self.terms = ModelDesc.from_formula(formula)
+    def __post_init__(self):
+        # Validate backend
+        if self.backend == "jax" and not JAX_AVAILABLE:
+            raise ImportError(
+                "JAX is not installed. Install it with `pip install jax` "
+                "or use backend='numpy'."
+            )
+        if self.backend not in ("numpy", "jax"):
+            raise ValueError(f"backend must be 'numpy' or 'jax', got '{self.backend}'")
+
+        # Validate dtype
+        try:
+            self.dtype = np.dtype(self.dtype)
+        except TypeError:
+            raise TypeError(f"Invalid dtype: {self.dtype}")
+
+        # Cast arrays to dtype 
+        self.y = np.asarray(self.y, dtype=self.dtype)
+        self.X = np.asarray(self.X, dtype=self.dtype)
+        self.timestamps = np.asarray(self.timestamps)
+        self.type = np.unique(self.geometry).astype(str)
+
+        # Validate shapes
+        if self.y.ndim != 2:
+            raise ValueError(f"y must be [N x T], got shape {self.y.shape}")
+        if self.X.ndim != 3:
+            raise ValueError(f"X must be [N x P x T], got shape {self.X.shape}")
+        if self.y.shape[0] != self.X.shape[0]:
+            raise ValueError(
+                f"N mismatch: y has {self.y.shape[0]} sites, "
+                f"X has {self.X.shape[0]} sites"
+            )
+        if self.y.shape[1] != self.X.shape[2]:
+            raise ValueError(
+                f"T mismatch: y has {self.y.shape[1]} timesteps, "
+                f"X has {self.X.shape[2]} timesteps"
+            )
+        if self.timestamps.shape[0] != self.y.shape[1]:
+            raise ValueError(
+                f"timestamps length {self.timestamps.shape[0]} does not match "
+                f"T={self.y.shape[1]}"
+            )
+
+        # Derived dimensions
+        self.N, self.T = self.y.shape
+        self.P = self.X.shape[1]
+        self.terms = ModelDesc.from_formula(self.formula)
+
+        # Convert to JAX arrays if requested
+        if self.backend == "jax":
+            self.y = jnp.array(self.y)
+            self.X = jnp.array(self.X)
+            # Only arrays of numeric types are supported by JAX. 
+            # self.timestamps = jnp.array(self.timestamps)
+
+    @property
+    def isnan(self) -> np.ndarray:
+        """Boolean mask [N x T] — True where y is NaN."""
+        y_np = np.asarray(self.y)
+        return np.isnan(y_np)
+
+    @property
+    def n_obs(self) -> int:
+        """Total number of observed (non-NaN) values in y."""
+        return int((~self.isnan).sum())
+
+    @property
+    def nan_ratio(self) -> float:
+        """Fraction of missing (NaN) values over all [N x T] entries."""
+        return 1 - (self.n_obs / (self.N * self.T))
+    
+
+    def summary(self) -> Summary:
+        y_np = np.asarray(self.y)
+
+        top_left = [
+            ("Formula",        [self.formula]),
+            ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name]),
+            ("Covariates (X)", [", ".join(self.x_names)]),
+            ("[min, max, mean, std]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}, {np.nanstd(y_np):.4g}]"]),  
+            ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"]),
+            ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"]),
+            ("Transformed (y)",       [", ".join(self.y_expr) if self.y_expr else "No"]),
+            ("Transformed (X)",       [", ".join(self.x_exprs) if self.x_exprs else "No"]),
+            ("dtype",          [str(self.dtype)]),
+            ("Backend",        [self.backend]),
+        ]
+
+        top_right = [
+            ("Sites    [N]",     [str(self.N)]),
+            ("Covariates [P]",   [str(self.P)]),
+            ("Timesteps  [T]",   [str(self.T)]),
+            ("CRS",             [str(self.crs)]),
+            ("Units",           [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
+            ("Geometry type",   [", ".join(self.type)]),
+            ("Box",             [f"{self.box}"]),
+            ("Timestamps",      [f"{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}"]),
+            ("Delta, Unit",       [f"{self.delta}, {self.unit}"]),
+        ]
+
+        
+
+        smry = Summary()
+
+        self.model = None
+        self.params = np.zeros(1)
+        self.param_names = "Placeholder" #self.xbeta_names
+        self.bse = np.zeros(len(self.params))
+        self.tvalues = np.zeros(len(self.params))
+        self.pvalues = np.zeros(len(self.params))
+        smry.add_table_2cols(
+            self,
+            title="Design Matrices Summary",
+            gleft=top_left,
+            gright=top_right,
+            yname=None,
+            xname=None,
+        )
+
+        return smry
 
     def __str__(self):
-        description = """Design matrices object
-----------------------------------
-y: {y_shape}
-y name : {y_name}       
+        return self.summary().as_text()
 
-X: {x_shape}                    
-X name: {x_name}
-----------------------------------
-""".format(
-            y_shape=self.y.shape,
-            y_name=self.y_design_info.column_names,
-            x_shape=self.X.shape,
-            x_name=self.X_design_info.column_names,
+    def __repr__(self) -> str:
+        return (
+            f"DesignMatrices("
+            f"N={self.N}, P={self.P}, T={self.T}, "
+            f"dtype={self.dtype}, backend='{self.backend}')"
         )
-        return description
 
+class DesignMatricesBuilder:
 
-class data_preparation:
-
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64):
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True):
         """
         Prepare the spatial-temporal dataset for modeling.
-        Parameters
-        ----------
-        geodf : geopandas.GeoDataFrame
-            Input spatial-temporal dataset with geometry and time columns.
-        formula : str
-            Patsy formula string for design matrix construction.
-        Returns
-        -------
-        DesignMatrices
-            An object containing the design matrices and related metadata.
-
         """
+        self.verbose = verbose
+        self.dtype = np.dtype(dtype)
+        self._log("Initializing DesignMatricesBuilder", verbose)
 
         self.geodf = geodf.copy()
         self.formula = formula
+        self.crs = self.geodf.crs
+        self.box = np.round(self.geodf.total_bounds, 3).tolist() # [minx, miny, maxx, maxy]
 
-        if self._check(self.geodf, dtype):
-            self.design_matrices = self._build()
+        if isinstance(self.geodf, geopd.GeoDataFrame):
+            flag = self._check_geodataframe(self.geodf, self.dtype, verbose=verbose)
+            if not flag:
+                raise ValueError(
+                    "Input dataset must be a GeoDataFrame with valid geometry and time columns"
+                )
+            self._log("Input GeoDataFrame validated successfully", verbose)
+        else:
+            raise ValueError("Input dataset must be a GeoDataFrame")
 
-    def __call__(self):
-        return self.get()
+    def _is_verbose(self, verbose=None) -> bool:
+        return self.verbose if verbose is None else verbose
 
-    def get(self):
+    def _log(self, msg: str, verbose=None) -> None:
+        if self._is_verbose(verbose):
+            self.print_info(msg)
+
+    def build(self, verbose=None):
+        
+        if isinstance(self.geodf, geopd.GeoDataFrame):
+            self._log("Building design matrices from GeoDataFrame", verbose)
+            self.design_matrices = self._build_geodataframe(verbose=verbose)
+        else:
+            raise ValueError("Input dataset must be a GeoDataFrame")   
+        
+        self._log("Design matrices built successfully", verbose)
         return self.design_matrices
 
-    def _check(self, geodf, dtype):
-        # Do preliminary check of the dataset
-        flag, msg, self.geometry_id = self._checkSpatialDataset(geodf)
+    def __call__(self, verbose=None):
+        if not hasattr(self, "design_matrices"):
+            self._log("Design matrices not found, calling build()", verbose)
+            return self.build(verbose=verbose)
+        self._log("Returning cached design matrices", verbose)
+        return self.design_matrices
+
+    def _check_geodataframe(self, geodf, dtype, verbose=None):
+        self._log("Checking input GeoDataFrame", verbose)
+
+        flag, msg, self.geometry_id = self._checkSpatialDataset(geodf, verbose=verbose)
+        if not flag:
+            raise ValueError(msg)
+        self._log(f"Spatial check passed using geometry id column '{self.geometry_id}'", verbose)
+
+        flag, msg, self.time_col_name = self._checkTimeDataset(geodf, verbose=verbose)
+        if not flag:
+            raise ValueError(msg)
+        self._log(f"Time column detected: '{self.time_col_name}'", verbose)
+
+        # check the time stamps format and convert from string to datetime if needed
+        if not pd.api.types.is_datetime64_any_dtype(geodf[self.time_col_name]):
+            #raise TypeError(f"{self.time_col_name} must be a datetime column")
+            self._log(f"Converting time column '{self.time_col_name}' to datetime", verbose)
+            geodf[self.time_col_name] = pd.to_datetime(geodf[self.time_col_name], errors="coerce")
+            if geodf[self.time_col_name].isna().any():
+                raise ValueError(f"Time column '{self.time_col_name}' contains non-datetime values that could not be converted")
+            self._log(f"Time column '{self.time_col_name}' converted to datetime successfully", verbose)
+        
+        # Check the time column consistency and get the delta and unit for the time dimension
+        (flag,
+            msg,
+            self.response_name,
+            self.response_expressions,
+            self.covariate_names,
+            self.covariate_expressions,
+        ) = self._checkFormula(self.formula, verbose=verbose)
         if not flag:
             raise ValueError(msg)
 
-        flag, msg, self.time_col_name = self._checkTimeDataset(geodf)
-        if not flag:
-            raise ValueError(msg)
-
-        # check formula (NOW NOT IMPLEMENTED) [return true]
-        flag, msg, self.response_name = self._checkFormula(self.formula)
-        if not flag:
-            raise ValueError(msg)
-
-        # Check the time column (timestmap / delta / complete - NAN)
-        flag, msg = self._checkTimeColumn(
-            geodf, self.response_name, self.geometry_id, self.time_col_name
+        self._log(
+            f"Formula parsed successfully. Response variable: '{self.response_name}'",
+            verbose,
         )
-
+        self._log(
+            f"Covariates detected: {', '.join(self.covariate_names) if self.covariate_names else 'intercept only'}",
+            verbose,
+        )
+        flag, self.delta, self.unit = self._checkTimeColumn(
+            geodf,
+            self.response_name,
+            self.geometry_id,
+            self.time_col_name,
+            verbose=verbose,
+        )
         if not flag:
             raise ValueError(msg)
+        self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}", verbose)
 
-        # check the geometry
-        flag, msg, self.geometry = self._check_geometry(self.geodf)
+        flag, msg, self.geometry = self._check_geometry(self.geodf, verbose=verbose)
         if not flag:
             raise ValueError(msg)
+        self._log(f"Geometry type detected: {', '.join(self.geometry.astype(str))}", verbose)
 
-        # convert to dytype object
-        numeric_col = self._numeric_column(self.geodf)
+        numeric_col = self._numeric_column(self.geodf, verbose=verbose)
         self.geodf[numeric_col] = (
             self.geodf[numeric_col]
             .apply(lambda col: pd.to_numeric(col, errors="coerce"))
             .astype(dtype)
         )
+        self._log(f"Converted numeric columns to dtype={dtype}", verbose)
 
         return True
 
-    def _check_geometry(self, geodf):
+    def _build_geodataframe(self, verbose=None):
+        self._log("Creating spatial-temporal design matrices", verbose)
 
-        geom_type = pd.unique(self.geodf.geometry.geom_type)
-
-        msg = ""
-        flag = True
-        if len(geom_type) > 1:
-            msg = "Shoud be onlt one geometru type"
-            flag = False
-
-        return flag, msg, geom_type
-
-    def _numeric_column(self, geodf):
-        # check numeric value to dtype
-        numeric_col = [
-            col for col in geodf.columns if pd.api.types.is_numeric_dtype(geodf[col])
-        ]
-
-        return numeric_col
-
-    def _build(self):
-
-        # Create new dataset & compute the designed matrix (spatiotemporal matrix)
-
-
-        (
-            self.geodf,
-            self.idPoint,
-            self.y,
-            self._y_design_info,
-            self.X,
-            self._x_design_info,
-            self.N,
-            self.T,
-            self.timestamps,
-        ) = self._computedesignMatrix(
-            self.geodf,
-            self.geometry_id,
-            self.time_col_name,
-            self.response_name,
-            self.formula,
+        geodf, points, y, _y_design_info, Xbeta, _x_design_info, N, T, timestamps = (
+            self._computedesignMatrix_geodataframe(
+                self.geodf,
+                self.geometry_id,
+                self.time_col_name,
+                self.response_name,
+                self.formula,
+                verbose=verbose,
+            )
         )
 
-        # Objcet geometry metrics attributes
-        self.box = self.geodf.total_bounds
-        self.geometry_type = self.geodf.geom_type.unique()
-        self.crs = self.geodf.crs
+        self._log(f"Computed design matrices with N={N}, P={Xbeta.shape[1]}, T={T}", verbose)
 
-        # Design matrix
-        self.intercept = True  # default
-
-        # Get the points of the response variable and distace
-        self.points = self._getPoints(self.geodf, self.geometry_id)
+        # TODO: convert points to a more compact representation if needed, e.g. by using a KD-tree or similar structure for spatial indexing
+        # TODO: consider to check if the geometry is already in a compact form (e.g. centroids) and skip this step if so
+        # self.points = self._getPoints(geodf, self.geometry_id, verbose=verbose)
 
         return DesignMatrices(
-            self.y,
-            self._y_design_info,
-            self.X,
-            self._x_design_info,
-            self.formula,
-            self.crs,
-            self.geometry,
-            self.timestamps,
+            y=y,
+            y_design_info=_y_design_info,
+            y_name = self.response_name,
+            y_expr = self.response_expressions,
+            X=Xbeta,
+            X_design_info=_x_design_info,
+            x_names = self.covariate_names,
+            x_exprs = self.covariate_expressions,
+            formula=self.formula,
+            crs=self.crs,
+            box = self.box,
+            geometry=self.geometry,
+            timestamps=timestamps,
+            delta = self.delta,
+            unit = self.unit,
+            time_col_name=self.time_col_name,
+            dtype=self.dtype,
+            backend="jax" if JAX_AVAILABLE else "numpy", 
         )
 
-    def _computedesignMatrix(
-        self, geodf, geometry_id, time_col_name, response_name, formula=None, terms=None
+    def _computedesignMatrix_geodataframe(
+        self,
+        geodf,
+        geometry_id,
+        time_col_name,
+        response_name,
+        formula=None,
+        terms=None,
+        verbose=None,
     ):
+        self._log("Computing design matrix from GeoDataFrame", verbose)
 
         flag = True
         msg = ""
@@ -213,96 +363,279 @@ class data_preparation:
         ):
             flag = False
             msg += "Formula or terms must be provided"
+            raise ValueError(msg)
 
-        # sort the dataset by time
         geodf = geodf.sort_values([time_col_name, geometry_id])
+        self._log("Dataset sorted by time and geometry id", verbose)
 
-        # take just the unique row
         geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
+        self._log("Dropped duplicate space-time rows", verbose)
 
-        # Create new dataset starting from formula
         if formula is not None:
-
-            time = np.unique(geodf[time_col_name])
-            T = time.shape[0]
-
-            # Not all point measure the variable (remove this point)
-            # Check the ID statin with measure always nan or zero-inflated
-
+            
             stp = (
                 geodf.groupby(geometry_id, observed=True)[response_name]
-                .count()                      # counts non-NA values
+                .count()
                 .reset_index(name="n_obs")
             )
-                        
-            # Get only the observed sites (with at least one observation) and filter the dataset
+
             observed_sites = stp.loc[stp["n_obs"] > 0, geometry_id].tolist()
-            
             geodf = geodf[geodf[geometry_id].isin(observed_sites)]
+            self._log(f"Kept {len(observed_sites)} observed spatial locations", verbose)
 
-            # check the number of point available
-            point = geodf.geometry.unique()
-            N = point.shape[0]
+            timestep = np.unique(geodf[time_col_name])
+            T = timestep.shape[0]
+            self._log(f"Found {T} unique timestamps", verbose)
 
-            # Convert Nan to inf (this becouse the dmatrices remove nan -> we have to keep this values)
+            points = geodf.geometry.unique()
+            N = points.shape[0]
+            self._log(f"Found {N} spatial locations", verbose)
+
             geodf.loc[geodf[response_name].isna(), response_name] = np.inf
+            self._log("Temporarily replaced missing response values with inf for patsy", verbose)
 
             ytemp, Xtemp = dmatrices(
-                formula, data=geodf, NA_action="raise", return_type="matrix"
+                formula,
+                data=geodf,
+                NA_action="raise",
+                return_type="matrix",
             )
+            self._log("Patsy design matrices generated", verbose)
+            self._log(f"y name: {ytemp.design_info.column_names[0]}", verbose)
+            self._log(f"X names: {', '.join(Xtemp.design_info.column_names)}", verbose)
+            self._log(f"Design matrix shapes: ytemp={ytemp.shape}, Xtemp={Xtemp.shape}", verbose)
 
-            # replace inf with nan
+
             ytemp[np.isinf(ytemp)] = np.nan
+            self._log("Restored NaN values in response matrix", verbose)
 
-            # just reshape:
-            # response variable: [N x T]
-            # Covariate variable: [N x P x T]
             y = ytemp.reshape(T, N).T
+            Xbeta = np.zeros((N, Xtemp.shape[1], T), dtype=self.dtype)
 
-            Xbeta = np.zeros((N, Xtemp.shape[1], T))
-
-            for i in range(0, Xtemp.shape[1]):
+            for i in range(Xtemp.shape[1]):
                 Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
+
+            self._log(f"Reshaped y to {y.shape} and X to {Xbeta.shape}", verbose)
+        
 
             return (
                 geodf,
-                point,
+                points,
                 y,
                 ytemp.design_info,
                 Xbeta,
                 Xtemp.design_info,
                 N,
                 T,
-                time,
+                timestep,
             )
 
-    def _checkFormula(self, formula: str):
+    def _checkFormula(self, formula: str, verbose=None):
+        self._log(f"Checking formula: {formula}", verbose)
 
-        # TODO: check the formula parser
-        flag = True
-        msg = ""
+        if not isinstance(formula, str) or not formula.strip():
+            return False, "Formula must be a non-empty string", None, [], [], []
 
-        m = ModelDesc.from_formula(formula)
+        try:
+            m = ModelDesc.from_formula(formula)
+        except Exception as exc:
+            return False, f"Invalid formula: {exc}", None, [], [], []
 
-        return flag, msg, m.lhs_termlist[0].name()
+        if len(m.lhs_termlist) == 0:
+            return False, "Formula must include a response variable on the left-hand side", None, [], [], []
 
-    def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name):
+        y_names, y_exprs = self._extract_formula_metadata(m.lhs_termlist)
+        x_names, x_exprs = self._extract_formula_metadata(m.rhs_termlist)
 
-        # Check foreach geometry_id the timeseries lenght, start/end date, the delta time.
-        flag = True
-        msg = ""
+        if len(y_names) == 0:
+            return False, "Could not identify the response variable from the formula", None, [], [], []
 
-        return flag, msg
+        if len(y_names) > 1:
+            return (
+                False,
+                "Only one response variable is supported in the formula",
+                None,
+                [],
+                [],
+                [],
+            )
 
-    def _checkTimeDataset(self, geodf):
+        response_name = y_names[0]
+
+        self._log(f"Response name: {response_name}", verbose)
+        self._log(
+            f"Response expression(s): {', '.join(y_exprs) if y_exprs else response_name}",
+            verbose,
+        )
+        self._log(
+            f"Covariate name(s): {', '.join(x_names) if x_names else 'intercept only'}",
+            verbose,
+        )
+        self._log(
+            f"Covariate expression(s): {', '.join(x_exprs) if x_exprs else 'intercept only'}",
+            verbose,
+        )
+
+        return True, "", response_name, y_exprs, x_names, x_exprs
+    
+
+    def _extract_formula_metadata(self, termlist):
+        """
+        Extract raw variable names and factor expressions from a patsy term list.
+
+        Returns
+        -------
+        names : list[str]
+            Raw variable names used in the terms.
+        expressions : list[str]
+            Patsy factor expressions, including transformations.
+        """
+        names = []
+        expressions = []
+        
+        for term in termlist:
+            # Skip intercept-only term
+            if len(term.factors) == 0:
+                names.append("1")
+                expressions.append("1")
+                continue
+
+            for factor in term.factors:
+                expr = getattr(factor, "code", None)
+                if expr is None:
+                    try:
+                        expr = factor.name()
+                    except Exception:
+                        expr = str(factor)
+
+                expr = str(expr).strip()
+                
+                if "(" in expr:
+                    expressions.append(expr.split("(")[0])
+                    names.append(re.findall(r"\((.*?)\)", expr)[0])
+                else:
+                    names.append(expr)
+                    expressions.append("1")
+                
+        return names, expressions
+
+
+    def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name, verbose=None):
+        self._log(f"Checking time column consistency for '{time_col_name}'", verbose)
+
+        flag, delta, unit = self.check_regular_timestamps(
+            geodf[time_col_name],
+            verbose=verbose,
+        )
+        if not flag:
+            msg = "Timestamps are not regularly spaced"
+            raise ValueError(msg)
+
+        self._log(f"Time column check completed: delta={delta}, unit={unit}", verbose)
+        return flag, delta, unit
+
+    def check_regular_timestamps(self, timestamps, verbose=None):
+        """
+        Check if timestamps are regularly spaced and return (delta, unit).
+
+        Notes
+        -----
+        - Uses UNIQUE timestamps (important for panel data with repeated times per geometry).
+        - Handles parsing errors robustly.
+        - Supports fixed deltas (sec/min/hour/day) and calendar frequencies
+          (month/year) when inferable.
+        """
+        self._log("Checking regular spacing of timestamps", verbose)
+
+        # 1) Parse safely
+        ts = pd.Series(timestamps)
+        ts = pd.to_datetime(ts, errors="coerce", utc=True)
+
+        if ts.isna().any():
+            n_bad = int(ts.isna().sum())
+            self._log(f"Found {n_bad} invalid timestamps", verbose)
+            return False, None, None
+
+        # 2) Use unique sorted times (avoid duplicated rows across geometries)
+        ts_unique = pd.DatetimeIndex(ts.drop_duplicates().sort_values())
+
+
+        if ts_unique.size == 1:
+            self._log("Only one unique timestamp found", verbose)
+            return True, 0, "None"
+
+        if ts_unique.size < 2:
+            self._log("Need at least 2 unique timestamps", verbose)
+            return False, None, None
+
+        # 3) Try calendar-aware frequency first (works for month/year)
+        inferred = pd.infer_freq(ts_unique) if ts_unique.size >= 3 else None
+        if inferred is not None:
+            # Normalize aliases like '2MS', 'M', 'YS', etc.
+            n = ""
+            code = inferred
+            i = 0
+            while i < len(code) and code[i].isdigit():
+                n += code[i]
+                i += 1
+            mult = int(n) if n else 1
+            base = code[i:]
+
+            # Month-like frequencies
+            if base in {"M", "MS", "BM", "BMS", "ME"}:
+                self._log(f"Regular calendar frequency detected: {inferred}", verbose)
+                return True, mult, "month"
+
+            # Year-like frequencies
+            if base in {"A", "AS", "Y", "YS", "YE", "BA", "BAS"}:
+                self._log(f"Regular calendar frequency detected: {inferred}", verbose)
+                return True, mult, "year"
+
+        # 4) Fallback: fixed timedeltas
+        diffs = pd.Series(ts_unique).diff().dropna()
+        if diffs.empty:
+            self._log("Could not compute timestamp differences", verbose)
+            return False, None, None
+
+        first = diffs.iloc[0]
+        if not (diffs == first).all():
+            self._log("Timestamp spacing is not constant", verbose)
+            return False, None, None
+
+        seconds = first.total_seconds()
+        if seconds <= 0:
+            self._log("Non-positive timestamp delta detected", verbose)
+            return False, None, None
+
+        if seconds % 86400 == 0:
+            return True, int(seconds // 86400), "day"
+        if seconds % 3600 == 0:
+            return True, int(seconds // 3600), "hour"
+        if seconds % 60 == 0:
+            return True, int(seconds // 60), "minute"
+        if float(seconds).is_integer():
+            return True, int(seconds), "second"
+
+        # Sub-second support
+        milliseconds = seconds * 1000
+        if float(milliseconds).is_integer():
+            return True, int(milliseconds), "millisecond"
+
+        microseconds = seconds * 1_000_000
+        if float(microseconds).is_integer():
+            return True, int(microseconds), "microsecond"
+
+        # Last fallback
+        return True, float(seconds), "second"
+
+    def _checkTimeDataset(self, geodf, verbose=None):
+        self._log("Searching for time column", verbose)
+
         msg = ""
         flag = True
         time_col_name = None
 
-        # check if time is in dataset
-        if not "Time" in geodf:
-
-            # check other columns with datatime dtype
+        if "Time" not in geodf:
             time_col = [
                 col
                 for col in geodf.columns
@@ -312,125 +645,110 @@ class data_preparation:
             if len(time_col) == 0:
                 msg += "The 'Time' column not found \n"
                 flag = False
-
+                self._log("No valid time column found", verbose)
             else:
                 time_col_name = time_col[0]
                 msg += "'Time' column found: {col} \n".format(col=time_col)
                 msg += "Keeped 'Time' column: {col} \n".format(col=time_col_name)
-
+                self._log(f"Using datetime column '{time_col_name}' as time column", verbose)
         else:
             time_col_name = "Time"
+            self._log("Using 'Time' column", verbose)
 
         return flag, msg, time_col_name
 
-    def _getPoints(self, geodf, geometry_id):
+    def _check_geometry(self, geodf, verbose=None):
+        self._log("Checking geometry type", verbose)
+
+        geom_type = pd.unique(self.geodf.geometry.geom_type)
+
+        msg = ""
+        flag = True
+        if len(geom_type) > 1:
+            msg = "Should be only one geometry type"
+            flag = False
+            self._log("Multiple geometry types found", verbose)
+        else:
+            self._log(f"Geometry type check passed: {geom_type[0]}", verbose)
+
+        return flag, msg, geom_type
+
+    def _numeric_column(self, geodf, verbose=None):
+        numeric_col = [
+            col for col in geodf.columns if pd.api.types.is_numeric_dtype(geodf[col])
+        ]
+        self._log(f"Found numeric columns: {numeric_col}", verbose)
+        return numeric_col
+
+    def _getPoints(self, geodf, geometry_id, verbose=None):
+        self._log("Computing centroid coordinates for geometry points", verbose)
 
         if "geometry" not in geodf:
             raise ValueError("Geometry column not found in the dataset")
 
         gdf_metric = geodf.to_crs(geodf.estimate_utm_crs())
-
         centroids = gdf_metric.geometry.drop_duplicates().centroid.to_crs(geodf.crs)
+        points = np.column_stack([centroids.x, centroids.y])
 
-        return np.column_stack([centroids.x, centroids.y])
+        self._log(f"Computed {points.shape[0]} point coordinates", verbose)
+        return points
 
-    def _computeDistance(self, points, pt=None, distance="euclidean"):
+    def _computeDistance(self, points, pt=None, distance="euclidean", verbose=None):
+        self._log(f"Computing distance matrix using '{distance}' metric", verbose)
 
         if pt is None:
-
-            # Compute distance matrix points itself
-            return cdist(points, points, distance)
+            dist = cdist(points, points, distance)
+            self._log(f"Computed square distance matrix with shape {dist.shape}", verbose)
+            return dist
         else:
-            # Compute distance between matrix and points
-            return cdist(points, pt, distance)
+            dist = cdist(points, pt, distance)
+            self._log(f"Computed cross-distance matrix with shape {dist.shape}", verbose)
+            return dist
 
-    def _checkSpatialDataset(self, geodf):
+    def _checkSpatialDataset(self, geodf, verbose=None):
+        self._log("Checking spatial dataset", verbose)
 
         msg = ""
         flag = True
 
-        # Check the type of the dataset obj
         if not isinstance(geodf, geopd.geodataframe.GeoDataFrame):
-            msg += (
-                "Type of dataset must be geopandas.geodataframe see: (lint to doc) \n"
-            )
+            msg += "Type of dataset must be geopandas.geodataframe see: (lint to doc) \n"
             flag = False
+            self._log("Dataset is not a GeoDataFrame", verbose)
 
-        # Check the crs[already done]
         if geodf.crs is None:
             msg += "Dataset CRS not found: (lint to doc) \n"
             flag = False
+            self._log("Dataset CRS is missing", verbose)
 
-        # Check valid geometry [All line must be valid]
         mask = geodf.is_valid
         if not mask.all():
             msg += "Check the rows geometry: (.is_valid) \n"
             flag = False
+            self._log("Invalid geometries found", verbose)
 
-        # Rename geometry
         if "geometry" not in geodf:
             msg += "Rename the column with the geometry 'geometry' \n"
             flag = False
+            self._log("Geometry column not found", verbose)
 
-        geodf.set_geometry("geometry")
-
-        # Create unique code (categorical) to idendify a point (from geometry)
         geometry_id = "geometry_id"
         ct = pd.Categorical(geodf["geometry"], categories=geodf.geometry.unique())
         geodf[geometry_id] = ct.codes
 
-        # Check the geometry type (now just single resolution)
         mask = np.unique(geodf.geom_type)
-        if not mask.shape == (1,):
-            msg += "Just one spatial geometry is supported. Currently found geometries {maks} \n".format(
-                maks=mask
+        if mask.shape != (1,):
+            msg += (
+                "Just one spatial geometry is supported. Currently found geometries "
+                "{maks} \n".format(maks=mask)
             )
             flag = False
+            self._log(f"Multiple geometry types found: {mask}", verbose)
+        else:
+            self._log(f"Spatial dataset check passed with geometry type {mask[0]}", verbose)
 
         return flag, msg, geometry_id
 
-    def __repr__(self):
-        return self.__str__()
-
-    def __str__(self):
-        description = """Dataset object 
-----------------------------------
-formula: {formula}
-Time  column: {time_name}
-Space column: {space_name}
-
-# Space
-- Crs: {crs_name}
-- Geometry type: {ptType}
-- Number of points: {N} (centroid)
-- Box: {box}
-
-# Time
-- Number of timestamp: {T} 
-- Timestamp: min={tmin}, max={tmax}
-
-# Design matrix 
-y: {y_shape}
-y name : {y_name}
-
-X: {x_shape}
-X name: {x_name}
-----------------------------------
-""".format(
-            formula=self.formula,
-            time_name=self.time_col_name,
-            space_name="geometry",
-            crs_name=self.crs.name,
-            ptType=np.unique(self.geometry),
-            N=self.N,
-            box=self.box,
-            T=self.T,
-            tmin=self.timestamps.min(),
-            tmax=self.timestamps.max(),
-            y_shape=self.y.shape,
-            y_name=self._y_design_info.column_names,
-            x_shape=self.X.shape,
-            x_name=self._x_design_info.column_names,
-        )
-
-        return description
+    def print_info(self, msg):
+        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
