@@ -18,6 +18,7 @@ from scipy.spatial.distance import cdist
 from patsy import ModelDesc, dmatrices
 import geopandas as geopd
 import pandas as pd
+from shapely.geometry import Point
 
 from dataclasses import dataclass, field
 from typing import Literal
@@ -42,6 +43,7 @@ class DesignMatrices:
     X_design_info: object
     x_names: list[str]
     x_exprs: list[str]
+    points: list[Point]
     formula: str
     crs: object
     box: object
@@ -75,6 +77,7 @@ class DesignMatrices:
         self.X = np.asarray(self.X, dtype=self.dtype)
         self.timestamps = np.asarray(self.timestamps)
         self.type = np.unique(self.geometry).astype(str)
+        self.points = np.array([[p.x, p.y] for p in self.points], dtype=self.dtype)
 
         # Validate shapes
         if self.y.ndim != 2:
@@ -99,7 +102,7 @@ class DesignMatrices:
 
         # Derived dimensions
         self.N, self.T = self.y.shape
-        self.P = self.X.shape[1]
+        self.b = self.X.shape[1]
         self.terms = ModelDesc.from_formula(self.formula)
 
         # Convert to JAX arrays if requested
@@ -125,6 +128,10 @@ class DesignMatrices:
         """Fraction of missing (NaN) values over all [N x T] entries."""
         return 1 - (self.n_obs / (self.N * self.T))
     
+    @property  
+    def shape(self):
+        """Shape of the design matrices as a tuple (N, P, T)."""
+        return (self.N, self.b, self.T)
 
     def summary(self) -> Summary:
         y_np = np.asarray(self.y)
@@ -144,7 +151,7 @@ class DesignMatrices:
 
         top_right = [
             ("Sites    [N]",     [str(self.N)]),
-            ("Covariates [P]",   [str(self.P)]),
+            ("Covariates [b]",   [str(self.b)]),
             ("Timesteps  [T]",   [str(self.T)]),
             ("CRS",             [str(self.crs)]),
             ("Units",           [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
@@ -181,7 +188,7 @@ class DesignMatrices:
     def __repr__(self) -> str:
         return (
             f"DesignMatrices("
-            f"N={self.N}, P={self.P}, T={self.T}, "
+            f"N={self.N}, b={self.b}, T={self.T}, "
             f"dtype={self.dtype}, backend='{self.backend}')"
         )
 
@@ -331,6 +338,7 @@ class DesignMatricesBuilder:
             X_design_info=_x_design_info,
             x_names = self.covariate_names,
             x_exprs = self.covariate_expressions,
+            points=points,
             formula=self.formula,
             crs=self.crs,
             box = self.box,
@@ -383,7 +391,7 @@ class DesignMatricesBuilder:
             geodf = geodf[geodf[geometry_id].isin(observed_sites)]
             self._log(f"Kept {len(observed_sites)} observed spatial locations", verbose)
 
-            timestep = np.unique(geodf[time_col_name])
+            timestep = np.sort(np.unique(geodf[time_col_name]))
             T = timestep.shape[0]
             self._log(f"Found {T} unique timestamps", verbose)
 
