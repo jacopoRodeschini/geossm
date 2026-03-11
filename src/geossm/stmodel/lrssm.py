@@ -22,7 +22,7 @@ from scipy.linalg import block_diag as scyp_block_diag
 import jax
 from scipy.optimize import minimize
 
-from geossm import data_preparation
+from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
 
 from shapely.geometry import Polygon
@@ -434,7 +434,7 @@ class LRStateSpaceModel(StateSpaceModel):
             self.print_info("Building observation grid...")
 
         self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
-            self._buildObservationGrid(df, formulas)
+            self._buildObservationGrid(df, formulas, verbose=verbose)
         )
 
         if verbose:
@@ -442,11 +442,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # self.train will be used later for estimation and for the results
         # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        self.y_train, Xbeta_train = self._buildDesignMatrix()
+        self.y_train, Xbeta = self._buildDesignMatrix()
 
         # get response name
-        self.ynames = [g._y_design_info.column_names for g in self.gridList]
-        xbeta_names = [g._x_design_info.column_names for g in self.gridList]
+        self.y_name = [g.y_name for g in self.gridList]
+        xbeta_names = [g.x_names for g in self.gridList]
 
         # Check the domain
         if verbose:
@@ -462,7 +462,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
-        super().__init__(Xbeta=Xbeta_train, beta=None, xbeta_names=xbeta_names)
+        super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names)
 
     @property
     def domain(self):
@@ -1260,30 +1260,23 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return flag, msg
 
-    def _buildObservationGrid(self, df, formulas):
+    def _buildObservationGrid(self, df, formulas, verbose=True):
 
         nvar = len(formulas)  # numer of the response variable
-        gridList = [data_preparation(df, f) for f in formulas]
+        dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build() for f in formulas]
 
-        T = [gr.T for gr in gridList]
-        points = [gr.points for gr in gridList]
+        T = [gr.T for gr in dfs]
+        points = [gr.points for gr in dfs]
 
         # get dimnesion of each grid
-        pdim = [grid.N for grid in gridList]
+        pdim = [grid.N for grid in dfs]
         block_p = np.hstack((0, np.cumsum(pdim)))
 
-        return nvar, points, gridList, pdim, block_p[-1], block_p, T
+        return nvar, points, dfs, pdim, block_p[-1], block_p, T
 
     def _buildDesignMatrix(self):
 
-        Ylist_original = [grid.y for grid in self.gridList]
-
-        # applay the log transofrmation (natural log) [positive prediction]
-        Ylist = Ylist_original
-        # Ylist = [] # Ylist_original
-        # for yi in Ylist_original:
-        #     yi[yi <= 0.5] = np.nan
-        #     Ylist.append(np.log(yi))
+        Ylist = [grid.y for grid in self.gridList]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
         Xbeta_list = [grid.X for grid in self.gridList]
@@ -1415,7 +1408,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 ),
                 (
                     "Dep. Variables:",
-                    lambda: [self.ynames if hasattr(self, "ynames") else "None"],
+                    lambda: [self.y_name if hasattr(self, "y_name") else "None"],
                 ),
                 ("Date:", lambda: [self._today]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
@@ -1500,7 +1493,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     ("Grid type:", lambda: ["Sparse"]),
                     (
                         "Response y:",
-                        lambda: f"{grid._y_design_info.column_names}({grid.y.shape})",
+                        lambda: f"{grid.y_name}({grid.y.shape})",
                     ),
                     ("Formula:", lambda: f"{grid.formula}"),
                     ("Design X:", lambda: f"{grid.X.shape}"),
