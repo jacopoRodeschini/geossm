@@ -364,6 +364,50 @@ Contributions are welcome! To contribute:
 
 For questions or bug reports, please open an [Issue](../../issues).
 
+### Branching Strategy
+
+This repository follows a simple branching strategy.
+
+**Main Branches**
+
+| Branch | Purpose |
+|------|------|
+| `main` | Stable production code. Only tested and released versions live here. |
+| `develop` | Active development branch where new work is integrated. |
+
+**Working Branches**
+
+| Branch Pattern | Purpose | Example |
+|------|------|------|
+| `feature/*` | New features or improvements | `feature/add-smoothing` |
+| `fix/*` | Bug fixes | `fix/memory-leak` |
+
+After the work is complete, open a **Pull Request into `develop`**.
+
+**Typical Workflow**
+
+1. Create a branch from `develop`
+
+```bash
+git switch -c fix/your-bug
+```
+
+2. Commit your changes
+
+```bash
+git commit -m "Describe your change"
+```
+
+3. Push the branch
+
+```bash
+git push origin feature/your-feature
+```
+
+4. Open a Pull Request into `develop`.
+
+5. When a new version is ready, `develop` is merged into `main` and a tag is created.
+
 ## License
 
 This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
