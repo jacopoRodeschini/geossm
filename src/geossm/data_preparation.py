@@ -15,7 +15,7 @@ import re
 import time
 import numpy as np
 from scipy.spatial.distance import cdist
-from patsy import ModelDesc, dmatrices
+from patsy import ModelDesc, dmatrices,dmatrix
 import geopandas as geopd
 import pandas as pd
 from shapely.geometry import Point
@@ -35,10 +35,6 @@ except ImportError:
 
 @dataclass
 class DesignMatrices:
-    y: np.ndarray
-    y_design_info: object
-    y_name: str
-    y_expr: list[str]
     X: np.ndarray
     X_design_info: object
     x_names: list[str]
@@ -51,6 +47,10 @@ class DesignMatrices:
     timestamps: np.ndarray
     delta: int
     unit: str
+    y: np.ndarray = None, 
+    y_design_info: object = None
+    y_name: str = None
+    y_expr: list[str] = None
     time_col_name: str = "Time"
     geometry_id: str = field(default="geometry_id", init=False)
     dtype: np.dtype = field(default=np.float64)
@@ -73,41 +73,41 @@ class DesignMatrices:
             raise TypeError(f"Invalid dtype: {self.dtype}")
 
         # Cast arrays to dtype 
-        self.y = np.asarray(self.y, dtype=self.dtype)
+        self.y = np.asarray(self.y, dtype=self.dtype) if self.y is not None else None
         self.X = np.asarray(self.X, dtype=self.dtype)
         self.timestamps = np.asarray(self.timestamps)
         self.type = np.unique(self.geometry).astype(str)
         self.points = np.array([[p.x, p.y] for p in self.points], dtype=self.dtype)
 
         # Validate shapes
-        if self.y.ndim != 2:
+        if self.y is not None and self.y.ndim != 2:
             raise ValueError(f"y must be [N x T], got shape {self.y.shape}")
         if self.X.ndim != 3:
             raise ValueError(f"X must be [N x P x T], got shape {self.X.shape}")
-        if self.y.shape[0] != self.X.shape[0]:
+        if self.y is not None and self.y.shape[0] != self.X.shape[0]:
             raise ValueError(
                 f"N mismatch: y has {self.y.shape[0]} sites, "
                 f"X has {self.X.shape[0]} sites"
             )
-        if self.y.shape[1] != self.X.shape[2]:
+        if self.y is not None and self.y.shape[1] != self.X.shape[2]:
             raise ValueError(
                 f"T mismatch: y has {self.y.shape[1]} timesteps, "
                 f"X has {self.X.shape[2]} timesteps"
             )
-        if self.timestamps.shape[0] != self.y.shape[1]:
+        if self.y is not None and self.timestamps.shape[0] != self.y.shape[1]:
             raise ValueError(
                 f"timestamps length {self.timestamps.shape[0]} does not match "
                 f"T={self.y.shape[1]}"
             )
 
         # Derived dimensions
-        self.N, self.T = self.y.shape
-        self.b = self.X.shape[1]
+
+        self.N, self.b, self.T = self.X.shape
         self.terms = ModelDesc.from_formula(self.formula)
 
         # Convert to JAX arrays if requested
         if self.backend == "jax":
-            self.y = jnp.array(self.y)
+            self.y = jnp.array(self.y) if self.y is not None else None
             self.X = jnp.array(self.X)
             # Only arrays of numeric types are supported by JAX. 
             # self.timestamps = jnp.array(self.timestamps)
@@ -134,16 +134,16 @@ class DesignMatrices:
         return (self.N, self.b, self.T)
 
     def summary(self) -> Summary:
-        y_np = np.asarray(self.y)
+        y_np = np.asarray(self.y) if self.y is not None else None
 
         top_left = [
             ("Formula",        [self.formula]),
-            ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name]),
+            ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name] if self.y is not None else ["N/A"]),
             ("Covariates (X)", [", ".join(self.x_names)]),
-            ("[min, max, mean]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"]),  
-            ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"]),
-            ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"]),
-            ("Transformed (y)",       [", ".join(self.y_expr) if self.y_expr else "No"]),
+            ("[min, max, mean]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),  
+            ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
+            ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
+            ("Transformed (y)",       [", ".join(self.y_expr) if self.y_expr else "No"] if self.y is not None else ["N/A"]),
             ("Transformed (X)",       [", ".join(self.x_exprs) if self.x_exprs else "No"]),
             ("dtype",          [str(self.dtype)]),
             ("Backend",        [self.backend]),
@@ -160,8 +160,6 @@ class DesignMatrices:
             ("Timestamps",      [f"{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}"]),
             ("Delta, Unit",       [f"{self.delta}, {self.unit}"]),
         ]
-
-        
 
         smry = Summary()
 
@@ -207,6 +205,32 @@ class DesignMatricesBuilder:
         self.crs = self.geodf.crs
         self.box = np.round(self.geodf.total_bounds, 3).tolist() # [minx, miny, maxx, maxy]
 
+
+        # Check the formula and extract response/covariate names and expressions
+        (flag,
+            msg,
+            self.lhs_termlist, 
+            self.rhs_termlist,
+            self.response_name,
+            self.response_expressions,
+            self.covariate_names,
+            self.covariate_expressions,
+        ) = self._checkFormula(self.formula, verbose=verbose)
+        
+        if not flag:
+            raise ValueError(msg)
+
+        if len(self.lhs_termlist) == 0:
+            self._log(
+                "Formula parsed successfully. No response variable found",
+                verbose)
+            
+        else:     
+            self._log(
+                f"Formula parsed successfully. Response variable: '{self.response_name}'",
+                verbose)
+            
+
         if isinstance(self.geodf, geopd.GeoDataFrame):
             flag = self._check_geodataframe(self.geodf, self.dtype, verbose=verbose)
             if not flag:
@@ -226,9 +250,13 @@ class DesignMatricesBuilder:
 
     def build(self, verbose=None):
         
+        if self.formula is None:
+            msg = "Formula must be provided to compute design matrices"
+            raise ValueError(msg)
+        
         if isinstance(self.geodf, geopd.GeoDataFrame):
             self._log("Building design matrices from GeoDataFrame", verbose)
-            self.design_matrices = self._build_geodataframe(verbose=verbose)
+            self.design_matrices = self._build_geodataframe(formula=self.formula, verbose=verbose)
         else:
             raise ValueError("Input dataset must be a GeoDataFrame")   
         
@@ -264,25 +292,12 @@ class DesignMatricesBuilder:
                 raise ValueError(f"Time column '{self.time_col_name}' contains non-datetime values that could not be converted")
             self._log(f"Time column '{self.time_col_name}' converted to datetime successfully", verbose)
         
+        self._log(
+            f"Column detected: {', '.join(self.covariate_names) if self.covariate_names else 'intercept only'}",
+            verbose,
+        )
+        
         # Check the time column consistency and get the delta and unit for the time dimension
-        (flag,
-            msg,
-            self.response_name,
-            self.response_expressions,
-            self.covariate_names,
-            self.covariate_expressions,
-        ) = self._checkFormula(self.formula, verbose=verbose)
-        if not flag:
-            raise ValueError(msg)
-
-        self._log(
-            f"Formula parsed successfully. Response variable: '{self.response_name}'",
-            verbose,
-        )
-        self._log(
-            f"Covariates detected: {', '.join(self.covariate_names) if self.covariate_names else 'intercept only'}",
-            verbose,
-        )
         flag, self.delta, self.unit = self._checkTimeColumn(
             geodf,
             self.response_name,
@@ -309,7 +324,7 @@ class DesignMatricesBuilder:
 
         return True
 
-    def _build_geodataframe(self, verbose=None):
+    def _build_geodataframe(self, formula, verbose=None):
         self._log("Creating spatial-temporal design matrices", verbose)
 
         geodf, points, y, _y_design_info, Xbeta, _x_design_info, N, T, timestamps = (
@@ -318,7 +333,7 @@ class DesignMatricesBuilder:
                 self.geometry_id,
                 self.time_col_name,
                 self.response_name,
-                self.formula,
+                formula,
                 verbose=verbose,
             )
         )
@@ -357,21 +372,21 @@ class DesignMatricesBuilder:
         geometry_id,
         time_col_name,
         response_name,
-        formula=None,
-        terms=None,
+        formula,
         verbose=None,
     ):
         self._log("Computing design matrix from GeoDataFrame", verbose)
 
-        flag = True
-        msg = ""
+        desc = ModelDesc.from_formula(formula)
 
-        if ((formula is None) and (terms is None)) or (
-            (formula is not None) and (terms is not None)
-        ):
-            flag = False
-            msg += "Formula or terms must be provided"
+        if desc.lhs_termlist is None and desc.rhs_termlist is None:
+            msg = "Formula must be provided to compute design matrices"
             raise ValueError(msg)
+        
+        if desc.rhs_termlist is None:
+            msg = "Covariate terms must be provided in the formula to compute design matrices"
+            raise ValueError(msg)
+        
 
         geodf = geodf.sort_values([time_col_name, geometry_id])
         self._log("Dataset sorted by time and geometry id", verbose)
@@ -379,28 +394,38 @@ class DesignMatricesBuilder:
         geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
         self._log("Dropped duplicate space-time rows", verbose)
 
-        if formula is not None:
-            
-            stp = (
-                geodf.groupby(geometry_id, observed=True)[response_name]
-                .count()
-                .reset_index(name="n_obs")
-            )
+        # check missing and count
+        if len(desc.lhs_termlist) > 0:
+            #stp = (
+            #    geodf.groupby(geometry_id, observed=True)[response_name]
+            #    .count()
+            #    ).reset_index()
 
-            observed_sites = stp.loc[stp["n_obs"] > 0, geometry_id].tolist()
-            geodf = geodf[geodf[geometry_id].isin(observed_sites)]
-            self._log(f"Kept {len(observed_sites)} observed spatial locations", verbose)
+            #observed_sites = stp.loc[stp[response_name] > 0, geometry_id].tolist()
+            observed_sites = geodf.loc[geodf[response_name].notna(), geometry_id].unique().tolist()
+        else:
+            observed_sites = geodf[geometry_id].unique().tolist()
 
-            timestep = np.sort(np.unique(geodf[time_col_name]))
-            T = timestep.shape[0]
-            self._log(f"Found {T} unique timestamps", verbose)
+        geodf = geodf[geodf[geometry_id].isin(observed_sites)]
+        self._log(f"Kept {len(observed_sites)} observed spatial locations", verbose)
 
-            points = geodf.geometry.unique()
-            N = points.shape[0]
-            self._log(f"Found {N} spatial locations", verbose)
+        timestep = np.sort(np.unique(geodf[time_col_name]))
+        T = timestep.shape[0]
+        self._log(f"Found {T} unique timestamps", verbose)
+
+        points = geodf.geometry.unique()
+        N = points.shape[0]
+        self._log(f"Found {N} spatial locations", verbose)
+
+        self._log("Generating design matrices...", verbose)
+        
+        if len(desc.lhs_termlist) > 0:
 
             geodf.loc[geodf[response_name].isna(), response_name] = np.inf
             self._log("Temporarily replaced missing response values with inf for patsy", verbose)
+            
+            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
+            # geodf.loc[geodf[covariate_names].isna().any(axis=1), covariate_names] = np.inf
 
             ytemp, Xtemp = dmatrices(
                 formula,
@@ -408,34 +433,50 @@ class DesignMatricesBuilder:
                 NA_action="raise",
                 return_type="matrix",
             )
-            self._log("Patsy design matrices generated", verbose)
             self._log(f"y name: {ytemp.design_info.column_names[0]}", verbose)
-            self._log(f"X names: {', '.join(Xtemp.design_info.column_names)}", verbose)
-            self._log(f"Design matrix shapes: ytemp={ytemp.shape}, Xtemp={Xtemp.shape}", verbose)
-
-
+            self._log(f"Design matrix shapes: ytemp={ytemp.shape}", verbose)
+            
             ytemp[np.isinf(ytemp)] = np.nan
             self._log("Restored NaN values in response matrix", verbose)
-
+            
             y = ytemp.reshape(T, N).T
-            Xbeta = np.zeros((N, Xtemp.shape[1], T), dtype=self.dtype)
-            for i in range(Xtemp.shape[1]):
-                Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
+            self._log(f"Reshaped y to {y.shape}", verbose)
 
-            self._log(f"Reshaped y to {y.shape} and X to {Xbeta.shape}", verbose)
-        
 
-            return (
-                geodf,
-                points,
-                y,
-                ytemp.design_info,
-                Xbeta,
-                Xtemp.design_info,
-                N,
-                T,
-                timestep,
+        else:
+            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
+            
+            Xtemp = dmatrix(
+                formula,
+                data=geodf,
+                NA_action="raise",
+                return_type="matrix",
             )
+            y = None
+            self._log("No response variable specified, only design matrix X will be computed", verbose)
+    
+        self._log(f"X names: {', '.join(Xtemp.design_info.column_names)}", verbose)
+        self._log(f"Design matrix shapes: Xtemp={Xtemp.shape}", verbose)
+
+        
+        Xbeta = np.zeros((N, Xtemp.shape[1], T), dtype=self.dtype)
+        for i in range(Xtemp.shape[1]):
+            Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
+
+        self._log(f"Reshaped X to {Xbeta.shape}", verbose)
+        self._log("Design matrices computed successfully", verbose)
+
+        return (
+            geodf,
+            points,
+            y,
+            ytemp.design_info if y is not None else None,
+            Xbeta,
+            Xtemp.design_info,
+            N,
+            T,
+            timestep,
+        )
 
     def _checkFormula(self, formula: str, verbose=None):
         self._log(f"Checking formula: {formula}", verbose)
@@ -448,32 +489,39 @@ class DesignMatricesBuilder:
         except Exception as exc:
             return False, f"Invalid formula: {exc}", None, [], [], []
 
-        if len(m.lhs_termlist) == 0:
-            return False, "Formula must include a response variable on the left-hand side", None, [], [], []
+        # parse the response variable
+        if len(m.lhs_termlist) > 0:    
+            # return False, "Formula must include a response variable on the left-hand side", None, [], [], []
+            y_names, y_exprs = self._extract_formula_metadata(m.lhs_termlist)
 
-        y_names, y_exprs = self._extract_formula_metadata(m.lhs_termlist)
+            if len(y_names) == 0:
+                return (False, 
+                "Could not identify the response variable from the formula", None, [], [], [])
+
+            if len(y_names) > 1:
+                return (
+                    False,
+                    "Only one response variable is supported in the formula",
+                    None,
+                    [],
+                    [],
+                    [],
+                )
+
+            y_names = y_names[0]
+            self._log(f"Response name: {y_names}", verbose)
+
+            self._log(
+            f"Response expression(s): {', '.join(y_exprs) if y_exprs else y_names}",
+            verbose)
+        else:
+            y_names, y_exprs = None, None
+        
+
+        # parse the covariates
         x_names, x_exprs = self._extract_formula_metadata(m.rhs_termlist)
 
-        if len(y_names) == 0:
-            return False, "Could not identify the response variable from the formula", None, [], [], []
-
-        if len(y_names) > 1:
-            return (
-                False,
-                "Only one response variable is supported in the formula",
-                None,
-                [],
-                [],
-                [],
-            )
-
-        response_name = y_names[0]
-
-        self._log(f"Response name: {response_name}", verbose)
-        self._log(
-            f"Response expression(s): {', '.join(y_exprs) if y_exprs else response_name}",
-            verbose,
-        )
+        
         self._log(
             f"Covariate name(s): {', '.join(x_names) if x_names else 'intercept only'}",
             verbose,
@@ -483,9 +531,8 @@ class DesignMatricesBuilder:
             verbose,
         )
 
-        return True, "", response_name, y_exprs, x_names, x_exprs
-    
-
+        return True, "", m.lhs_termlist, m.rhs_termlist, y_names, y_exprs, x_names, x_exprs
+       
     def _extract_formula_metadata(self, termlist):
         """
         Extract raw variable names and factor expressions from a patsy term list.
@@ -525,7 +572,6 @@ class DesignMatricesBuilder:
                     expressions.append("1")
                 
         return names, expressions
-
 
     def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name, verbose=None):
         self._log(f"Checking time column consistency for '{time_col_name}'", verbose)
