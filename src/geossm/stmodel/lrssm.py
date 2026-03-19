@@ -33,7 +33,7 @@ from geossm.stmodel import Param, FitOptions, ModelParams
 from .stmodel_results import LRStateSpaceResults
 from types import SimpleNamespace
 
-# %% [Utils] Updating formula, JAX (M-Step)
+# % [Utils] Updating formula, JAX (M-Step)
 
 
 @partial(jax.jit, static_argnums=(2, 3))
@@ -411,15 +411,16 @@ def _ei_jax(i, dim):
     return jax.nn.one_hot(i, dim, dtype=jnp.float32).reshape(1, dim)
 
 
-# %% Low Rank State-Space Model adapter to statsmodels MLEModel API
+# % Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas, domain=None, verbose=True):
+    def __init__(self, df, formulas = None, domain=None, verbose=True):
 
         self.df = df.copy()
         self.formulas = formulas
+        self.verbose = verbose
 
         # Overwrite the model attributes
         self.model_name = "Low-Rank State Space Model"
@@ -429,26 +430,34 @@ class LRStateSpaceModel(StateSpaceModel):
             0,
         )  # ARMA order (p, d, q) - not used in this model but kept for compatibility
 
-        # Compute the design matrices
-        if verbose:
-            self.print_info("Building observation grid...")
+        if formulas is not None:
 
-        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
-            self._buildObservationGrid(df, formulas, verbose=verbose)
-        )
+            # Compute the design matrices
+            if verbose:
+                self.print_info("Building observation grid...")
 
-        if verbose:
-            self.print_info("Building design matrix...")
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+                self._buildObservationGrid(df, formulas, verbose=verbose)
+            )
 
-        # self.train will be used later for estimation and for the results
-        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        self.y_train, Xbeta = self._buildDesignMatrix()
+            if verbose:
+                self.print_info("Building design matrix...")
 
-        # get response name
-        self.y_name = [g.y_name for g in self.gridList]
-        xbeta_names = [g.x_names for g in self.gridList]
+            # self.train will be used later for estimation and for the results
+            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+            self.y_train, Xbeta = self._buildDesignMatrix()
 
-        # Check the domain
+            # get response name
+            self.y_name = [g.y_name for g in self.gridList]
+            xbeta_names = [g.x_names for g in self.gridList]
+
+        else:
+            self.print_info("Formulas not provided. The model will be initialized without them")
+            Xbeta = None
+            xbeta_names = None
+
+
+         # Check the domain
         if verbose:
             self.print_info("Checking the domain...")
 
@@ -524,7 +533,36 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return self
 
-    def sim(self, seed=1234, params: ModelParams = None):
+    def sim(self, formulas, seed=1234, params: ModelParams = None, verbose=None):
+
+        if not verbose:
+            verbose = self.verbose
+
+        if verbose:
+            self.print_info("Simulating the model...")
+
+        # Compute the design matrices
+        if verbose:
+            self.print_info("Building observation grid...")
+
+        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+            self._buildObservationGrid(self.df, formulas, verbose=verbose)
+        )
+
+        if verbose:
+            self.print_info("Building design matrix...")
+
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        self.y_train, Xbeta = self._buildDesignMatrix()
+
+        # get response name
+        self.y_name = [g.y_name for g in self.gridList]
+        xbeta_names = [g.x_names for g in self.gridList]
+
+        # Check the domain
+        if verbose:
+            self.print_info("Checking the domain...")
 
         #  params = self._parseParams(params)
 
