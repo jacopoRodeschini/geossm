@@ -419,7 +419,6 @@ class DesignMatricesBuilder:
 
             y = ytemp.reshape(T, N).T
             Xbeta = np.zeros((N, Xtemp.shape[1], T), dtype=self.dtype)
-
             for i in range(Xtemp.shape[1]):
                 Xbeta[:, i, :] = Xtemp[:, i].reshape(T, 1, N).T.squeeze(axis=1)
 
