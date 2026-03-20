@@ -129,7 +129,7 @@ pip install geossm
 
 1. **Clone or download the repository**:
 ```bash
-git clone https://github.com/yourusername/geossm.git
+git clone https://github.com/jacopoRodeschini/geossm.git
 cd geossm
 ```
 
