@@ -16,8 +16,9 @@ from scipy.spatial.distance import cdist
 from shapely.geometry import Point, Polygon
 from gstools.covmodel import Matern
 from scipy.spatial import ConvexHull
+from statsmodels.iolib.summary import Summary
 
-# %% Utility functions
+# % Utility functions
 
 
 def meshio_to_mfem_mesh(meshio_mesh):
@@ -102,9 +103,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
     return mfem_mesh
 
 
-# %% FEM solver class
-
-
+# % FEM solver class
 class FEMSolver:
     def __init__(self, meshio_obj: meshio.Mesh, domain=None):
 
@@ -509,7 +508,13 @@ class FEMSolver:
 
     @property
     def box(self):
-        return self.mesh.GetBoundingBox()
+
+        box  = self.mesh.GetBoundingBox()
+        box = np.round(box, 2).tolist()
+
+        box_flat = [x for sublist in box for x in sublist]
+ 
+        return box_flat # [minx, miny, maxx, maxy]
 
     @property
     def domain(self):
@@ -612,22 +617,106 @@ class FEMSolver:
     def shape(self):
         return (self.nvertex, self.nelements, self.nbElements)
 
+
+    def compute_angles(self, vertex, triangle):
+        A, B, C = vertex[triangle]
+
+        def angle(a, b, c):
+            ab = np.linalg.norm(b - a)
+            ac = np.linalg.norm(c - a)
+            bc = np.linalg.norm(c - b)
+            cos_theta = (ab**2 + ac**2 - bc**2) / (2 * ab * ac)
+            # Convert to degrees
+            return np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
+
+        return np.array([angle(A, B, C), angle(B, C, A), angle(C, A, B)])
+
+    def compute_area(self, vertex, triangle):
+        A, B, C = vertex[triangle]
+        return 0.5 * abs(A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]))
+
+
+    def stats(self):
+
+        # compute angles for all triangles
+        angles = np.array([self.compute_angles(self.vertex, tri) for tri in self.elements])
+        
+        # compute areas for all triangles
+        areas = np.array([self.compute_area(self.vertex, tri) for tri in self.elements])
+
+        return angles, areas
+
+
+    def summary(self, compute_stats=True):
+
+        # compute the angles and areas of the triangles
+        if compute_stats:
+            angles, areas = self.stats()
+        else:
+            angles, areas = np.array([0]), np.array([0])
+        
+        top_left = dict(
+                    [
+                        ("Solver. type:", lambda: [self.__class__.__name__]),
+                        #("Scale (kappa):", lambda: f"{self.rescale:.2f}"),
+                        #("Range (theta):", lambda: f"{np.sqrt(8)/self.range:.2f}"),
+                        #("Variance (s2):", lambda: f"{self.var:.2f}"),
+                        #("Nu:", lambda: f"{self.nu:.2f}"),
+                        ("Mesh vertex",lambda: [f"{self.nvertex}"]),
+                        ("Mesh triangles:", lambda: [f"{self.nelements}"]),
+                        ("Mesh lines:", lambda: [f"{self.nbElements}"]), 
+                        ("Mesh inner vertex (rank):", lambda: [f"{self.n_inner_points}"]),
+                        ("Mesh outer vertex:", lambda: [f"{self.n_outer_points}"]),   
+                        ("Mesh angle [min, mean, max]:", lambda: [f"[{angles.min():.2f}, {angles.mean():.2f}, {angles.max():.2f}]"]),
+                        ("Mesh area [min, mean, max]:", lambda: [f"[{areas.min():.2f}, {areas.mean():.2f}, {areas.max():.2f}]"])
+                    ]
+                )
+        top_right = dict(
+                    [
+                        ("Box:", lambda: [f"{self.box}"]),
+                        ("FE space order:", lambda: [f"{self.fespace_order}"]),
+                        ("Mesh DOFs:", lambda: [f"{self.ndofs}"]),
+                        ("Mesh shape:", lambda: [f"{self.shape}"]),
+                        ("Mass matrix shape:", lambda: [f"{self.mass.shape}"]),
+                        ("Stiff matrix shape:", lambda: [f"{self.stiff.shape}"]),
+                        ("Inner indx. (shape)", lambda: [f"{self.inner.shape}"]),
+                        ("Inner indx. (sum)", lambda: [f"{(self.inner).sum()}"]),
+                    ]
+                )
+
+        # Generate the dictionaly
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append((item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append((item, top_right[item]()))
+
+        # Add the header to the summary
+        
+        smry = Summary()
+        smry.add_table_2cols(
+            self,
+            title="Covariance FEM solver",
+            gleft=gen_top_left,
+            gright=gen_top_right,
+            yname= "N/A",
+            xname= "N/A",
+        )
+  
+        return smry
+
     def __str__(self):
-        s = "FEMSolver object with: \n"
-        s += f" - Number of vertices: {self.nvertex} \n"
-        s += f" - Number of elements: {self.nelements} \n"
-        s += f" - Number of boundary elements: {self.nbElements} \n"
-        s += f" - Number of DOFs: {self.ndofs} \n"
-        s += f" - FE space order: {self.fespace_order} \n"
-        return s
+        
+        return self.summary().as_text()
 
     def __repr__(self):
         # plot the mesh
         self.plot_mesh(title="FEM Mesh Visualization")
         return self.__str__()
 
-
-# %% Heat kernel
+# % Heat kernel
 
 # Euclidean distance is wrong in a non-convex domain like PacMan.
 # hdist = cdist(points, points)
@@ -720,7 +809,7 @@ class FEMSolver:
 # hdist = (hdist + hdist.T)/2
 
 
-# %% SPDE Approximation of the Matern covariance model
+# % SPDE Approximation of the Matern covariance model
 class spdeAppoxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
