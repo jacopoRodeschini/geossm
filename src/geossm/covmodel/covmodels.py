@@ -647,8 +647,7 @@ class FEMSolver:
         return angles, areas
 
 
-    def summary(self, compute_stats=True):
-
+    def generate_summary(self, compute_stats=True):
         # compute the angles and areas of the triangles
         if compute_stats:
             angles, areas = self.stats()
@@ -693,7 +692,13 @@ class FEMSolver:
         for item in top_right.keys():
             gen_top_right.append((item, top_right[item]()))
 
+        return gen_top_left, gen_top_right
+
+    def summary(self, compute_stats=True):
+
+        
         # Add the header to the summary
+        gen_top_left, gen_top_right = self.generate_summary(compute_stats=compute_stats)
         
         smry = Summary()
         smry.add_table_2cols(
@@ -1014,7 +1019,57 @@ class spdeAppoxCov(Matern):
     def domain(self):
         return self._domain
 
-    # %% property: stiff and mass matrix
+    
+    def summary(self, compute_stats=True):
+
+        if hasattr(self,"fem_solver"):
+            gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary(compute_stats=compute_stats)
+        
+
+        top_left = dict(
+                    [
+                        ("Cov. type:", lambda: [self.__class__.__name__]),
+                        ("Scale (kappa):", lambda: [f"{self.rescale:.2f}"]),
+                        ("Range (theta):", lambda: [f"{np.sqrt(8*self.nu)/self.rescale:.2f}"]),
+                    ]
+                )
+        top_right = dict(
+                    [
+                        ("Variance (s2):", lambda: [f"{self.var:.2f}"]),
+                        ("Sigma2(k):", lambda: [f"{self.sigma2k:.2f}"]),
+                        ("Nu:", lambda: [f"{self.nu:.2f}"]),
+                        
+                    ]
+                )
+
+        # Generate the dictionaly
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append((item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append((item, top_right[item]()))
+
+
+        gen_top_left = gen_top_left + gen_top_left_solver
+        gen_top_right = gen_top_right + gen_top_right_solver
+
+        # Add the header to the summary
+        
+        smry = Summary()
+        smry.add_table_2cols(
+            self,
+            title="Matern SPDE Approximation",
+            gleft=gen_top_left,
+            gright=gen_top_right,
+            yname= "N/A",
+            xname= "N/A",
+        )
+  
+        return smry
+
+
 
     def __getstate__(self):
         # Create a dictionary of the object's state excluding non-picklable attributes
@@ -1035,3 +1090,4 @@ class spdeAppoxCov(Matern):
         # Rebuild the mesh and finite element solver if meshIO is available
         if self._meshIO is not None:
             self.setup(self._meshIO)
+
