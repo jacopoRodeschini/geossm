@@ -106,6 +106,3 @@ print("Confidence intervals:")
 for i in range(len(beta)):
     print(f"Beta {i}: {beta[i] - 1.96 * std_beta[i]} - {beta[i] + 1.96 * std_beta[i]}")
 
-
-
-

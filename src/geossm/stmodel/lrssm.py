@@ -535,7 +535,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def sim(self, formulas, seed=1234, params: ModelParams = None, verbose=None, stats=False):
 
-        if not verbose:
+        if verbose is None:
             verbose = self.verbose
 
         if verbose:
