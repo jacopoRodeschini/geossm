@@ -533,7 +533,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return self
 
-    def sim(self, formulas, seed=1234, params: ModelParams = None, verbose=None):
+    def sim(self, formulas, seed=1234, params: ModelParams = None, verbose=None, stats=False):
 
         if not verbose:
             verbose = self.verbose
@@ -550,7 +550,7 @@ class LRStateSpaceModel(StateSpaceModel):
         )
 
         if verbose:
-            self.print_info("Building design matrix...")
+            self.print_info("Get the design matrix...")
 
         # self.train will be used later for estimation and for the results
         # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
@@ -564,14 +564,34 @@ class LRStateSpaceModel(StateSpaceModel):
         if verbose:
             self.print_info("Checking the domain...")
 
-        #  params = self._parseParams(params)
-
+        flag, msg = self._checkDomain(self.domain)
+        if flag:
+            raise ValueError(msg)
+        
+        if verbose:
+            self.print_info("Domain is valid.")
+        
+        # check if the covariance function is defined
+        if self._cov_matern is None or len(self._cov_matern) == 0:
+            raise ValueError("Covariance function is not defined. Please run the setup method first.")
+        
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
+        if verbose:
+            msg = "Parsing the parameters (ModelParams|None)..."
+            self.print_info(msg)
+        
+        params = self._parseParams(params)
         A = params.A.value
         s2e = params.s2e.value
         f = params.f.value
         beta = params.beta.value
         ks = params.ks.value
+
+        # TODO: check if the parameters are valid (e.g. positive variance, etc.)
+        
+        # Chech the length of beta
+        if beta is not None and len(beta) != Xbeta.shape[1]:
+            raise ValueError(f"Length of beta ({len(beta)}) must match number of columns in Xbeta ({Xbeta.shape[1]})")
         
         # set the covarriance rescale paramiter to the value of ks (if provided, otherwise it will be set to 1)
         if ks is not None:
@@ -587,6 +607,9 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Get global constants
         points = self.points
+
+        if verbose:
+            self.print_info("Computing the SSM H, R, F and Q matrices...")
 
         # Compute the basis matrix (just one) - no boundary
         basis = self._buildBasis_list(points, self.cov_function)
@@ -621,12 +644,18 @@ class LRStateSpaceModel(StateSpaceModel):
             ]
         )
 
+        if verbose:
+            self.print_info("Start simulating the SSM...")
+
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
-        y_sim, x_sim, tdelta = super().sim(
-            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=self.Xbeta, beta=beta
+        y_sim, x_sim, stats, tdelta = super().sim(
+            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, stats=stats, verbose=verbose
         )
 
-        return y_sim, x_sim, tdelta
+        if verbose:
+            self.print_info("Simulation completed.")
+
+        return y_sim, x_sim, Xbeta, beta, stats, tdelta
 
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
@@ -1314,10 +1343,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def _buildDesignMatrix(self):
 
-        Ylist = [grid.y for grid in self.gridList]
+        Ylist = [grid.y for grid in self.gridList if grid.y is not None]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
-        Xbeta_list = [grid.X for grid in self.gridList]
+        Xbeta_list = [grid.X for grid in self.gridList if grid.X is not None]
 
         # points_train = [pt[index, :] for pt, index in zip(points, itrain)]
         # points_test = [pt[index, :] for pt, index in zip(points, itest)]
@@ -1328,8 +1357,15 @@ class LRStateSpaceModel(StateSpaceModel):
         # Y_test_list = [yi[index, :] for yi, index in zip(Ylist, itest)]
         # Xbeta_test_list = [xi[index, :, :] for xi, index in zip(Xlist, itest)]
 
-        y_train = jnp.vstack(Ylist)
-        Xbeta_train = block_diag_3D(*Xbeta_list)
+        if len(Ylist) > 0:
+            y_train = jnp.vstack(Ylist) 
+        else:
+            y_train = None
+
+        if len(Xbeta_list) > 0:
+            Xbeta_train = block_diag_3D(*Xbeta_list)
+        else:          
+            Xbeta_train = None
 
         # Y_test = np.vstack(Y_test_list)
         # Xbeta_test = block_diag_3D(Xbeta_test_list)

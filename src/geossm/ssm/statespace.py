@@ -387,9 +387,9 @@ class StateSpaceModel:
             Sigma0 = np.eye(F.shape[0])
 
         # Set default Xbeta and beta if not provided
-        if Xbeta is None:
+        if Xbeta is None and H is not None:
             Xbeta = np.zeros((H.shape[0], 1, 1))
-        if beta is None:
+        if beta is None and Xbeta is not None:
             beta = np.zeros(Xbeta.shape[1])
 
         # Update parameters without checking (we will check after setting all parameters)
@@ -405,7 +405,7 @@ class StateSpaceModel:
             xbeta_names=xbeta_names,
         )
 
-        # Check parameters only if the key parameters are set (alow for partial initialization)
+        # Check parameters only if the key parameters are set (allow for partial initialization)
         if (
             self.H is not None
             and self.F is not None
@@ -482,8 +482,8 @@ class StateSpaceModel:
         y_t=None,
         Xbeta=None,
         beta=None,
-        xbeta_names: list = None,
-        yname: list = None,
+        xbeta_names = None,
+        yname = None,
     ):
         """
         Helper function to update model parameters if provided.
@@ -528,7 +528,7 @@ class StateSpaceModel:
             try:
                 self._b = int(self._beta.shape[0])
             except Exception:
-                self._b = None
+                self._b = None       
 
         if xbeta_names is not None:
             # Count total number of xbeta names across all the variables
@@ -539,22 +539,28 @@ class StateSpaceModel:
                     f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}."
                 )
             self._xbeta_names = xbeta_names
-
-        else:
+        elif self._b is not None:
+            # If beta is set but no names provided, create default names
             self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
+        else:
+            self._xbeta_names = None
 
         if y_t is not None:
             self._y_t = jnp.asarray(y_t, dtype=self.dtype)
+            self._p = self._y_t.shape[0]
+            self._T = self._y_t.shape[1]
 
         if yname is not None:
             self._yname = yname
-        else:
+        elif self._p is not None:
             self._yname = "y"
+        else:
+            self._yname = None
 
         # update the params attributes
         self._params = self._beta
         self._params_names = self._xbeta_names
-        self._params_dim = len(self._beta)
+        self._params_dim = self._b
 
         return True
 
@@ -674,12 +680,20 @@ class StateSpaceModel:
         #         flag = False
 
         # Xbeta: (p, b, T)
+        if self.Xbeta is None:
+            messages.append("Set Xbeta to a default zero array of shape (p, b, T) before checking.")
+            self._Xbeta = jnp.zeros((p, b, T), dtype=self.dtype)
+
         Xbeta_shape = shape_str(self.Xbeta)
         if Xbeta_shape != (p, b, T):
             messages.append(f"Xbeta must be shape ({p},{b},{T}), got {Xbeta_shape}.")
             flag = False
 
         # beta: (b,)
+        if self.beta is None:
+            messages.append("Set beta to a default zero array of shape (b,) before checking.")
+            self._beta = jnp.zeros((b,), dtype=self.dtype)
+
         beta_shape = shape_str(self.beta)
         if beta_shape != (b,):
             messages.append(f"beta must be shape ({b},), got {beta_shape}.")
@@ -937,6 +951,8 @@ class StateSpaceModel:
         Sigma0=None,
         Xbeta=None,
         beta=None,
+        stats=True,
+        verbose=True,
     ) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
@@ -945,6 +961,7 @@ class StateSpaceModel:
         Args:
             key: is a JAX PRNGKey strem object (next methods).
             ... other model parameters.
+            stats: if True, compute and get also the simulation statistics.
 
         Returns:
             y_t : (p, T) JAX array of simulated observations
@@ -993,9 +1010,96 @@ class StateSpaceModel:
             self.Xbeta,
             self.beta,
         )
-
         tdelta = time.time() - tStart
-        return y_t_sim, x_t_sim, tdelta
+
+        if stats:
+            stats = self.summarize_ssm_variances(x_t_sim, y_t_sim, verbose=verbose)
+        else:
+            stats = None
+
+        return y_t_sim, x_t_sim, stats, tdelta
+
+
+    def summarize_ssm_variances(self, x_sim, y_sim, decimals=4, verbose=True) -> dict:
+        """
+        Compute and print a compact summary of theoretical vs empirical variances
+        for the LR-SSM. Returns a dict with numeric results.
+        """
+        import numpy as np
+        from scipy.linalg import solve_discrete_lyapunov
+
+        # Basic checks
+        for attr in ("F", "Q", "H", "R"):
+            if not hasattr(self, attr):
+                raise AttributeError(f"model is missing '{attr}' attribute")
+        F, Q, H, R = self.F, self.Q, self.H, self.R
+
+        # Solve Lyapunov: P = F P F^T + Q
+        P = solve_discrete_lyapunov(F, Q)
+
+        # Theoretical latent variance (average spatial variance contributed by state)
+        var_latent = float(np.trace(H @ P @ H.T) / H.shape[0])
+
+        # Empirical latent variance:
+        # H @ x_sim -> (n_locations, n_time) ; compute variance across locations per time, then average
+        latent_effect = H @ x_sim
+        var_latent_empirical = float(np.var(latent_effect, axis=0).mean())
+
+        # Observation noise variance (average over observation dims)
+        var_noise = float(np.trace(R) / R.shape[0])
+
+        # Response variance (theoretical) and empirical
+        var_y_theoretical = var_latent + var_noise
+        var_y_empirical = float(np.var(y_sim, axis=0).mean())
+
+        # Ratios and SNRs
+        ratios = {
+            "empirical_over_theoretical_latent": var_latent_empirical / var_latent if var_latent != 0 else np.nan,
+            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else np.nan,
+        }
+        snrs = {
+            "SNR_latent_vs_noise": var_latent / var_noise if var_noise != 0 else np.nan,
+            "frac_noise_over_y": var_noise / var_y_theoretical if var_y_theoretical != 0 else np.nan,
+            "frac_latent_over_y": var_latent / var_y_theoretical if var_y_theoretical != 0 else np.nan,
+            "empirical_SNR_latent_over_y": var_latent_empirical / var_y_empirical if var_y_empirical != 0 else np.nan,
+        }
+
+        # Nicely formatted printout
+        if verbose:       
+            fmt = f"{{:<40}}{{:>{decimals+8}.{decimals}f}}"
+            print("\nState-space variance summary")
+            print("-" * 60)
+            print(f"{'Matrix shapes:':<40} F={F.shape}, Q={Q.shape}, H={H.shape}, R={R.shape}")
+            print("-" * 60)
+            print(fmt.format("Theoretical latent variance (avg spatial):", var_latent))
+            print(fmt.format("Empirical latent variance (avg over time):", var_latent_empirical))
+            print(fmt.format("Empirical / Theoretical (latent):", ratios["empirical_over_theoretical_latent"]))
+            print()
+            print(fmt.format("Theoretical response variance (var_y = var_latent + var_noise):", var_y_theoretical))
+            print(fmt.format("Empirical response variance (avg over time):", var_y_empirical))
+            print(fmt.format("Empirical / Theoretical (y):", ratios["empirical_over_theoretical_y"]))
+            print()
+            print(fmt.format("Noise variance (avg obs-dim):", var_noise))
+            print(fmt.format("SNR (latent / noise):", snrs["SNR_latent_vs_noise"]))
+            print(fmt.format("frac noise / var_y:", snrs["frac_noise_over_y"]))
+            print(fmt.format("frac latent / var_y:", snrs["frac_latent_over_y"]))
+            print(fmt.format("Empirical SNR (latent_empirical / emp_var_y):", snrs["empirical_SNR_latent_over_y"]))
+            print("-" * 60)
+        
+
+        # Return numeric results for downstream use
+        stats = {
+            "var_latent_theoretical": var_latent,
+            "var_latent_empirical": var_latent_empirical,
+            "var_noise": var_noise,
+            "var_y_theoretical": var_y_theoretical,
+            "var_y_empirical": var_y_empirical,
+            "ratios": ratios,
+            "snrs": snrs,
+            "P": P,
+        }
+        
+        return stats
 
     # propoerty
     @property
