@@ -430,18 +430,22 @@ class LRStateSpaceModel(StateSpaceModel):
             0,
         )  # ARMA order (p, d, q) - not used in this model but kept for compatibility
 
+        self._log(f"Initializing {self.model_name}...")
+        self._log(f"Model type: {self.type}")
+        self._log(f"Model order: {self.order}")
+
         if formulas is not None:
 
             # Compute the design matrices
-            if verbose:
-                self.print_info("Building observation grid...")
+            self._log("Building observation grid...")
 
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
                 self._buildObservationGrid(df, formulas, verbose=verbose)
             )
 
-            if verbose:
-                self.print_info("Building design matrix...")
+            self._log("Building observation grid... Done.")
+
+            self._log("Building the design matrix...")
 
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
@@ -451,21 +455,23 @@ class LRStateSpaceModel(StateSpaceModel):
             self.y_name = [g.y_name for g in self.gridList]
             xbeta_names = [g.x_names for g in self.gridList]
 
+            self._log("Building the design matrix... Done.")
+
         else:
-            self.print_info("Formulas not provided. The model will be initialized without them")
+            self._log("Formulas not provided. The model will be initialized without them")
             Xbeta = None
             xbeta_names = None
 
 
-         # Check the domain
-        if verbose:
-            self.print_info("Checking the domain...")
+        # Check the domain
+        self._log("Checking the domain...")
 
         flag, msg = self._checkDomain(domain)
         if flag:
             raise ValueError(msg)
         else:
             self._domain = self._setDomain(domain)
+            self._log(f"{len(self._domain)} valid domains found and set.")
 
         self._cov_matern = None
 
@@ -477,16 +483,18 @@ class LRStateSpaceModel(StateSpaceModel):
     def domain(self):
         return self._domain
 
-    def setup(self, mesh_obj: list = None, cov_fun: list = None, domain: list = None):
+    def setup(self, mesh_obj: list = None, cov_fun: list = None, domain_latent: list = None):
 
         # this domain is the domain on which the mesh is defined, and where the
         # covariance function has a meaning
-        if domain is not None:
-            flag, msg = self._checkDomain(domain)
+        if domain_latent is not None:
+            self._log("Checking the domain...")
+            flag, msg = self._checkDomain(domain_latent)
             if flag:
                 raise ValueError(msg)
         else:
-            domain = self._domain
+            domain_latent = self._domain
+            self._log(f"{len(self._domain)} valid domains found and set.")
 
         # mehs_obj = list of the latent domain
         self._cov_matern = []
@@ -495,31 +503,35 @@ class LRStateSpaceModel(StateSpaceModel):
         if mesh_obj is None and cov_fun is None:
             raise ValueError("Or mesh_obj or cov_fun must be provided")
 
-        # If mesh_obj is provided, we create the covariance model of the matern for each domain,
-        # and we store it in the list _cov_matern
         if mesh_obj is not None:
-
-            if len(mesh_obj) != len(domain):
+            # If mesh_obj is provided, we create the covariance model of the matern for each domain,
+            # and we store it in the list _cov_matern
+            self._log(f"Checking {len(mesh_obj)} mesh objects...")
+            
+            if len(mesh_obj) != len(domain_latent):
                 raise ValueError(
-                    f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain)})"
+                    f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain_latent)})"
                 )
 
-            for meshi, domi in zip(mesh_obj, domain):
+            for i, (meshi, domi) in enumerate(zip(mesh_obj, domain_latent)):
 
+                self._log(f"Create the GMRF {i} object, with ({meshi.n_points},{meshi.n_triangles})")
                 # create the covariance model of the matern
                 temp = spdeAppoxCov([domi], latlon=False, nu=1.0, var=1.0, rescale=1.0)
                 self._cov_matern.append(temp.setup(meshi))
 
-        # If cov_fun is provided, we check that it is a list of covariance functions of the same length
-        # as the number of domains, and we store it in the list _cov_matern
-        if cov_fun is not None:
+        elif cov_fun is not None:
+            # If cov_fun is provided, we check that it is a list of covariance functions of the same length
+            # as the number of domains, and we store it in the list _cov_matern
+            self._log(f"Checking {len(cov_fun)} covariance functions...")
 
-            if len(cov_fun) != len(domain):
+            if len(cov_fun) != len(domain_latent):
                 raise ValueError(
-                    f"Number of covariance functions ({len(cov_fun)}) must match number of domains ({len(domain)})"
+                    f"Number of covariance functions ({len(cov_fun)}) must match number of domains ({len(domain_latent)})"
                 )
 
-            for covi, domi in zip(cov_fun, domain):
+            for i, (covi, domi) in enumerate(zip(cov_fun, domain_latent)):
+                self._log(f"Checking the {i}th covariance function...")
 
                 # check if the covariance function is an instance of spdeAppoxCov
                 if not isinstance(covi, spdeAppoxCov):
@@ -528,57 +540,43 @@ class LRStateSpaceModel(StateSpaceModel):
                     )
 
                 self._cov_matern.append(covi)
+        
+        else:
+            raise ValueError("Invalid input: either mesh_obj or cov_fun must be provided")
 
+        # set the number of latent factors (i.e. the number of covariance functions)
         self.nlat = len(self._cov_matern)
 
         return self
 
-    def sim(self, formulas, seed=1234, params: ModelParams = None, verbose=None, stats=False):
-
-        if verbose is None:
-            verbose = self.verbose
-
-        if verbose:
-            self.print_info("Simulating the model...")
-
-        # Compute the design matrices
-        if verbose:
-            self.print_info("Building observation grid...")
-
+    def sim(self, formulas: str, seed=1234, params: ModelParams = None, verbose=None, stats=False):
+        
+        if formulas is None:
+            raise ValueError("Formulas must be provided for simulation")
+        
+        self._log("Building observation grid...")
         self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
             self._buildObservationGrid(self.df, formulas, verbose=verbose)
         )
+        self._log("Building observation grid... Done.")
 
-        if verbose:
-            self.print_info("Get the design matrix...")
 
         # self.train will be used later for estimation and for the results
         # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        self._log("Building the design matrix...")
         self.y_train, Xbeta = self._buildDesignMatrix()
 
         # get response name
         self.y_name = [g.y_name for g in self.gridList]
-        xbeta_names = [g.x_names for g in self.gridList]
+        self.xbeta_names = [g.x_names for g in self.gridList]
 
-        # Check the domain
-        if verbose:
-            self.print_info("Checking the domain...")
-
-        flag, msg = self._checkDomain(self.domain)
-        if flag:
-            raise ValueError(msg)
-        
-        if verbose:
-            self.print_info("Domain is valid.")
-        
+        self._log("Building the design matrix... Done.")
         # check if the covariance function is defined
         if self._cov_matern is None or len(self._cov_matern) == 0:
             raise ValueError("Covariance function is not defined. Please run the setup method first.")
         
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
-        if verbose:
-            msg = "Parsing the parameters (ModelParams|None)..."
-            self.print_info(msg)
+        self._log("Parsing the parameters (ModelParams|None)...")
         
         params = self._parseParams(params)
         A = params.A.value
@@ -598,6 +596,8 @@ class LRStateSpaceModel(StateSpaceModel):
             for cov, ksi in zip(self.cov_function, ks):
                 cov.rescale = ksi
         
+        self._log("Parsing the parameters (ModelParams|None)... Done.")
+        
         # Get the dimensions of the model
         pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
         qdim = jnp.array(
@@ -605,20 +605,20 @@ class LRStateSpaceModel(StateSpaceModel):
             dtype=jnp.int32,
         )
 
-        # Get global constants
-        points = self.points
-
-        if verbose:
-            self.print_info("Computing the SSM H, R, F and Q matrices...")
+        self._log("Computing the SSM H, R, F and Q matrices...")
 
         # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(points, self.cov_function)
+        basis = self._buildBasis_list(self.points, self.cov_function)
         
         # ---- build parametrised matrices
         H = self._buildH_dense(A, basis)  # dense
+        self._log("Computing the H {} matrix... Done.".format(H.shape))
 
         # R, F = buildRF(est_s2e, est_f, pdim, qdim)
         R, F = self._buildRF_dense(s2e, f, pdim, qdim)
+        self._log("Computing the R {} matrix... Done.".format(R.shape))
+        self._log("Computing the F {} matrix... Done.".format(F.shape))
+
 
         # Compute the maginal precision matrix
         invQ = []
@@ -643,17 +643,16 @@ class LRStateSpaceModel(StateSpaceModel):
                 for mt in invQ
             ]
         )
+        self._log("Computing the Q {} matrix... Done.".format(Q.shape))
 
-        if verbose:
-            self.print_info("Start simulating the SSM...")
+        self._log("Start simulating the SSM...")
 
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
         y_sim, x_sim, stats, tdelta = super().sim(
             seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, stats=stats, verbose=verbose
         )
 
-        if verbose:
-            self.print_info("Simulation completed.")
+        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
         return y_sim, x_sim, Xbeta, beta, stats, tdelta
 
@@ -661,17 +660,16 @@ class LRStateSpaceModel(StateSpaceModel):
         self, params0: ModelParams | None = None, options: FitOptions | None = None
     ):
 
-        # get the global options
-        verbose = options.verbose if options is not None else True
-        if verbose:
-            smr = self.summary(print_output="header")
+        # set the global options
+        self.verbose = options.verbose if options is not None else True
+        
+        smr = self.summary(print_output="header")
+        if self.verbose:
             print(smr)
-            msg = "Fitting the model with EM algorithm"
-            self.print_info(msg)
+        self._log("Starting the estimation of the model parameters using EM algorithm...")
 
-        if verbose:
-            msg = "Parsing the estimation options (FitOptions|None)..."
-            self.print_info(msg)
+        
+        self._log("Parsing the fit options (FitOptions|None)...")
 
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
@@ -679,9 +677,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
-        if verbose:
-            msg = "Parsing the initial parameters (ModelParams|None)..."
-            self.print_info(msg)
+        self._log("Parsing the initial parameters (ModelParams|None)...")
         params0 = self._parseParams(params0)
 
         # Get global constants
@@ -706,29 +702,21 @@ class LRStateSpaceModel(StateSpaceModel):
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
 
         # Get the initial values
-        if verbose:
-            msg = "Computing the initial parameter values..."
-            self.print_info(msg)
-
+        self._log("Computing the initial parameter values...")
         est_params = self._getInitialValues(y_obs, Xbeta, block_p, block_q)
 
         # Set the initial values of the parameters (if not provided, they will be set to the estimated initial values)
-        if verbose:
-            msg = "Updating the initial parameter values..."
-            self.print_info(msg)
+        self._log("Updating the initial parameter values...")
         est_params = self._updateParams0(params0, est_params)
 
         # Compute the basis matrix (just one) - no boundary
-        if verbose:
-            msg = "Computing the basis matrix..."
-            self.print_info(msg)
-
+        
+        self._log("Computing the basis matrix...")
         basis = self._buildBasis_list(points, self.cov_function)
         Phi = self._buildH_dense(jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
 
-        if verbose:
-            msg = "Starting the EM iterations..."
-            self.print_info(msg)
+        self._log("Starting the EM iterations...")
+
         # Flag of the EM convergence
         flag = True
         niter = 0
@@ -757,7 +745,7 @@ class LRStateSpaceModel(StateSpaceModel):
             tdelta_Mdet,
         )
 
-        if verbose:
+        if self.verbose:
             msg = self.logger(nstat[-1])
             print(msg)
 
@@ -863,7 +851,7 @@ class LRStateSpaceModel(StateSpaceModel):
             )
 
             # print the results of the iteration
-            if verbose:
+            if self.verbose:
                 msg = self.logger(nstat[-1])
                 print(msg)
 
@@ -871,31 +859,15 @@ class LRStateSpaceModel(StateSpaceModel):
             if niter == max_iter or relat_lik <= tol_relat:
                 flag = False
 
-        results = LRStateSpaceResults(
-            model=self, y_hat=y_hat, params=est_params, nstats=nstat, options=options
-        )
 
-        if verbose:
-            msg = "EM algorithm converged after {} iterations.".format(niter)
-            self.print_info(msg)
+        self._log("EM algorithm converged after {} iterations.".format(niter))
+        self._log("Final log-likelihood: {}.".format(logL_cur))
+        self._log("Create the results object...")
+        
+        results = LRStateSpaceResults(
+            model=self, y_hat=y_hat, params=est_params, nstats=nstat, options=options)
 
         return results
-
-        # return self.formulas, est_params, Xbeta, y_obs, points, y_hat, x_T, P_T, self.cov_function, nstat
-        # # create the results object
-        # results = LRStateSpaceResults(
-        #     formulas=self.formulas,
-        #     params=est_params,
-        #     Xbeta=Xbeta,
-        #     y_obs=y_obs,
-        #     points=points,
-        #     y_hat=y_hat,
-        #     x_smoothed=x_T,
-        #     P_smoothed=P_T,
-        #     cov_function=self.cov_function,
-        #     nstat=nstat)
-
-        # return results
 
     @property
     def cov_function(self):
@@ -953,7 +925,7 @@ class LRStateSpaceModel(StateSpaceModel):
         b = Xbeta.shape[1]
         nvar = len(block_p) - 1
         nlat = len(block_q) - 1
-        ndim = block_p[1:] - block_p[:-1]  # observed dimensions
+        # ndim = block_p[1:] - block_p[:-1]  # observed dimensions
         ldim = block_q[1:] - block_q[:-1]  # latent dimensions
 
         # Update f (Eq 3a)
@@ -1057,7 +1029,6 @@ class LRStateSpaceModel(StateSpaceModel):
         return update_params, opt.success, tdelta
 
     # %[Utils] Argmin problem, JAX  (M-step, rescale)
-
     def _minf(self, params, est_covList, T, Omega):
         ks = np.exp(params)  # Stability, add small eps to avoid zeros
 
@@ -1305,7 +1276,6 @@ class LRStateSpaceModel(StateSpaceModel):
         return normalized
 
     # fix H row functions
-
     def _setDomain(self, polygon):
         if polygon is None:
             polygon = [ConvexHull(pts) for pts in self.points]
@@ -1320,10 +1290,12 @@ class LRStateSpaceModel(StateSpaceModel):
         if domain is not None:
             if not isinstance(domain, (list, tuple)):
                 raise TypeError("domain must be a list of Polygon objects")
-            for poly in domain:
+            for i, poly in enumerate(domain):
                 if not isinstance(poly, Polygon):
                     flag = True
                     msg = f"Each domain element must be a shapely Polygon, got {type(poly).__name__}"
+                else:
+                    self._log("Domain {}: area = {}, bounds = {}".format(i, poly.area, poly.bounds))
 
         return flag, msg
 
@@ -1460,13 +1432,8 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         self.model = SimpleNamespace()
         # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
 
-        len_sep = 89
-
         # top-left / top-right small tables
         p, q, T = self.shape if hasattr(self, "shape") else (None, None, None)
-
-        # Generate the summary
-        smry = Summary()
 
         # Headser
         top_left = dict(
@@ -1544,77 +1511,35 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             gen_top_right.append((item, top_right[item]()))
 
         # Add the header to the summary
+        
+        smry = Summary()
         smry.add_table_2cols(
             self,
             title="State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,
-            yname=None,
-            xname=None,
+            yname= self.yname if self.yname is not None else "None",
+            xname= self.xbeta_names if self.xbeta_names is not None else "None",
         )
 
-        if print_output == "header":
-            return smry
-
+        
         # todo: add the grid / fomula details (e.g., number of points, dimensions, etc.)
-        string_grid = []
-        string_grid.append("Observation Grid Details:")
-        string_grid.append("=" * len_sep)  # separator between grids
+        len_sep = 89
+        
+        if hasattr(self, "gridList") and self.gridList is not None:
+            grid_details = [grid.summary().as_text() for grid in self.gridList]  # get the grid details as a dictionary
 
-        for i, grid in enumerate(self.gridList):
-            grid_details = dict(
-                [
-                    ("Grid type:", lambda: ["Sparse"]),
-                    (
-                        "Response y:",
-                        lambda: f"{grid.y_name}({grid.y.shape})",
-                    ),
-                    ("Formula:", lambda: f"{grid.formula}"),
-                    ("Design X:", lambda: f"{grid.X.shape}"),
-                    ("Points:", lambda: f"{grid.points.shape}"),
-                    ("Geometry:", lambda: f"{grid.geometry}"),
-                    ("Time steps:", lambda: f"{grid.T}"),
-                    ("CRS", lambda: f"{grid.crs}"),
-                ]
-            )
 
-            # Generate the dictionaly
-            temp = []
-            for item in grid_details.keys():
-                temp.append((item, grid_details[item]()))
-
-            string_grid.append(self.format_info_table(temp, indent=0))
-
-            if i == len(self.gridList) - 1:
-                continue
-            else:
-                string_grid.append("-" * len_sep)  # separator between grids
-
-        string_grid.append("\nCovariance Function Details:")
-        string_grid.append("=" * len_sep)  # separator between covariance functions
+        if hasattr(self, "_cov_matern") and self._cov_matern is not None:
+            cov_details = [cov.summary().as_text() for cov in self._cov_matern]  # get the grid details as a dictionary
+        
 
         if self._cov_matern is None or len(self._cov_matern) == 0:
             string_grid.append("No covariance functions defined.")
         else:
             # Covariance function details (one table per latent domain)
             for i, cov in enumerate(self._cov_matern):
-                cov_details = dict(
-                    [
-                        ("Cov. type:", lambda: [cov.__class__.__name__]),
-                        ("Rescale (range):", lambda: f"{cov.rescale:.2f}"),
-                        ("Variance:", lambda: f"{cov.var:.2f}"),
-                        ("Nu:", lambda: f"{cov.nu:.2f}"),
-                        ("Latent dim.:", lambda: f"{cov.fem_solver.n_inner_points}"),
-                        ("Mesh box:", lambda: f"{cov.fem_solver.box}"),
-                        (
-                            "Mesh vertex",
-                            lambda: f"{cov.fem_solver.nvertex}, inner: {cov.fem_solver.n_inner_points}",
-                        ),
-                        ("Mesh triangles:", lambda: f"{cov.fem_solver.nelements}"),
-                        ("Mesh lines:", lambda: f"{cov.fem_solver.nbElements}"),
-                    ]
-                )
-
+                
                 # Generate the dictionaly
                 temp = []
                 for item in cov_details.keys():
@@ -1669,6 +1594,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             lines.append(f"{pad}{key:<{max_key_len+1}} {value}")
 
         return "\n".join(lines)
+ 
+    def _is_verbose(self, verbose=None) -> bool:
+        return self.verbose if verbose is None else verbose
+
+    def _log(self, msg: str, verbose=None) -> None:
+        if self._is_verbose(verbose):
+            self.print_info(msg)
 
     def print_info(self, msg):
 
