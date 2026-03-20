@@ -136,15 +136,18 @@ class DesignMatrices:
     def summary(self) -> Summary:
         y_np = np.asarray(self.y) if self.y is not None else None
 
+        def get_print_string(str):
+            return str if len(str) <= 20 else str[:25] + "..."
+        
         top_left = [
-            ("Formula",        [self.formula]),
+            ("Formula",        [get_print_string(self.formula)]),
             ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name] if self.y is not None else ["N/A"]),
             ("Covariates (X)", [", ".join(self.x_names)]),
             ("[min, max, mean]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),  
             ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
             ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
-            ("Transformed (y)",       [", ".join(self.y_expr) if self.y_expr else "No"] if self.y is not None else ["N/A"]),
-            ("Transformed (X)",       [", ".join(self.x_exprs) if self.x_exprs else "No"]),
+            ("Transformed (y)",       [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
+            ("Transformed (X)",       [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
             ("dtype",          [str(self.dtype)]),
             ("Backend",        [self.backend]),
         ]
@@ -157,7 +160,7 @@ class DesignMatrices:
             ("Units",           [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
             ("Geometry type",   [", ".join(self.type)]),
             ("Box",             [f"{self.box}"]),
-            ("Timestamps",      [f"{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}"]),
+            ("Timestamps",      [f'{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}']),
             ("Delta, Unit",       [f"{self.delta}, {self.unit}"]),
         ]
 
