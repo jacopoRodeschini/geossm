@@ -1349,11 +1349,12 @@ class StateSpaceModel:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
         self.model.results = np.array([0])
-        # self.params = self.beta
-        # self.param_names = self.xbeta_names
-        self.model.bse = np.zeros(len(self.beta))
-        self.model.tvalues = np.zeros(len(self.beta))
-        self.model.pvalues = np.zeros(len(self.beta))
+        
+        self.params = "prova"
+        self.params_names = "prova"
+        self.model.bse = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.tvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.pvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
 
         # top-left / top-right small tables
         p, q, T = self.shape if hasattr(self, "shape") else (None, None, None)
@@ -1369,7 +1370,7 @@ class StateSpaceModel:
                     "Model order:",
                     lambda: [self.order if hasattr(self, "order") else "None"],
                 ),
-                ("Dep. Variable:", lambda: [self.yname]),
+                ("Dep. Variable:", lambda: [self.yname if self.yname is not None else "None"]),
                 ("Date:", lambda: [self._today]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
                 ("JAX devices:", lambda: [f"{jax.devices()}"]),
@@ -1434,24 +1435,8 @@ class StateSpaceModel:
             xname=None,
         )
 
-        if print_output == "short":
-            return smry
-        else:
-            st = "Methods:\n"
-            st += "-" * 60 + "\n"
-            st += ".filter(): A recursive algorithm to estimate the state \n"
-            st += ".smoother(): Aprovides smoothed estimates of the state \n"
-            st += ".estimate(): A method that runs the smoother and computes expected values \n"
-            st += ".sim(): Simulates data from the model given the parameters \n"
-            st += "\n"
-
-            st += "Reference:\n"
-            st += "-" * 60 + "\n"
-            st += "Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.\n"
-
-            smry.add_extra_txt([st])
-
-            return smry
+        
+        return smry
 
     def __str__(self):
         """String representation of the model."""
