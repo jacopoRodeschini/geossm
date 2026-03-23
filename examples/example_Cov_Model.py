@@ -111,4 +111,4 @@ from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
 covf = MaternCov([Polygon(buffer)], latlon=True, nu=1, var=1.0, rescale=1.0)
 covf = covf.setup(mesh_io)
 
-print(covf.summary())
+print(covf.summary()) 
