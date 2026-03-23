@@ -424,10 +424,15 @@ If you use **GEOSSM** in your research, please cite:
 
 ```bibtex
 @article{rodeschini2025multivariate,
-  title={Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data},
-  author={Rodeschini, Jacopo and Tedesco, Lorenzo and Finazzi, Francesco and Otto, Philipp and Fass{\`o}, Alessandro},
-  journal={arXiv preprint arXiv:2509.12825},
-  year={2025}
+title = {Multivariate low-rank state–space model with SPDE approach for high-dimensional data},
+author = {Jacopo Rodeschini and Lorenzo Tedesco and Francesco Finazzi and Philipp Otto and Alessandro Fassò},
+journal = {Spatial Statistics},
+volume = {73},
+pages = {100971},
+year = {2026},
+issn = {2211-6753},
+doi = {https://doi.org/10.1016/j.spasta.2026.100971},
+url = {https://www.sciencedirect.com/science/article/pii/S2211675326000199},
 }
 ```
 
