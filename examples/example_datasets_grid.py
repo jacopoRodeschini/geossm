@@ -3,9 +3,10 @@
 """
 @author: jacopo
 """
+# %% Import libraries
 import numpy as np
 import geopandas as geodf
-from geossm import data_preparation as grid
+from geossm import DesignMatricesBuilder as grid
 import geossm.datasets as df
 from shapely.geometry import Point
 
@@ -30,21 +31,18 @@ Agrimonia = geodf.GeoDataFrame(Agrimonia, crs=4326)
 
 # %% Crate the regression matrix
 
-dataset = grid(Agrimonia, "AQ_pm10 ~ 1 + WE_temp_2m")
-
-# print the dataset class
-print(dataset)
+builder = grid(Agrimonia, "np.sqrt(AQ_pm10) ~ 1 + WE_temp_2m")
 
 # Get the design matrix
-matrix = dataset()
-print(matrix)
+dataset = builder.build()
+print(dataset)
 
 # %% Observation and covariates matrix
 
 # Observation matrix
-y = matrix.y
+y = dataset.y
 # Covariates matrix
-X = matrix.X
+X = dataset.X
 
 # %% Do the linear regression on the average across time
 
