@@ -415,8 +415,8 @@ git push -u origin feature/your-feature
 ```
 
 4. Open a Pull Request into `develop`.
-- After review/approval, merge your PR into develop
-- main will only be updated when a new release is ready
+   - After review/approval, merge your PR into `develop`
+   - `main` will only be updated when a new release is ready
 
 ## License
 
