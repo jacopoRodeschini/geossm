@@ -1022,10 +1022,6 @@ class spdeAppoxCov(Matern):
 
     def generate_summary(self, compute_stats=True):
         
-        if hasattr(self,"fem_solver"):
-            gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary(compute_stats=compute_stats)
-        
-
         top_left = dict(
                     [
                         ("Cov. type:", lambda: [self.__class__.__name__]),
@@ -1051,9 +1047,13 @@ class spdeAppoxCov(Matern):
         for item in top_right.keys():
             gen_top_right.append((item, top_right[item]()))
 
-
-        gen_top_left = gen_top_left + gen_top_left_solver
-        gen_top_right = gen_top_right + gen_top_right_solver
+        
+        if hasattr(self,"fem_solver"):
+            gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary(compute_stats=compute_stats)
+       
+            gen_top_left = gen_top_left + gen_top_left_solver
+            gen_top_right = gen_top_right + gen_top_right_solver
+            
 
         return gen_top_left, gen_top_right
 
