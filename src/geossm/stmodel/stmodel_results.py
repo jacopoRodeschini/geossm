@@ -1,3 +1,4 @@
+from statsmodels.iolib.summary import Summary
 from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import ModelParams, FitOptions
@@ -183,6 +184,51 @@ class LRStateSpaceResults(StateSpaceResults):
         self.bic = np.log(n) * k - 2 * llf
         return self.bic
 
+
+    def generate_summary(self):
+
+        # update the computational time
+        time_e = self.runtime_tot_estep
+        time_m = self.runtime_tot_mstep
+
+        # Generate the parent summary table (with model info)
+        gen_top_left, gen_top_right = super().generate_summary()
+        len_empty = len(gen_top_left)- len(gen_top_right)
+        if len_empty > 0:
+            gen_top_right = gen_top_right + [("", [""])] * len_empty
+        elif len_empty < 0:
+            gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
+        
+
+        # Add the EM iteration statistics table
+        top_left_em = dict(
+            [
+                ("EM iters :", lambda: [f"{self.iterations}"]),
+                ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
+            ]
+        )
+
+        top_right_em = {
+            "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
+            "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
+        }
+
+        # Generate the dictionaly
+        gen_top_left_em = []
+        for item in top_left_em.keys():
+            gen_top_left_em.append((item, list(top_left_em[item]())))
+
+        gen_top_right_em = []
+        for item in top_right_em.keys():
+            gen_top_right_em.append((item, list(top_right_em[item]())))
+
+
+        
+        gen_top_left += gen_top_left_em
+        gen_top_right += gen_top_right_em
+
+
+        return gen_top_left, gen_top_right
     def summary(self):
 
         # self.results = np.array([0])
@@ -192,39 +238,14 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.tvalues = np.zeros(len(self.beta))
         # self.pvalues = np.zeros(len(self.beta))
 
-        # update the computational time
-        time_e = self.runtime_tot_estep
-        time_m = self.runtime_tot_mstep
 
-        smry = super().summary()
-        # Add parameter estimates table
-
-        # Add the EM iteration statistics table
-        top_left = dict(
-            [
-                ("EM iters :", lambda: [f"{self.iterations}"]),
-                ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
-            ]
-        )
-
-        top_right = {
-            "Runtime E-step (s):": lambda: f"{time_e:.3g}",
-            "Runtime M-step (s):": lambda: f"{time_m:.3g}",
-        }
-
-        # Generate the dictionaly
-        gen_top_left = []
-        for item in top_left.keys():
-            gen_top_left.append((item, list(top_left[item]())))
-
-        gen_top_right = []
-        for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
-
+        gen_top_left, gen_top_right = self.generate_summary()
+        
         # Generate the summary
+        smry = Summary()
         smry.add_table_2cols(
             self,
-            title="EM statistics",
+            title="LR State Space Model Results",
             gleft=gen_top_left,
             gright=gen_top_right,
             yname=None,
@@ -288,10 +309,7 @@ class LRStateSpaceResults(StateSpaceResults):
         temp.conf_int = lambda alpha=0.05: conf_int_params(temp.params, temp.bse, alpha)
         smry.add_table_params(temp, xname=temp.params_name, alpha=0.05)
 
-        # Latent variabel
-
-        # Matern
-
+        
         # todo: add the parameters table (state equation parameters)
         temp = (
             SimpleNamespace()

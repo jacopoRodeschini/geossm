@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
 
 
-# %% JAX kernel functions for SSM
+# % JAX kernel functions for SSM
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """
     JIT-compiled kernel for simulating a time series from the state-space model using JAX.
@@ -333,7 +333,7 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     return y_hat, S11, S10, S00
 
 
-# %% State Space Model Class
+# State Space Model Class
 class StateSpaceModel:
     """
     A class representing a State Space Model with Kalman filtering capabilities.
@@ -1345,32 +1345,26 @@ class StateSpaceModel:
         if not hasattr(self, "_beta"):
             self._beta = None
 
-    def summary(self, print_output: str = "full") -> Summary:
-        """Return or print a structured summary of the model."""
-        self.model = SimpleNamespace()
-        self.model.results = np.array([0])
-        
-        self.params = "prova"
-        self.params_names = "prova"
-        self.model.bse = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.tvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.pvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+
+
+    def generate_summary(self):
 
         # top-left / top-right small tables
-        p, q, T = self.shape if hasattr(self, "shape") else (None, None, None)
+        p, q, T = self.shape if hasattr(self, "shape") else ("N/A", "N/A", "N/A")
+
 
         top_left = dict(
             [
                 ("Model name:", lambda: [self.__class__.__name__]),
                 (
                     "Model type:",
-                    lambda: [self.type if hasattr(self, "type") else "None"],
+                    lambda: [self.type if hasattr(self, "type") else "N/A"],
                 ),
                 (
                     "Model order:",
-                    lambda: [self.order if hasattr(self, "order") else "None"],
+                    lambda: [self.order if hasattr(self, "order") else "N/A"],
                 ),
-                ("Dep. Variable:", lambda: [self.yname if self.yname is not None else "None"]),
+                ("Dep. Variable:", lambda: [self.y_name if hasattr(self, "y_name") and self.y_name is not None else "N/A"]),
                 ("Date:", lambda: [self._today]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
                 ("JAX devices:", lambda: [f"{jax.devices()}"]),
@@ -1424,6 +1418,22 @@ class StateSpaceModel:
         for item in top_right.keys():
             gen_top_right.append((item, list(top_right[item]())))
 
+
+        return gen_top_left, gen_top_right
+
+    def summary(self) -> Summary:
+        """Return or print a structured summary of the model."""
+        self.model = SimpleNamespace()
+        self.model.results = np.array([0])
+        
+        self.params = ""
+        self.params_names = ""
+        self.model.bse = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.tvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.pvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+
+        gen_top_left, gen_top_right = self.generate_summary()
+
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
@@ -1434,8 +1444,7 @@ class StateSpaceModel:
             yname=None,
             xname=None,
         )
-
-        
+  
         return smry
 
     def __str__(self):

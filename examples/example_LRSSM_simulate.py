@@ -187,7 +187,7 @@ model = lrssm(
 print(model)
 
 # Set up the model cov. 
-model = model.setup(cov_fun=[cov_fun], domain=[circle])
+model = model.setup(cov_fun=[cov_fun], domain_latent=[circle])
 print(model)
 
 # %% Create the model parameters for the simulation

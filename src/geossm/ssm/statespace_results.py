@@ -352,32 +352,13 @@ class StateSpaceResults:
             "kurtosis": float(kt),
         }
 
-    def summary(self) -> Summary:
-        """Return a statsmodels Summary object with a brief report."""
-        # Ensure numpy arrays for summary stats
 
-        self.results = np.array([0])
-        # self.params = self.beta
-        # self.param_names = self.xbeta_names
-        # self.bse = np.zeros(len(self.beta))
-        # self.tvalues = np.zeros(len(self.beta))
-        # self.pvalues = np.zeros(len(self.beta))
-
-        def conf_int_parmas(alpha=0.05):
-            lower = self.params - 1.96 * self.bse
-            upper = self.params + 1.96 * self.bse
-            return np.column_stack([lower, upper])
-
-        self.conf_int = lambda alpha: conf_int_parmas(alpha)
+    def generate_summary(self):
 
         self.nobs = self.y_obs.size
         self.nspace, self.ntime = self.y_obs.shape
         self.missing = np.sum(np.isnan(self.y_obs))
-        self.yname = "prova"
-
-        # self.df_model = str(100)
-        # self.df_resid = str(100)
-
+        
         # Compute residual diagnostics
         err = getattr(self, "residuals", None)
         if err is None:
@@ -385,10 +366,9 @@ class StateSpaceResults:
 
         stats = self.diagnostics()
 
+
         # top-left / top-right small tables
-        p, q, T = (
-            self.model.shape if hasattr(self.model, "shape") else (None, None, None)
-        )
+        p, q, T = self.model.shape if hasattr(self.model, "shape") else [("N/A", "N/A", "N/A")]
 
         top_left = dict(
             [
@@ -396,16 +376,16 @@ class StateSpaceResults:
                 (
                     "Model type:",
                     lambda: [
-                        self.model.type if hasattr(self.model, "type") else "None"
+                        self.model.type if hasattr(self.model, "type") else "N/A"
                     ],
                 ),
                 (
                     "Model order:",
                     lambda: [
-                        self.model.order if hasattr(self.model, "order") else "None"
+                        self.model.order if hasattr(self.model, "order") else "N/A"
                     ],
                 ),
-                ("Dep. Variable:", lambda: [self.yname]),
+                ("Dep. Variable:", lambda: [self.model.y_name if hasattr(self.model, "y_name") else "N/A"]),
                 ("Date:", lambda: [self.today]),
                 # ('Number of obs:', lambda: [self.nobs]),
                 # ('Number of series:', lambda: [self.nspace]),
@@ -447,6 +427,18 @@ class StateSpaceResults:
         for item in top_right.keys():
             gen_top_right.append((item, list(top_right[item]())))
 
+
+        return gen_top_left, gen_top_right
+
+    def summary(self) -> Summary:
+        """Return a statsmodels Summary object with a brief report."""
+        # Ensure numpy arrays for summary stats
+
+        self.results = np.array([0])
+        
+        gen_top_left, gen_top_right = self.generate_summary()
+
+        
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(

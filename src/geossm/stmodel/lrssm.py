@@ -1452,15 +1452,15 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 ("Model name:", lambda: [self.__class__.__name__]),
                 (
                     "Model type:",
-                    lambda: [self.type if hasattr(self, "type") else "None"],
+                    lambda: [self.type if hasattr(self, "type") else "N/A"],
                 ),
                 (
                     "Model order:",
-                    lambda: [self.order if hasattr(self, "order") else "None"],
+                    lambda: [self.order if hasattr(self, "order") else "N/A"],
                 ),
                 (
                     "Dep. Variables:",
-                    lambda: [self.y_name if hasattr(self, "y_name") else "None"],
+                    lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
                 ),
                 ("Date:", lambda: [self._today]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
@@ -1569,7 +1569,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     righ = righ + [("", [""])] * len_empty
                 elif len_empty < 0:
                     left = left + [("", [""])] * (-len_empty)
-                    
+
                 
                 left = [(f"Latent. {i}", ["-" * 26])] + left
                 righ = [(f"Latent {i}", ["-" * 26])] + righ

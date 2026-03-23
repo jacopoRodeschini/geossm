@@ -79,7 +79,6 @@ plt.show()
 domain = [Polygon(buffer)]
 model = lrssm(agri, ["AQ_pm10 ~ 1 + WE_temp_2m"], verbose=True, domain=domain)
 
-# %% 
 print(model)
 
 # %% [Utils] build mesh with gmsh

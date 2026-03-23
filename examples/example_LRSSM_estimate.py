@@ -37,8 +37,10 @@ buffer = list(domain.buffer(0.3).boundary.geoms)[0]
 # %% Build the model
 
 model = lrssm(
-    agri, ["AQ_pm10 ~ 1 + WE_temp_2m"], verbose=True, domain=[Polygon(buffer)]
+    agri, ["np.sqrt(AQ_pm10) ~ 1 + WE_temp_2m"], verbose=True, domain=[Polygon(buffer)]
 )
+
+
 print(model)
 
 
@@ -120,6 +122,8 @@ model = model.setup([mesh_io])
 # %% Estimate the Model (default estimation options)
 
 results = model.fit()
+
+# %%  
 print(results)  # resutls.summary()
 
 
@@ -137,7 +141,7 @@ plt.show()
 # %% Estimate the model with other options
 
 opt = FitOptions()
-opt.max_iter = 50
+opt.max_iter = 2
 opt.tol_relat = 1e-4
 
 print(opt)
