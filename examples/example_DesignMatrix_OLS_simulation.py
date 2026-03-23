@@ -3,25 +3,13 @@
 """
 @author: jacopo
 """
-
+# %% Import the necessary libraries
 import numpy as np
 import matplotlib.pyplot as plt
-from shapely.geometry import Point, polygon
+from shapely.geometry import Point
 from geossm.data_preparation import DesignMatricesBuilder
-import pygmsh
-import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
-import geossm
-
-# %% Import the Matern model based on the SPDE approach R^2
-
-if geossm.__file__:
-    # import lrssm
-    from geossm.covmodel import spdeAppoxCov as matern_spde
-    from geossm.stmodel import ModelParams
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-
 
 # %% Simulate random point in a convex space
 

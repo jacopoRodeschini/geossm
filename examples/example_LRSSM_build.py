@@ -78,6 +78,8 @@ plt.show()
 
 domain = [Polygon(buffer)]
 model = lrssm(agri, ["AQ_pm10 ~ 1 + WE_temp_2m"], verbose=True, domain=domain)
+
+# %% 
 print(model)
 
 # %% [Utils] build mesh with gmsh
@@ -160,5 +162,5 @@ plt.show()
 
 # add the mesh object and the domain where the laten domain is defined
 # if None it is assumed to be the same of the observation
-model = model.setup([mesh_io], domain=domain)
+model = model.setup(mesh_obj=[mesh_io], domain_latent=domain)
 print(model)

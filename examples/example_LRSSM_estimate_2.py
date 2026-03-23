@@ -14,13 +14,13 @@ import geopandas as gpd
 from datetime import date, timedelta
 import geossm
 
-# %% Import the Matern model based on the SPDE approach R^2
-
 if geossm.__file__:
     # import lrssm
     from geossm.covmodel import spdeAppoxCov as matern_spde
     from geossm.stmodel import ModelParams
     from geossm.stmodel import LRStateSpaceModel as lrssm
+    from geossm.stmodel import FitOptions
+
 
 
 # %% Simulate random point in a convex space (regular grind) and plot them
@@ -30,8 +30,8 @@ domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
 # points = np.random.uniform(0, 1, (200, 2))
 # Create regular grid points
-x = np.linspace(0, 1, 30, endpoint=True)
-y = np.linspace(0, 1, 30, endpoint=True)
+x = np.linspace(0, 1, 15, endpoint=True)
+y = np.linspace(0, 1, 15, endpoint=True)
 points = np.array([[xi, yi] for xi in x for yi in y])
 
 # plot the points and the domain
@@ -103,11 +103,14 @@ print(mesh_io)
 
 
 # %% Create the covariance function
-
+from geossm.covmodel import spdeAppoxCov as matern_spde
+    
 cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
 cov_fun = cov_fun.setup(mesh_io)
 
-# Plot the mesh behind the cov. function
+print(cov_fun.summary(compute_stats=True))
+
+# %% Plot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
 cov_fun.fem_solver.plot_mesh(ax=ax)
 ax.plot(points[:, 0], points[:, 1], "ro", label="Observation Points")
@@ -170,7 +173,7 @@ ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
 plt.show()
 
-# %% build the lrssm and set the covariance function
+# %% Build the lrssm and set the covariance function
 
 model = lrssm(df=gdf, domain=[domain], verbose=True)
 model = model.setup(cov_fun=[cov_fun], domain=[domain])
@@ -182,9 +185,10 @@ model = model.setup(cov_fun=[cov_fun], domain=[domain])
 # print(model)
 
 # %% Create the model parameters for the simulation
-params = ModelParams(beta=[0], A=np.array([[4]]), s2e=[5], ks=[10], f=[0.5])
+params = ModelParams(beta=[3], A=np.array([[3.5]]), s2e=[3], ks=[4], f=[0.8])
 y_sim, x_sim, Xbeta, beta, stats, tdelta = model.sim(["1"], params=params, stats=True, verbose=False)
 
+# print the variance summary
 decimals = 2
 fmt = f"{{:<40}}{{:>{decimals+4}.{decimals}f}}"
 print("\nState-space simulation variance summary")
@@ -205,7 +209,7 @@ print("-" * 60)
 
 # %% Plot one response variable time series and state
 x_sim_temp = model.H @ x_sim
-point_index = 104 # np.random.randint(0, n)  # Index of the point to plot
+point_index = 40 # np.random.randint(0, n)  # Index of the point to plot
 
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.plot(y_sim[point_index, :], marker="o", linestyle="-", color="blue", label="Simulated Response Variable")
@@ -219,18 +223,6 @@ ax.legend()
 plt.show()
 
 # %% Plot the simulated response variable for one point
-point_index = np.random.randint(0, n)  # Index of the point to plot
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[point_index, :], marker="o", linestyle="-", color="blue", label="Simulated Response Variable")
-ax.plot(beta[1]* Xbeta[point_index, 1, :], marker="x", linestyle="--", color="orange", label="Temperature")
-ax.plot(beta[2]* Xbeta[point_index, 2, :], marker="s", linestyle="-.", color="green", label="Humidity")
-ax.set_title(f"Time Series of Simulated Response Variable for Point {point_index}")
-ax.set_xlabel("Time")
-ax.set_ylabel("Simulated Response Variable")
-ax.grid(True, linestyle="--", alpha=0.6)
-ax.legend()
-
-# %% Plot the simulated data for the time = 1, 10, 20
 T = model.T
 pt = np.array(model.points[0])
 
@@ -238,7 +230,7 @@ times = np.arange(0, T, T//9)  # Select 9 time steps evenly spaced across the si
 vmin, vmax = y_sim.min(), y_sim.max()  # or compute over the selected times
 
 fig, ax = plt.subplots(3, 3, figsize=(18, 12), constrained_layout=True)
-for i, t in enumerate(times[1:]):
+for i, t in enumerate(times[:-1]):
     row, col = divmod(i, 3)
     xs = np.unique(pt[:, 0]) 
     ys = np.unique(pt[:, 1])
@@ -247,7 +239,7 @@ for i, t in enumerate(times[1:]):
         grid,
         extent=(xs.min(), xs.max(), ys.min(), ys.max()),
         origin="lower",
-        cmap="viridis",
+        cmap="coolwarm",
         aspect="equal",
         interpolation="nearest",
         vmin=vmin,
@@ -263,47 +255,30 @@ plt.show()
 
 # %% Estimate the model parameters from the simulated data
 
+# 0) Create the geopandas dataframe with the simulated data
+gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
+
 # 1) Create the covariance matrix 
-cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-cov_fun = cov_fun.setup(mesh_io)
+est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+est_cov_fun = est_cov_fun.setup(mesh_io)
 
 # 2) Create the model
 model = lrssm(
     df=gdf, 
-    formulas=["humidity ~ 1 + temperature"], 
+    formulas=["y_sim ~ 1"], 
     domain=[domain], 
     verbose=True)
 
 
 # 3) Set up the model cov. 
-model = model.setup(cov_fun=[cov_fun], domain=[domain])
+model = model.setup(cov_fun=[est_cov_fun], domain=[domain])
 print(model)
 
 # 4) fit the model 
 
 # %% Debug pls 
-results = model.fit()
+opt = FitOptions()
+opt.max_iter = 50
+opt.tol_relat = 1e-5
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- 
+results = model.fit(options=opt)
