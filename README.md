@@ -358,7 +358,7 @@ Contributions are welcome! To contribute:
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/your-feature`)
-3. Commit your changes (`git commit -am 'Add your feature'`)
+3. Commit your changes (`git commit -m 'Add your feature'`)
 4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request
 
@@ -389,7 +389,8 @@ After the work is complete, open a **Pull Request into `develop`**.
 1. Create a branch from `develop`
 
 ```bash
-git switch -c fix/your-bug
+git checkout develop
+git checkout -b feature/your-feature (or fix/your-bug)
 ```
 
 2. Commit your changes
@@ -416,7 +417,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 - Rodeschini, J. (2025). *A State-Space Modelling Framework in Geostatistics with Application to Environmental Data*. PhD Thesis, University of Bergamo.
 
-- Rodeschini, J., Tedesco, L., Finazzi, F., Otto, P., & Fassò, A. (2025). *Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data*. arXiv:2509.12825.
+- Rodeschini, J., Tedesco, L., Finazzi, F., Otto, P., & Fassò, A. (2025). *Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data*. Spatial Statistics.
 
 ## Citation
 
