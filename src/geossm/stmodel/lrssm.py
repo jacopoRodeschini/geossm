@@ -3,6 +3,8 @@ Adapter scaffolding making the project's StateSpaceModel usable with
 statsmodels' MLEModel API.
 """
 
+from scipy.signal.windows import triang
+from _cffi_backend import new_pointer_type
 import numpy as np
 import jax.numpy as jnp
 
@@ -515,7 +517,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
             for i, (meshi, domi) in enumerate(zip(mesh_obj, domain_latent)):
 
-                self._log(f"Create the GMRF {i} object, with ({meshi.n_points},{meshi.n_triangles})")
+                line = len(meshi.cells_dict["line"])
+                vertex = len(meshi.cells_dict["vertex"])
+                triangle = len(meshi.cells_dict["triangle"])
+                
+                self._log(f"Create the GMRF {i} object, with (line: {line},triangle: {triangle},vertex: {vertex})")
                 # create the covariance model of the matern
                 temp = spdeAppoxCov([domi], latlon=False, nu=1.0, var=1.0, rescale=1.0)
                 self._cov_matern.append(temp.setup(meshi))
@@ -1427,13 +1433,18 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         return history
 
+
+    def generate_summary(self, compute_stats=False):
+
+        return 
+
     def summary(self, print_output: str = "full") -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
         # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
 
         # top-left / top-right small tables
-        p, q, T = self.shape if hasattr(self, "shape") else (None, None, None)
+        p, q, T = self.shape if hasattr(self, "shape") else [("N/A", "N/A", "N/A")]
 
         # Headser
         top_left = dict(
@@ -1459,13 +1470,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         top_right = dict(
             [
-                ("Shape (p, q, T) :", lambda: f"(p = {p}, q = {q}, T = {T})"),
+                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
                     lambda: (
                         f"{jnp.mean(jnp.diag(self.R)):2f}"
                         if self.R is not None
-                        else "None"
+                        else ["N/A"]
                     ),
                 ),
                 (
@@ -1473,7 +1484,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     lambda: (
                         f"{jnp.mean(jnp.diag(self.Q)):2f}"
                         if self.Q is not None
-                        else "None"
+                        else ["N/A"]
                     ),
                 ),
                 (
@@ -1481,13 +1492,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     lambda: (
                         f"{jnp.mean(jnp.diag(self.F)):2f}"
                         if self.F is not None
-                        else "None"
+                        else ["N/A"]
                     ),
                 ),
                 (
                     "mean x0",
                     lambda: (
-                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else "None"
+                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else ["N/A"]
                     ),
                 ),
                 (
@@ -1495,7 +1506,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     lambda: (
                         f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
                         if self.Sigma0 is not None
-                        else "None"
+                        else ["N/A"]
                     ),
                 ),
             ]
@@ -1510,8 +1521,70 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         for item in top_right.keys():
             gen_top_right.append((item, top_right[item]()))
 
-        # Add the header to the summary
+        len_empty = len(gen_top_left)- len(gen_top_right) 
+        if len_empty > 0:
+            gen_top_right = gen_top_right + [("", [""])] * len_empty
+        elif len_empty < 0:
+            gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
+            
+        # Get the generate table from the gridlist
+        if hasattr(self,"gridList") and self.gridList is not None:
+
+            gen_top_left_grid = []
+            gen_top_right_grid = []
+            for i, grid in enumerate(self.gridList):
+
+                left, righ = grid.generate_summary()
+                
+                # check the length of the left and right tables and add empty rows if they are different
+                len_empty = len(left) - len(righ)
+                if len_empty > 0:
+                    righ = righ + [("", [""])] * len_empty
+                elif len_empty < 0:
+                    left = left + [("", [""])] * (-len_empty)
+                
+                left = [(f"Grid {i}", ["-" * 30])] + left
+                righ = [(f"Grid {i}", ["-" * 30])] + righ
+                
+
+                
+                gen_top_left_grid = gen_top_left_grid + left
+                gen_top_right_grid = gen_top_right_grid + righ
+
+            gen_top_left = gen_top_left + gen_top_left_grid
+            gen_top_right = gen_top_right + gen_top_right_grid
+
         
+        # Get the generate table from the covariance
+        if hasattr(self,"_cov_matern") and self._cov_matern is not None:
+
+            gen_top_left_cov = []
+            gen_top_right_cov = []
+            for cov in self._cov_matern:
+                left, righ = cov.generate_summary(compute_stats=True)
+
+                # check the length of the left and right tables and add empty rows if they are different
+                len_empty = len(left) - len(righ)
+                if len_empty > 0:
+                    righ = righ + [("", [""])] * len_empty
+                elif len_empty < 0:
+                    left = left + [("", [""])] * (-len_empty)
+                    
+                
+                left = [(f"Latent. {i}", ["-" * 26])] + left
+                righ = [(f"Latent {i}", ["-" * 26])] + righ
+
+                
+                gen_top_left_cov = gen_top_left_cov + left
+                gen_top_right_cov = gen_top_right_cov + righ
+
+            gen_top_left = gen_top_left + gen_top_left_cov
+            gen_top_right = gen_top_right + gen_top_right_cov
+           
+        # Update the summary with the generated tables
+
+
+        # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(
             self,
@@ -1521,44 +1594,6 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             yname= self.yname if self.yname is not None else "None",
             xname= self.xbeta_names if self.xbeta_names is not None else "None",
         )
-
-        
-        # todo: add the grid / fomula details (e.g., number of points, dimensions, etc.)
-        len_sep = 89
-        
-        if hasattr(self, "gridList") and self.gridList is not None:
-            grid_details = [grid.summary().as_text() for grid in self.gridList]  # get the grid details as a dictionary
-
-
-        if hasattr(self, "_cov_matern") and self._cov_matern is not None:
-            cov_details = [cov.summary().as_text() for cov in self._cov_matern]  # get the grid details as a dictionary
-        
-
-        if self._cov_matern is None or len(self._cov_matern) == 0:
-            string_grid.append("No covariance functions defined.")
-        else:
-            # Covariance function details (one table per latent domain)
-            for i, cov in enumerate(self._cov_matern):
-                
-                # Generate the dictionaly
-                temp = []
-                for item in cov_details.keys():
-                    temp.append((item, cov_details[item]()))
-
-                string_grid.append(self.format_info_table(temp, indent=0))
-
-                if i == len(self._cov_matern) - 1:
-                    continue
-                else:
-                    string_grid.append("-" * len_sep)  # separator between grids
-
-        st = "\nReference:\n"
-        st += "=" * len_sep + "\n"
-        st += 'Rodeschini, Jacopo, Lorenzo Tedesco, Francesco Finazzi, Philipp Otto, and Alessandro Fassò. "Multivariate Low-Rank State-Space Model with SPDE Approach for High-Dimensional Data." arXiv preprint arXiv:2509.12825 (2025).\n'
-
-        string_grid.append(st)
-
-        smry.add_extra_txt(string_grid)
 
         return smry
 

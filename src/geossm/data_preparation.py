@@ -133,37 +133,50 @@ class DesignMatrices:
         """Shape of the design matrices as a tuple (N, P, T)."""
         return (self.N, self.b, self.T)
 
-    def summary(self) -> Summary:
+    def generate_summary(self,):
         y_np = np.asarray(self.y) if self.y is not None else None
 
         def get_print_string(str):
             return str if len(str) <= 20 else str[:25] + "..."
         
-        top_left = [
-            ("Formula",        [get_print_string(self.formula)]),
-            ("Response (y)",   [self.y_design_info.column_names[0] if self.y_design_info else self.y_name] if self.y is not None else ["N/A"]),
-            ("Covariates (X)", [", ".join(self.x_names)]),
-            ("[min, max, mean]", [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),  
-            ("Observed",         [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
-            ("Missing",          [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
-            ("Transformed (y)",       [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
-            ("Transformed (X)",       [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
-            ("dtype",          [str(self.dtype)]),
-            ("Backend",        [self.backend]),
-        ]
+        top_left = dict([
+            ("Formula",        lambda: [get_print_string(self.formula)]),
+            ("Response (y)",   lambda: [self.y_design_info.column_names[0] if self.y_design_info else self.y_name] if self.y is not None else ["N/A"]),
+            ("Covariates (X)", lambda: [", ".join(self.x_names)]),
+            ("[min, max, mean]", lambda: [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),  
+            ("Observed",         lambda: [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
+            ("Missing",          lambda: [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
+            ("Transformed (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
+            ("Transformed (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
+            ("dtype",          lambda: [str(self.dtype)]),
+            ("Backend",        lambda: [self.backend]),
+        ])
 
-        top_right = [
-            ("Sites    [N]",     [str(self.N)]),
-            ("Covariates [b]",   [str(self.b)]),
-            ("Timesteps  [T]",   [str(self.T)]),
-            ("CRS",             [str(self.crs)]),
-            ("Units",           [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
-            ("Geometry type",   [", ".join(self.type)]),
-            ("Box",             [f"{self.box}"]),
-            ("Timestamps",      [f'{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}']),
-            ("Delta, Unit",       [f"{self.delta}, {self.unit}"]),
-        ]
+        top_right = dict([
+            ("Sites    [N]",     lambda: [str(self.N)]),
+            ("Covariates [b]",   lambda: [str(self.b)]),
+            ("Timesteps  [T]",   lambda: [str(self.T)]),
+            ("CRS",             lambda: [str(self.crs)]),
+            ("Units",           lambda: [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
+            ("Geometry type",   lambda: [", ".join(self.type)]),
+            ("Box",             lambda: [f"{self.box}"]),
+            ("Timestamps",      lambda: [f'{pd.Timestamp(self.timestamps.min()).strftime("%Y-%m-%d")} to {pd.Timestamp(self.timestamps.max()).strftime("%Y-%m-%d")}']),
+            ("Delta, Unit",       lambda: [f"{self.delta}, {self.unit}"]),
+        ])
 
+        # Generate the dictionaly
+        gen_top_left = []
+        for item in top_left.keys():
+            gen_top_left.append((item, list(top_left[item]())))
+
+        gen_top_right = []
+        for item in top_right.keys():
+            gen_top_right.append((item, top_right[item]()))
+
+        return gen_top_left, gen_top_right
+
+    def summary(self) -> Summary:
+        
         smry = Summary()
 
         self.model = None
@@ -172,11 +185,14 @@ class DesignMatrices:
         self.bse = np.zeros(len(self.params))
         self.tvalues = np.zeros(len(self.params))
         self.pvalues = np.zeros(len(self.params))
+
+        gen_top_left, gen_top_right = self.generate_summary()
+        
         smry.add_table_2cols(
             self,
             title="Design Matrices Summary",
-            gleft=top_left,
-            gright=top_right,
+            gleft=gen_top_left,
+            gright=gen_top_right,
             yname=None,
             xname=None,
         )

@@ -1019,9 +1019,9 @@ class spdeAppoxCov(Matern):
     def domain(self):
         return self._domain
 
-    
-    def summary(self, compute_stats=True):
 
+    def generate_summary(self, compute_stats=True):
+        
         if hasattr(self,"fem_solver"):
             gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary(compute_stats=compute_stats)
         
@@ -1055,6 +1055,13 @@ class spdeAppoxCov(Matern):
         gen_top_left = gen_top_left + gen_top_left_solver
         gen_top_right = gen_top_right + gen_top_right_solver
 
+        return gen_top_left, gen_top_right
+
+    def summary(self, compute_stats=True):
+
+        gen_top_left, gen_top_right = self.generate_summary(compute_stats=compute_stats)
+
+        
         # Add the header to the summary
         
         smry = Summary()
@@ -1068,7 +1075,6 @@ class spdeAppoxCov(Matern):
         )
   
         return smry
-
 
 
     def __getstate__(self):
