@@ -386,28 +386,37 @@ After the work is complete, open a **Pull Request into `develop`**.
 
 **Typical Workflow**
 
-1. Create a branch from `develop`
+1. **Update your local branches**
 
 ```bash
-git checkout develop
-git checkout -b feature/your-feature (or fix/your-bug)
+git switch main
+git pull origin main
+git switch develop
+git pull origin develop
+```
+
+2. Create a branch from `develop`
+
+```bash
+git switch -c feature/your-feature (or fix/your-bug)
 ```
 
 2. Commit your changes
 
 ```bash
+git add .
 git commit -m "Describe your change"
 ```
 
 3. Push the branch
 
 ```bash
-git push origin feature/your-feature
+git push -u origin feature/your-feature
 ```
 
 4. Open a Pull Request into `develop`.
-
-5. When a new version is ready, `develop` is merged into `main` and a tag is created.
+- After review/approval, merge your PR into develop
+- main will only be updated when a new release is ready
 
 ## License
 
