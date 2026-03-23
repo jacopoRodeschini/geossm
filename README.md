@@ -401,20 +401,20 @@ git pull origin develop
 git switch -c feature/your-feature (or fix/your-bug)
 ```
 
-2. Commit your changes
+3. Commit your changes
 
 ```bash
 git add .
 git commit -m "Describe your change"
 ```
 
-3. Push the branch
+4. Push the branch
 
 ```bash
 git push -u origin feature/your-feature
 ```
 
-4. Open a Pull Request into `develop`.
+5. Open a Pull Request into `develop`.
    - After review/approval, merge your PR into `develop`
    - `main` will only be updated when a new release is ready
 
