@@ -1,12 +1,9 @@
 <p align="center">
-  <picture>
-    <!-- Dark mode -->
-    <source src="docs/images/logo-white.svg" media="(prefers-color-scheme: dark)">
-    <!-- Light mode -->
-    <source src="docs/images/logo-dark.svg" media="(prefers-color-scheme: light)">
-    <!-- Fallback -->
-    <img src="docs/images/logo-white.svg" alt="GEOSSM Logo" width="320">
-  </picture>
+  <!-- Dark mode -->
+  <img src="docs/images/logo-white.svg#gh-dark-mode-only" width="320">
+
+  <!-- Light mode -->
+  <img src="docs/images/logo-dark.svg#gh-light-mode-only" width="320">
 </p>
 
 # Geossm 🌍
