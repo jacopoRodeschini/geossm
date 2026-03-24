@@ -357,7 +357,7 @@ help(geossm.ssm.StateSpaceModel)
 Contributions are welcome! To contribute:
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
+2. Create a feature branch (`git switch -c feature/your-feature`)
 3. Commit your changes (`git commit -m 'Add your feature'`)
 4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request
@@ -398,25 +398,27 @@ git pull origin develop
 2. Create a branch from `develop`
 
 ```bash
-git switch -c feature/your-feature (or fix/your-bug)
+git switch -c feature/your-feature
 ```
 
-2. Commit your changes
+> Use `fix/your-bug` as the branch name prefix for bug fixes.
+
+3. Commit your changes
 
 ```bash
 git add .
 git commit -m "Describe your change"
 ```
 
-3. Push the branch
+4. Push the branch
 
 ```bash
 git push -u origin feature/your-feature
 ```
 
-4. Open a Pull Request into `develop`.
-- After review/approval, merge your PR into develop
-- main will only be updated when a new release is ready
+5. Open a Pull Request into `develop`.
+   - After review/approval, merge your PR into `develop`
+   - `main` will only be updated when a new release is ready
 
 ## License
 
