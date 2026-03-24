@@ -7,6 +7,7 @@ Thank you for contributing to geossm. This document explains how to report issue
 - Target branch for PRs: `develop` (unless maintainers specify otherwise).
 - Follow the PR checklist below before opening a PR.
 
+
 ## Reporting issues
 - Search existing issues at: https://github.com/jacopoRodeschini/geossm/issues
 - Open a new issue with:
@@ -15,25 +16,78 @@ Thank you for contributing to geossm. This document explains how to report issue
   - Steps to reproduce and minimal repro (code or data) if possible
   - Environment (OS, Python version, package versions)
 
-## Submitting code & open a Pull Request
-1. Fork and clone:
-    ```bash
-    git clone https://github.com/jacopoRodeschini/geossm.git
-    cd geossm
-    ```
-2. Create a branch (use `git switch`):
-    ```bash
-    git switch -c feature/short-description
-    ```
-3. Make changes, add tests and documentation.
-4. Commit with clear messages and atomic changes:
-    - Subject line: short imperative summary (e.g. `Add resampling utility`)
-    - Optionally include body explaining rationale and any breaking changes
-5. Push and open a PR against `develop`.
 
-### Branch / commit conventions
+## Branching Strategy
+
+This repository follows a simple branching strategy.
+
+**Main Branches**
+
+| Branch | Purpose |
+|------|------|
+| `main` | Stable production code. Only tested and released versions live here. |
+| `develop` | Active development branch where new work is integrated. |
+
+**Working Branches**
+
+| Branch Pattern | Purpose | Example |
+|------|------|------|
+| `feature/*` | New features or improvements | `feature/add-smoothing` |
+| `fix/*` | Bug fixes | `fix/memory-leak` |
+
+After the work is complete, open a **Pull Request into `develop`**.
+
+## Submitting code & open a Pull Request
+
+1. Clone the repo or update your local branches
+
+Fork and clone the repository:
+```bash
+git clone https://github.com/jacopoRodeschini/geossm.git
+cd geossm
+```
+
+or update the local branches
+```bash
+git switch main
+git pull origin main
+git switch develop
+git pull origin develop
+```
+
+2. Create a branch from `develop` (use `git switch -c <branch-name>`)
+
+```bash
+git switch -c feature/your-feature
+```
+
+> Use `fix/your-bug` as the branch name prefix for bug fixes.
+> Use `feature/feature-reference` as the branch name prefix for new features.
+
 - Branch names: `feature/`, `fix/`, `chore/`, `docs/`, `data/`
-- Keep commits focused and testable. Squash/rebase if requested by reviewers.
+
+3. Commit your changes
+
+```bash
+git add .
+git commit -m "Describe your change"
+```
+
+Commit with clear messages and atomic changes:
+- Subject line: short imperative summary (e.g. `Add resampling utility`)
+- Optionally include body explaining rationale and any breaking changes
+
+
+4. Push the branch
+
+```bash
+git push -u origin feature/your-feature
+```
+
+5. Open a Pull Request into `develop`.
+   - After review/approval, merge your PR into `develop`
+   - `main` will only be updated when a new release is ready
+
 
 ## Local development & tests
 Recommended Python workflow (adjust if you use conda/poetry):
