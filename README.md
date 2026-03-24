@@ -5,7 +5,7 @@
     <!-- Light mode -->
     <source src="docs/images/logo-white.svg" media="(prefers-color-scheme: light)">
     <!-- Fallback -->
-    <img src="docs/images/logo-white.svg" alt="GEOSSM Logo" width="320">
+    <img src="docs/images/logo-dark.svg" alt="GEOSSM Logo" width="320">
   </picture>
 </p>
 
