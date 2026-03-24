@@ -100,7 +100,7 @@ The `*` symbol indicates dataset more than 10MB.
 - **Multiple Model Types**: Support for linear time-invariant and time-varying SSMs
 
 ## Requirements
-
+- **OS**: Linux or macOS (Windows not currently supported)
 - **Python**: 3.8 or higher
 - **Key Dependencies**:
   - `geopandas` ≥ 1.1.2 (geospatial data handling)

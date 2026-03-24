@@ -60,9 +60,7 @@ git pull origin develop
 ```bash
 git switch -c feature/your-feature
 ```
-
 > Use `fix/your-bug` as the branch name prefix for bug fixes.
-> Use `feature/feature-reference` as the branch name prefix for new features.
 
 - Branch names: `feature/`, `fix/`, `chore/`, `docs/`, `data/`
 
