@@ -398,8 +398,10 @@ git pull origin develop
 2. Create a branch from `develop`
 
 ```bash
-git switch -c feature/your-feature (or fix/your-bug)
+git switch -c feature/your-feature
 ```
+
+> Use `fix/your-bug` as the branch name prefix for bug fixes.
 
 3. Commit your changes
 
