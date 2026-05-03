@@ -2,9 +2,6 @@
 Adapter scaffolding making the project's StateSpaceModel usable with
 statsmodels' MLEModel API.
 """
-
-from scipy.signal.windows import triang
-from _cffi_backend import new_pointer_type
 import numpy as np
 import jax.numpy as jnp
 
@@ -555,28 +552,52 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return self
 
-    def sim(self, formulas: str, seed=1234, params: ModelParams = None, verbose=None, stats=False):
+    @property
+    def shape(self):
+        p = None
+        q = None
+        T = None
+
+        if self.y_train is not None:
+            p, T = self.y_train.shape
         
-        if formulas is None:
+        if self.Xbeta is not None:
+            p, b, T = self.Xbeta.shape
+        
+        if self._cov_matern is not None and len(self._cov_matern) > 0:
+            q = sum([cov.fem_solver.n_inner_points for cov in self._cov_matern])
+
+        return p, q, T
+
+
+
+    def sim(self, formulas = None | str, seed=1234, params: ModelParams = None, verbose=None, stats=False):
+        
+        if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
+        elif formulas is None:
+            formulas = self.formulas
+        else:
+            self._log("Building observation grid...")
+            
+            self.formulas = formulas
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+                self._buildObservationGrid(self.df, self.formulas, verbose=verbose)
+            )
+            self._log("Building observation grid... Done.")
+
+
+            # self.train will be used later for estimation and for the results
+            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+            self._log("Building the design matrix...")
+            self.y_train, Xbeta = self._buildDesignMatrix()
+
+            # get response name
+            # self.y_name = [g.y_name for g in self.gridList]
+            # self.xbeta_names = [g.x_names for g in self.gridList]
+
+            self._log("Building the design matrix... Done.")
         
-        self._log("Building observation grid...")
-        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
-            self._buildObservationGrid(self.df, formulas, verbose=verbose)
-        )
-        self._log("Building observation grid... Done.")
-
-
-        # self.train will be used later for estimation and for the results
-        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        self._log("Building the design matrix...")
-        self.y_train, Xbeta = self._buildDesignMatrix()
-
-        # get response name
-        self.y_name = [g.y_name for g in self.gridList]
-        self.xbeta_names = [g.x_names for g in self.gridList]
-
-        self._log("Building the design matrix... Done.")
         # check if the covariance function is defined
         if self._cov_matern is None or len(self._cov_matern) == 0:
             raise ValueError("Covariance function is not defined. Please run the setup method first.")
@@ -611,7 +632,7 @@ class LRStateSpaceModel(StateSpaceModel):
             dtype=jnp.int32,
         )
 
-        self._log("Computing the SSM H, R, F and Q matrices...")
+        self._log("Computing the SSM model matrices H, R, F and Q...")
 
         # Compute the basis matrix (just one) - no boundary
         basis = self._buildBasis_list(self.points, self.cov_function)
@@ -669,7 +690,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # set the global options
         self.verbose = options.verbose if options is not None else True
         
-        smr = self.summary(print_output="header")
+        smr = self.summary(print_full = False)
         if self.verbose:
             print(smr)
         self._log("Starting the estimation of the model parameters using EM algorithm...")
@@ -1080,7 +1101,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
         box = [cv.fem_solver.box for cv in self.cov_function]
-        est_ks = [jnp.sqrt(8 * 1) / ((jnp.abs(bx[0] - bx[1])).min() / 3) for bx in box]
+        est_ks = [
+            jnp.sqrt(8.0) / (jnp.minimum(jnp.abs(bx[2] - bx[0]), jnp.abs(bx[3] - bx[1])) / 3.0)
+            for bx in box
+        ]
 
         # Create the est_params object with the estimated initial values (if not provided, they will be set to None and the model will use default initial values)
         est_params = self._createParams(
@@ -1308,6 +1332,8 @@ class LRStateSpaceModel(StateSpaceModel):
     def _buildObservationGrid(self, df, formulas, verbose=True):
 
         nvar = len(formulas)  # numer of the response variable
+
+        # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
         dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build() for f in formulas]
 
         T = [gr.T for gr in dfs]
@@ -1434,19 +1460,14 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return history
 
 
-    def generate_summary(self, compute_stats=False):
-
-        return 
-
-    def summary(self, print_output: str = "full") -> Summary:
-        """Return or print a structured summary of the model."""
-        self.model = SimpleNamespace()
-        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
+    def generate_summary(self, print_full=True):
 
         # top-left / top-right small tables
-        p, q, T = self.shape if hasattr(self, "shape") else [("N/A", "N/A", "N/A")]
+        p = self.shape[0] if hasattr(self, "shape") else "N/A"
+        q = self.shape[1] if hasattr(self, "shape") else "N/A"
+        T = self.shape[2] if hasattr(self, "shape") else "N/A"
 
-        # Headser
+        # Header information for the summary table
         top_left = dict(
             [
                 ("Model name:", lambda: [self.__class__.__name__]),
@@ -1470,7 +1491,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         top_right = dict(
             [
-                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
                     lambda: (
@@ -1526,64 +1547,75 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             gen_top_right = gen_top_right + [("", [""])] * len_empty
         elif len_empty < 0:
             gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
-            
-        # Get the generate table from the gridlist
-        if hasattr(self,"gridList") and self.gridList is not None:
 
-            gen_top_left_grid = []
-            gen_top_right_grid = []
-            for i, grid in enumerate(self.gridList):
-
-                left, righ = grid.generate_summary()
-                
-                # check the length of the left and right tables and add empty rows if they are different
-                len_empty = len(left) - len(righ)
-                if len_empty > 0:
-                    righ = righ + [("", [""])] * len_empty
-                elif len_empty < 0:
-                    left = left + [("", [""])] * (-len_empty)
-                
-                left = [(f"Grid {i}", ["-" * 30])] + left
-                righ = [(f"Grid {i}", ["-" * 30])] + righ
-                
-
-                
-                gen_top_left_grid = gen_top_left_grid + left
-                gen_top_right_grid = gen_top_right_grid + righ
-
-            gen_top_left = gen_top_left + gen_top_left_grid
-            gen_top_right = gen_top_right + gen_top_right_grid
-
+        if not print_full:
+            return gen_top_left, gen_top_right
         
-        # Get the generate table from the covariance
-        if hasattr(self,"_cov_matern") and self._cov_matern is not None:
+        else:  
+            # Get the generate table from the gridlist
+            if hasattr(self,"gridList") and self.gridList is not None:
 
-            gen_top_left_cov = []
-            gen_top_right_cov = []
-            for cov in self._cov_matern:
-                left, righ = cov.generate_summary(compute_stats=True)
+                gen_top_left_grid = []
+                gen_top_right_grid = []
+                for i, grid in enumerate(self.gridList):
 
-                # check the length of the left and right tables and add empty rows if they are different
-                len_empty = len(left) - len(righ)
-                if len_empty > 0:
-                    righ = righ + [("", [""])] * len_empty
-                elif len_empty < 0:
-                    left = left + [("", [""])] * (-len_empty)
+                    left, righ = grid.generate_summary()
+                    
+                    # check the length of the left and right tables and add empty rows if they are different
+                    len_empty = len(left) - len(righ)
+                    if len_empty > 0:
+                        righ = righ + [("", [""])] * len_empty
+                    elif len_empty < 0:
+                        left = left + [("", [""])] * (-len_empty)
+                    
+                    left = [(f"Grid {i}", ["-" * 16])] + left
+                    righ = [(f"Grid {i}", ["-" * 16])] + righ
+                    
 
-                
-                left = [(f"Latent. {i}", ["-" * 26])] + left
-                righ = [(f"Latent {i}", ["-" * 26])] + righ
+                    
+                    gen_top_left_grid = gen_top_left_grid + left
+                    gen_top_right_grid = gen_top_right_grid + righ
 
-                
-                gen_top_left_cov = gen_top_left_cov + left
-                gen_top_right_cov = gen_top_right_cov + righ
+                gen_top_left = gen_top_left + gen_top_left_grid
+                gen_top_right = gen_top_right + gen_top_right_grid
 
-            gen_top_left = gen_top_left + gen_top_left_cov
-            gen_top_right = gen_top_right + gen_top_right_cov
-           
-        # Update the summary with the generated tables
+            
+            # Get the generate table from the covariance
+            if hasattr(self,"_cov_matern") and self._cov_matern is not None:
 
+                gen_top_left_cov = []
+                gen_top_right_cov = []
+                for i, cov in enumerate(self._cov_matern):
+                    left, righ = cov.generate_summary()
 
+                    # check the length of the left and right tables and add empty rows if they are different
+                    len_empty = len(left) - len(righ)
+                    if len_empty > 0:
+                        righ = righ + [("", [""])] * len_empty
+                    elif len_empty < 0:
+                        left = left + [("", [""])] * (-len_empty)
+
+                    
+                    left = [(f"Latent. {i}", ["-" * 16])] + left
+                    righ = [(f"Latent {i}", ["-" * 16])] + righ
+
+                    
+                    gen_top_left_cov = gen_top_left_cov + left
+                    gen_top_right_cov = gen_top_right_cov + righ
+
+                gen_top_left = gen_top_left + gen_top_left_cov
+                gen_top_right = gen_top_right + gen_top_right_cov
+            
+            return gen_top_left, gen_top_right 
+
+    def summary(self, print_full=True) -> Summary:
+        """Return or print a structured summary of the model."""
+        self.model = SimpleNamespace()
+        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
+
+        # Generate the summary tables
+        gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
+        
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(

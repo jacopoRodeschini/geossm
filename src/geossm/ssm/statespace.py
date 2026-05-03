@@ -1450,7 +1450,7 @@ class StateSpaceModel:
     def __str__(self):
         """String representation of the model."""
 
-        return str(self.summary(print_output="short"))
+        return str(self.summary())
 
     def __repr__(self):
         return self.__str__()
