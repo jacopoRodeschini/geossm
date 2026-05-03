@@ -102,13 +102,11 @@ mesh_io = buildMesh(domain, 0.1, points, lc_buffer=0.5)
 print(mesh_io)
 
 
-# %% Create the covariance function
-from geossm.covmodel import spdeAppoxCov as matern_spde
-    
+# %% Create the covariance function    
 cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
 cov_fun = cov_fun.setup(mesh_io)
 
-print(cov_fun.summary(compute_stats=True))
+print(cov_fun.summary())
 
 # %% Plot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -126,7 +124,7 @@ plt.show()
 
 # Create the spatio-temporal covariates (e.g. temperature and humidity)
 n = points.shape[0]
-T = 100
+T = 50
 
 omega = 2 * np.pi / 30
 
@@ -176,16 +174,18 @@ plt.show()
 # %% Build the lrssm and set the covariance function
 
 model = lrssm(df=gdf, domain=[domain], verbose=True)
-model = model.setup(cov_fun=[cov_fun], domain=[domain])
+model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
 
-# % 
-# print(model)
+# %% 
+print(model)
 
 # Set up the model cov. 
 # print(model)
 
 # %% Create the model parameters for the simulation
-params = ModelParams(beta=[3], A=np.array([[3.5]]), s2e=[3], ks=[4], f=[0.8])
+params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
+
+# %% 
 y_sim, x_sim, Xbeta, beta, stats, tdelta = model.sim(["1"], params=params, stats=True, verbose=False)
 
 # print the variance summary
@@ -271,14 +271,14 @@ model = lrssm(
 
 
 # 3) Set up the model cov. 
-model = model.setup(cov_fun=[est_cov_fun], domain=[domain])
+model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
 print(model)
 
 # 4) fit the model 
 
 # %% Debug pls 
 opt = FitOptions()
-opt.max_iter = 50
+opt.max_iter = 10
 opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
