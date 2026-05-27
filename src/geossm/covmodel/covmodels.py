@@ -217,7 +217,7 @@ class FEMSolver:
 
         inner = np.logical_or.reduce(
             [
-                np.array([poly.contains(Point(p)) for p in phy_points])
+                np.array([poly.covers(Point(p)) for p in phy_points])
                 for poly in self._domain
             ]
         )
