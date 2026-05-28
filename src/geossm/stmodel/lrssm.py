@@ -249,6 +249,83 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
     return s2e
 
 
+# @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
+# def _compute_A2_jax_kernel(
+#     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
+# ):
+#     """
+#     Optimized JAX implementation using einsum and vmap.
+#     Assumes blocks are uniform or padded to fixed sizes.
+#     """
+#     T = y_t.shape[1]
+#     nvar = len(block_p) - 1
+#     nlat = x_T.shape[0] - 1 # Assuming x_T includes intercept or similar
+    
+#     # 1. Compute Residuals: (Total_M, T)
+#     # y_t is (Total_M, T), Xbeta is (Total_M, P, T), beta is (P,)
+#     # If Xbeta is already (Total_M, T), use it directly.
+#     residual = y_t - jnp.einsum("mpt,p->mt", Xbeta, beta)
+#     # residual = y_t - jnp.dot(Xbeta, beta) # simplified based on your snippet
+    
+#     # Handle NaNs: create mask and zero out NaNs in residuals
+#     mask = jnp.where(jnp.isnan(residual), 0.0, 1.0)
+#     residual_clean = jnp.nan_to_num(residual)
+
+#     # 2. Prepare Latent States
+#     # z_t = x_T[:, 1:] (Shape: nlat, T)
+#     # M_t = z_t z_t' + P_t (Shape: T, nlat, nlat)
+#     z_t = x_T[:, 1:] 
+#     P_t = P_T[:, :, 1:] # (nlat, nlat, T)
+    
+#     # Outer product zz' over all T: (nlat, nlat, T)
+#     ZZ_T = jnp.einsum('it,jt->ijt', z_t, z_t) + P_t
+
+#     # Initialize result matrix
+#     W = jnp.zeros((nvar, nlat), dtype=y_t.dtype)
+
+#     # 3. Loop over blocks (i)
+#     # Since nvar is static, this loop is unrolled during JIT compilation.
+#     # Because 'i' is a concrete integer here, slicing block_p[i] works.
+#     for i in range(nvar):
+#         # Slice indices for current block i
+#         start_p, end_p = block_p[i], block_p[i+1]
+        
+#         # Phi_i shape: (mdim_i, nlat)
+#         # Note: Your block_q logic suggests Phi is sliced by both i and j
+#         # But if Phi maps factors to variables, it's usually (mdim_i, nlat)
+#         Phi_i = Phi[start_p:end_p, :] 
+#         Resid_i = residual_clean[start_p:end_p, :] * mask[start_p:end_p, :] # (mdim_i, T)
+
+#         # --- Compute g_i ---
+#         # Equation: sum_t (Resid_i_t' * Phi_i_j * z_t_j)
+#         # jnp.einsum('mt, mj, jt -> j', Resid_i, Phi_i, z_t)
+#         # m: mdim_i, t: T, j: nlat
+#         g_i = jnp.einsum('mt, mj, jt -> j', Resid_i, Phi_i, z_t)
+
+#         # --- Compute R_i ---
+#         # Equation: sum_t (Phi_i_j' * Phi_i_k) * ZZ_T_jk_t
+#         # m: mdim_i, j: nlat, k: nlat, t: T
+        
+#         # First, precompute dot products of Phi columns: (nlat, nlat)
+#         # However, because of the mask, we need to account for 't' in the Phi dot product
+#         # Mask_i is (mdim_i, T)
+#         Mask_i = mask[start_p:end_p, :]
+        
+#         # Weighted Phi-Phi product: (nlat, nlat, T)
+#         # For every t, compute (Phi * mask_t)' @ (Phi * mask_t)
+#         Phi_dot_Phi_t = jnp.einsum('mj, mk, mt -> jkt', Phi_i, Phi_i, Mask_i)
+        
+#         # Now contract with ZZ_T
+#         R_i = jnp.einsum('jkt, jkt -> jk', Phi_dot_Phi_t, ZZ_T)
+
+#         # Solve for w_i: R_i w_i = g_i
+#         # Add a small epsilon to diagonal for stability if needed
+#         w_i = jnp.linalg.solve(R_i, g_i)
+        
+#         W = W.at[i, :].set(w_i)
+    
+#     return W
+
 @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
 def _compute_A2_jax_kernel(
     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
@@ -415,7 +492,7 @@ def _ei_jax(i, dim):
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas = None, domain=None, verbose=True):
+    def __init__(self, df, formulas:list = None, domain:list = None, verbose=True):
 
         self.df = df.copy()
         self.formulas = formulas
@@ -437,6 +514,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # Compute the design matrices
             self._log("Building observation grid...")
+
 
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
                 self._buildObservationGrid(df, formulas, verbose=verbose)
@@ -463,7 +541,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
         # Check the domain
-        self._log("Checking the domain...")
+        self._log(f"Checking {len(domain)} domains (start)...")
 
         flag, msg = self._checkDomain(domain)
         if flag:
@@ -471,6 +549,7 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             self._domain = self._setDomain(domain)
             self._log(f"{len(self._domain)} valid domains found and set.")
+        self._log(f"Checking {len(domain)} domains (done)")
 
         self._cov_matern = None
 
@@ -487,13 +566,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # this domain is the domain on which the mesh is defined, and where the
         # covariance function has a meaning
         if domain_latent is not None:
-            self._log("Checking the domain...")
+            self._log(f"Checking {len(domain_latent)} domains (start)...")
             flag, msg = self._checkDomain(domain_latent)
             if flag:
                 raise ValueError(msg)
         else:
             domain_latent = self._domain
             self._log(f"{len(self._domain)} valid domains found and set.")
+        self._log("Checking domains (done)")
 
         # mehs_obj = list of the latent domain
         self._cov_matern = []
@@ -526,7 +606,7 @@ class LRStateSpaceModel(StateSpaceModel):
         elif cov_fun is not None:
             # If cov_fun is provided, we check that it is a list of covariance functions of the same length
             # as the number of domains, and we store it in the list _cov_matern
-            self._log(f"Checking {len(cov_fun)} covariance functions...")
+            self._log(f"Checking {len(cov_fun)} covariance functions (start)...")
 
             if len(cov_fun) != len(domain_latent):
                 raise ValueError(
@@ -534,16 +614,26 @@ class LRStateSpaceModel(StateSpaceModel):
                 )
 
             for i, (covi, domi) in enumerate(zip(cov_fun, domain_latent)):
-                self._log(f"Checking the {i}th covariance function...")
+                # self._log(f"Cov_fun-{i} covariance function...")
 
                 # check if the covariance function is an instance of spdeAppoxCov
                 if not isinstance(covi, spdeAppoxCov):
                     raise ValueError(
                         "Covariance function must be an instance of spdeAppoxCov"
                     )
-
+                self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
                 self._cov_matern.append(covi)
+            
+            
+            qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=jnp.int32)
         
+            self.block_q = jnp.hstack((0, jnp.cumsum(qdim)))
+            self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
+            self._log("Checking covariance functions (done)")
+
+
+
+
         else:
             raise ValueError("Invalid input: either mesh_obj or cov_fun must be provided")
 
@@ -571,17 +661,22 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
 
-    def sim(self, formulas = None | str, seed=1234, params: ModelParams = None, verbose=None, stats=False):
+    def sim(self, formulas:list = None , seed=1234, params: ModelParams = None, verbose=None, stats=False):
         
         if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
-        elif formulas is None:
+        
+        if formulas is None:
             formulas = self.formulas
+            Xbeta = self.Xbeta
+            nvar = self.nvar
+            pdim = self.pdim
+            block_p = self.block_p
+            self._log("Using the formulas provided at initialization, lenght = {}.".format(len(formulas)))
         else:
             self._log("Building observation grid...")
             
-            self.formulas = formulas
-            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+            nvar, points, gridList, ndim, pdim, block_p, T = (
                 self._buildObservationGrid(self.df, self.formulas, verbose=verbose)
             )
             self._log("Building observation grid... Done.")
@@ -590,7 +685,7 @@ class LRStateSpaceModel(StateSpaceModel):
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
             self._log("Building the design matrix...")
-            self.y_train, Xbeta = self._buildDesignMatrix()
+            y, Xbeta = self._buildDesignMatrix()
 
             # get response name
             # self.y_name = [g.y_name for g in self.gridList]
@@ -618,6 +713,14 @@ class LRStateSpaceModel(StateSpaceModel):
         if beta is not None and len(beta) != Xbeta.shape[1]:
             raise ValueError(f"Length of beta ({len(beta)}) must match number of columns in Xbeta ({Xbeta.shape[1]})")
         
+        # Check the lenght of A
+        if A is None or A.shape[0] != nvar or A.shape[1] != self.nlat:
+            raise ValueError(f"Shape of A ({A.shape}) must match (nvar, nlat) = ({nvar}, {self.nlat})")
+        
+         # Check the lenght of ks
+        if ks is None or len(ks) != len(self._cov_matern):
+            raise ValueError(f"Length of ks ({len(ks)}) must match number of covariance functions ({len(self._cov_matern)})")
+        
         # set the covarriance rescale paramiter to the value of ks (if provided, otherwise it will be set to 1)
         if ks is not None:
             for cov, ksi in zip(self.cov_function, ks):
@@ -625,12 +728,8 @@ class LRStateSpaceModel(StateSpaceModel):
         
         self._log("Parsing the parameters (ModelParams|None)... Done.")
         
-        # Get the dimensions of the model
-        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
-        qdim = jnp.array(
-            [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=jnp.int32,
-        )
+        # Get the dimensions of the latent variable
+        qdim = np.sum(self.block_q)
 
         self._log("Computing the SSM model matrices H, R, F and Q...")
 
@@ -676,7 +775,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
         y_sim, x_sim, stats, tdelta = super().sim(
-            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, stats=stats, verbose=verbose
+            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose
         )
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
@@ -788,8 +887,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # R, F = buildRF(est_s2e, est_f, pdim, qdim)
             R, F = self._buildRF_dense(
-                est_params.s2e.value, est_params.f.value, pdim, qdim
-            )
+                est_params.s2e.value, est_params.f.value, pdim, qdim)
 
             # Compute the maginal precision matrix
             invQ = []
@@ -1325,7 +1423,8 @@ class LRStateSpaceModel(StateSpaceModel):
                     flag = True
                     msg = f"Each domain element must be a shapely Polygon, got {type(poly).__name__}"
                 else:
-                    self._log("Domain {}: area = {}, bounds = {}".format(i, poly.area, poly.bounds))
+                    bounds_str = ", ".join(f"{b:.2f}" for b in poly.bounds)
+                    self._log("Domain-{}: area = {:2f}, box = ({})".format(i+1, poly.area, bounds_str))
 
         return flag, msg
 
@@ -1342,8 +1441,9 @@ class LRStateSpaceModel(StateSpaceModel):
         # get dimnesion of each grid
         pdim = [grid.N for grid in dfs]
         block_p = np.hstack((0, np.cumsum(pdim)))
+        ndim = block_p[-1]
 
-        return nvar, points, dfs, pdim, block_p[-1], block_p, T
+        return nvar, points, dfs, ndim, pdim, block_p, T
 
     def _buildDesignMatrix(self):
 
@@ -1467,6 +1567,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         q = self.shape[1] if hasattr(self, "shape") else "N/A"
         T = self.shape[2] if hasattr(self, "shape") else "N/A"
 
+        if p is None:
+            p = "N/A"
+        if q is None:
+            q = "N/A"
+        if T is None:
+            T = "N/A"
+
         # Header information for the summary table
         top_left = dict(
             [
@@ -1530,6 +1637,14 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                         else ["N/A"]
                     ),
                 ),
+                (
+                    "Rank",
+                    lambda: (
+                        [f"{q/p}"]
+                        if q != "N/A" and p != "N/A"
+                        else ["N/A"]
+                    ),
+                ),
             ]
         )
 
@@ -1550,7 +1665,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         if not print_full:
             return gen_top_left, gen_top_right
-        
+
         else:  
             # Get the generate table from the gridlist
             if hasattr(self,"gridList") and self.gridList is not None:
@@ -1568,8 +1683,8 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     elif len_empty < 0:
                         left = left + [("", [""])] * (-len_empty)
                     
-                    left = [(f"Grid {i}", ["-" * 16])] + left
-                    righ = [(f"Grid {i}", ["-" * 16])] + righ
+                    left = [(f"Grid {i}", ["-" * 28])] + left
+                    righ = [(f"Grid {i}", ["-" * 28])] + righ
                     
 
                     
@@ -1596,8 +1711,8 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                         left = left + [("", [""])] * (-len_empty)
 
                     
-                    left = [(f"Latent. {i}", ["-" * 16])] + left
-                    righ = [(f"Latent {i}", ["-" * 16])] + righ
+                    left = [(f"Latent. {i}", ["-" * 28])] + left
+                    righ = [(f"Latent {i}", ["-" * 28])] + righ
 
                     
                     gen_top_left_cov = gen_top_left_cov + left

@@ -951,8 +951,10 @@ class StateSpaceModel:
         Sigma0=None,
         Xbeta=None,
         beta=None,
+        block_p=None, 
+        block_q=None,
         stats=True,
-        verbose=True,
+        verbose=False,
     ) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
@@ -1013,17 +1015,21 @@ class StateSpaceModel:
         tdelta = time.time() - tStart
 
         if stats:
-            stats = self.summarize_ssm_variances(x_t_sim, y_t_sim, verbose=verbose)
+            stats = self.summarize_ssm_variances(x_t_sim, y_t_sim, block_p=block_p, block_q=block_q, verbose=verbose)
         else:
             stats = None
 
         return y_t_sim, x_t_sim, stats, tdelta
 
 
-    def summarize_ssm_variances(self, x_sim, y_sim, decimals=4, verbose=True) -> dict:
+    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=True) -> dict:
         """
         Compute and print a compact summary of theoretical vs empirical variances
         for the LR-SSM. Returns a dict with numeric results.
+
+        block_p is the dimension of the observation (number of locations) for each process in case of multivariate processes simulation
+        block_q is the dimension of the latent state for each process in case of multivariate processes simulation
+        
         """
         import numpy as np
         from scipy.linalg import solve_discrete_lyapunov
@@ -1038,64 +1044,60 @@ class StateSpaceModel:
         P = solve_discrete_lyapunov(F, Q)
 
         # Theoretical latent variance (average spatial variance contributed by state)
-        var_latent = float(np.trace(H @ P @ H.T) / H.shape[0])
+        temp = np.diag(H @ P @ H.T)
+        var_latents = [float(np.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)]
 
         # Empirical latent variance:
         # H @ x_sim -> (n_locations, n_time) ; compute variance across locations per time, then average
         latent_effect = H @ x_sim
-        var_latent_empirical = float(np.var(latent_effect, axis=0).mean())
+        var_latent_empirical = [float(np.var(latent_effect[block_q[i]:block_q[i+1]], axis=0).mean()) for i in range(len(block_q)-1)]
 
         # Observation noise variance (average over observation dims)
-        var_noise = float(np.trace(R) / R.shape[0])
+        temp = np.diag(R)
+        var_noise = [float(np.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)]
 
         # Response variance (theoretical) and empirical
-        var_y_theoretical = var_latent + var_noise
-        var_y_empirical = float(np.var(y_sim, axis=0).mean())
+        var_y_theoretical = var_latents + var_noise
+        var_y_empirical = [float(np.var(y_sim[block_p[i]:block_p[i+1]], axis=0).mean()) for i in range(len(block_p)-1)]
 
+        var_noise_empirical = var_y_empirical - var_latent_empirical
         # Ratios and SNRs
         ratios = {
-            "empirical_over_theoretical_latent": var_latent_empirical / var_latent if var_latent != 0 else np.nan,
+            "empirical_over_theoretical_latent": var_latent_empirical / var_latents if var_latents != 0 else np.nan,
             "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else np.nan,
         }
-        snrs = {
-            "SNR_latent_vs_noise": var_latent / var_noise if var_noise != 0 else np.nan,
-            "frac_noise_over_y": var_noise / var_y_theoretical if var_y_theoretical != 0 else np.nan,
-            "frac_latent_over_y": var_latent / var_y_theoretical if var_y_theoretical != 0 else np.nan,
-            "empirical_SNR_latent_over_y": var_latent_empirical / var_y_empirical if var_y_empirical != 0 else np.nan,
-        }
-
+        
         # Nicely formatted printout
         if verbose:       
             fmt = f"{{:<40}}{{:>{decimals+8}.{decimals}f}}"
             print("\nState-space variance summary")
             print("-" * 60)
             print(f"{'Matrix shapes:':<40} F={F.shape}, Q={Q.shape}, H={H.shape}, R={R.shape}")
+            print(f"{'Observation blocks:':<40} {block_p}")
+            print(f"{'Latent blocks:':<40} {block_q}")
             print("-" * 60)
-            print(fmt.format("Theoretical latent variance (avg spatial):", var_latent))
-            print(fmt.format("Empirical latent variance (avg over time):", var_latent_empirical))
+            print(fmt.format("Theoretical latent variance:", var_latents))
+            print(fmt.format("Empirical latent variance:", var_latent_empirical))
             print(fmt.format("Empirical / Theoretical (latent):", ratios["empirical_over_theoretical_latent"]))
             print()
             print(fmt.format("Theoretical response variance (var_y = var_latent + var_noise):", var_y_theoretical))
             print(fmt.format("Empirical response variance (avg over time):", var_y_empirical))
             print(fmt.format("Empirical / Theoretical (y):", ratios["empirical_over_theoretical_y"]))
             print()
-            print(fmt.format("Noise variance (avg obs-dim):", var_noise))
-            print(fmt.format("SNR (latent / noise):", snrs["SNR_latent_vs_noise"]))
-            print(fmt.format("frac noise / var_y:", snrs["frac_noise_over_y"]))
-            print(fmt.format("frac latent / var_y:", snrs["frac_latent_over_y"]))
-            print(fmt.format("Empirical SNR (latent_empirical / emp_var_y):", snrs["empirical_SNR_latent_over_y"]))
+            print(fmt.format("Theoretical noise variance (avg obs-dim):", var_noise))
+            print(fmt.format("Empirical noise variance (var_y - var_latent):", var_noise_empirical))
             print("-" * 60)
-        
+           
+         
 
         # Return numeric results for downstream use
         stats = {
-            "var_latent_theoretical": var_latent,
+            "var_latent_theoretical": var_latents,
             "var_latent_empirical": var_latent_empirical,
             "var_noise": var_noise,
             "var_y_theoretical": var_y_theoretical,
             "var_y_empirical": var_y_empirical,
             "ratios": ratios,
-            "snrs": snrs,
             "P": P,
         }
         
