@@ -1031,18 +1031,18 @@ class StateSpaceModel:
             raise ValueError(msg)
 
         if isinstance(seed, KeyStream):
-            keys = seed
+            key = seed.next()
         else:
             # Initialize PRNGKey stream
             main_key = jax.random.PRNGKey(seed)
             seed, main_key = jax.random.split(main_key)
 
-            keys = KeyStream(seed)
+            key = KeyStream(seed).next()
 
         # Call the simulation kernel to generate the time series
         tStart = time.time()
         y_t_sim, x_t_sim = _sim_kernelJAX(
-            keys,
+            key,
             self.H,
             self.R,
             self.F,
