@@ -1083,27 +1083,26 @@ class StateSpaceModel:
         P = solve_discrete_lyapunov(F, Q)
 
         # Theoretical latent variance (average spatial variance contributed by state)
-        temp = np.diag(H @ P @ H.T)
-        var_latents = [float(np.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)]
+        temp = jnp.diag(H @ P @ H.T)
+        var_latents = [float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)]
 
         # Empirical latent variance:
         # H @ x_sim -> (n_locations, n_time) ; compute variance across locations per time, then average
         latent_effect = H @ x_sim
-        var_latent_empirical = [float(np.var(latent_effect[block_q[i]:block_q[i+1]], axis=0).mean()) for i in range(len(block_q)-1)]
+        var_latent_empirical = [float(jnp.var(latent_effect[block_q[i]:block_q[i+1]], axis=0).mean()) for i in range(len(block_q)-1)]
 
         # Observation noise variance (average over observation dims)
-        temp = np.diag(R)
-        var_noise = [float(np.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)]
+        temp = jnp.diag(R)
+        var_noise = [float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)]
 
         # Response variance (theoretical) and empirical
         var_y_theoretical = var_latents + var_noise
-        var_y_empirical = [float(np.var(y_sim[block_p[i]:block_p[i+1]], axis=0).mean()) for i in range(len(block_p)-1)]
-
+        var_y_empirical = [float(jnp.var(y_sim[block_p[i]:block_p[i+1]], axis=0).mean()) for i in range(len(block_p)-1)]
         var_noise_empirical = var_y_empirical - var_latent_empirical
         # Ratios and SNRs
         ratios = {
-            "empirical_over_theoretical_latent": var_latent_empirical / var_latents if var_latents != 0 else np.nan,
-            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else np.nan,
+            "empirical_over_theoretical_latent": var_latent_empirical / var_latents if var_latents != 0 else jnp.nan,
+            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else jnp.nan,
         }
         
         # Nicely formatted printout
@@ -1127,8 +1126,6 @@ class StateSpaceModel:
             print(fmt.format("Empirical noise variance (var_y - var_latent):", var_noise_empirical))
             print("-" * 60)
            
-         
-
         # Return numeric results for downstream use
         stats = {
             "var_latent_theoretical": var_latents,
