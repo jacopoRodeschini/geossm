@@ -8,16 +8,18 @@ from jax.scipy.linalg import solve
 from jax import jit
 import time
 from geossm.utils import KeyStream
-import numpy as np
 from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
+from geossm.utils import _select_device, _to_backend
 
 
 # % JAX kernel functions for SSM
+
+"""
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    """
+    ```
     JIT-compiled kernel for simulating a time series from the state-space model using JAX.
     This version uses jax.lax.scan for efficient looping.
 
@@ -27,7 +29,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     Returns:
         y_t : (p, T) JAX array of simulated observations
         x_t : (q, T+1) JAX array of simulated state vectors
-    """
+    ```
 
     p = R.shape[0]
     q = F.shape[0]
@@ -73,6 +75,43 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     final_x_t = jnp.stack(x_history, axis=1)
 
     return final_y_t, final_x_t
+"""
+
+@jit
+def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
+    """Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly)."""
+    T = Xbeta.shape[2]
+    p = R.shape[0]
+    q = F.shape[0]
+
+    chol_R = jnp.linalg.cholesky(R)
+    chol_Q = jnp.linalg.cholesky(Q)
+    chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
+
+    key0, key_obs, key_state = jax.random.split(keys, 3)
+    eps0 = jax.random.normal(key0, shape=(q,), dtype=jnp.float32)
+    obs_eps = jax.random.normal(key_obs, shape=(T, p), dtype=jnp.float32)
+    state_eps = jax.random.normal(key_state, shape=(T, q), dtype=jnp.float32)
+
+    x_init = x0 + chol_Sigma0 @ eps0
+    fixed_effect = jnp.einsum("pkt,k->pt", Xbeta, beta)
+
+    def step(x_curr, inputs):
+        obs_eps_t, state_eps_t, fe_t = inputs
+        y_t = fe_t + H @ x_curr + chol_R @ obs_eps_t
+        x_next = F @ x_curr + chol_Q @ state_eps_t
+        return x_next, (y_t, x_next)
+
+    _, (y_hist, x_next_hist) = jax.lax.scan(
+        step,
+        x_init,
+        (obs_eps, state_eps, fixed_effect.T),
+    )
+
+    y_t = y_hist.T
+    x_t = jnp.concatenate([x_init[:, None], x_next_hist.T], axis=1)
+
+    return y_t, x_t
 
 
 @jit
@@ -350,12 +389,14 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
+        backend: str = "auto", 
         dtype=jnp.float32,
     ):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
         self.dtype = dtype  # Data type for computations
+        self.backend = backend  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
         self._H = None  # Observation matrix
@@ -382,15 +423,15 @@ class StateSpaceModel:
 
         # Set the initial state starting values if not provided
         if x0 is None and F is not None and Q is not None:
-            x0 = np.zeros(F.shape[0])
+            x0 = jnp.zeros(F.shape[0])
         if Sigma0 is None and F is not None and Q is not None:
-            Sigma0 = np.eye(F.shape[0])
+            Sigma0 = jnp.eye(F.shape[0])
 
         # Set default Xbeta and beta if not provided
         if Xbeta is None and H is not None:
-            Xbeta = np.zeros((H.shape[0], 1, 1))
+            Xbeta = jnp.zeros((H.shape[0], 1, 1))
         if beta is None and Xbeta is not None:
-            beta = np.zeros(Xbeta.shape[1])
+            beta = jnp.zeros(Xbeta.shape[1])
 
         # Update parameters without checking (we will check after setting all parameters)
         self.set(
@@ -416,7 +457,7 @@ class StateSpaceModel:
             if not flag:
                 raise ValueError(msg)
 
-    
+
     def __call__(self, y_t):
         """
         Docstring for __call__
@@ -579,7 +620,7 @@ class StateSpaceModel:
 
         def shape_str(x):
             try:
-                return tuple(np.asarray(x).shape)
+                return tuple(jnp.asarray(x).shape)
             except Exception:
                 return None
 
@@ -604,16 +645,15 @@ class StateSpaceModel:
 
         # Helper: check positive semidefinite (symmetric) with tolerance
         def is_pos_semidef(mat):
-            A = np.asarray(mat)
+            A = jnp.asarray(mat)
             if A.ndim != 2 or A.shape[0] != A.shape[1]:
                 return False
             # symmetry check
-            if not np.allclose(A, A.T, atol=1e-8):
+            if not jnp.allclose(A, A.T, atol=1e-8):
                 return False
             # eigenvalues >= -tol
-            eigs = np.linalg.eigvalsh(A)
-            return np.all(eigs >= -1e-8)
-
+            eigs = jnp.linalg.eigvalsh(A)
+            return jnp.all(eigs >= -1e-8)
         # Sigma0: should be (q, q)
         sigma0_shape = shape_str(self.Sigma0)
         if sigma0_shape not in [(q, q), (q,), (q,)]:
@@ -640,7 +680,7 @@ class StateSpaceModel:
                     flag = False
             else:
                 # scalar case
-                Rval = np.asarray(self.R).ravel()[0]
+                Rval = jnp.asarray(self.R).ravel()[0]
                 if Rval < 0:
                     messages.append("R (variance) must be non-negative.")
                     flag = False
@@ -1031,7 +1071,6 @@ class StateSpaceModel:
         block_q is the dimension of the latent state for each process in case of multivariate processes simulation
         
         """
-        import numpy as np
         from scipy.linalg import solve_discrete_lyapunov
 
         # Basic checks
@@ -1261,6 +1300,7 @@ class StateSpaceModel:
 
         Convert JAX arrays to NumPy arrays and store basic metadata.
         """
+        import numpy as np
 
         def to_np(x):
             if x is None:
@@ -1426,13 +1466,13 @@ class StateSpaceModel:
     def summary(self) -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
-        self.model.results = np.array([0])
+        self.model.results = jnp.array([0])
         
         self.params = ""
         self.params_names = ""
-        self.model.bse = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.tvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.pvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.bse = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
+        self.model.tvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
+        self.model.pvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
 
         gen_top_left, gen_top_right = self.generate_summary()
 
