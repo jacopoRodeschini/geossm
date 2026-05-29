@@ -526,7 +526,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-            self.y_train, Xbeta = self._buildDesignMatrix()
+            self.y_train, Xbeta = self._buildDesignMatrix(self.gridList)
 
             # get response name
             self.y_name = [g.y_name for g in self.gridList]
@@ -625,9 +625,9 @@ class LRStateSpaceModel(StateSpaceModel):
                 self._cov_matern.append(covi)
             
             
-            qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=jnp.int32)
+            self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=jnp.int32)
         
-            self.block_q = jnp.hstack((0, jnp.cumsum(qdim)))
+            self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
             self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
             self._log("Checking covariance functions (done)")
 
@@ -669,15 +669,19 @@ class LRStateSpaceModel(StateSpaceModel):
         if formulas is None:
             formulas = self.formulas
             Xbeta = self.Xbeta
+            xbeta_names = self.xbeta_names
+            y_name = self.y_name
             nvar = self.nvar
+            nlat = self.nlat
             pdim = self.pdim
             block_p = self.block_p
+            points = self.points
             self._log("Using the formulas provided at initialization, lenght = {}.".format(len(formulas)))
         else:
             self._log("Building observation grid...")
             
             nvar, points, gridList, ndim, pdim, block_p, T = (
-                self._buildObservationGrid(self.df, self.formulas, verbose=verbose)
+                self._buildObservationGrid(self.df, formulas, verbose=verbose)
             )
             self._log("Building observation grid... Done.")
 
@@ -685,7 +689,11 @@ class LRStateSpaceModel(StateSpaceModel):
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
             self._log("Building the design matrix...")
-            y, Xbeta = self._buildDesignMatrix()
+            y, Xbeta = self._buildDesignMatrix(gridList)
+            
+            y_name = [g.y_name for g in gridList]
+            xbeta_names = [g.x_names for g in gridList]
+
 
             # get response name
             # self.y_name = [g.y_name for g in self.gridList]
@@ -696,6 +704,11 @@ class LRStateSpaceModel(StateSpaceModel):
         # check if the covariance function is defined
         if self._cov_matern is None or len(self._cov_matern) == 0:
             raise ValueError("Covariance function is not defined. Please run the setup method first.")
+        else:
+            qdim = self.qdim
+            block_q = self.block_q
+            nlat = self.nlat
+
         
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
         self._log("Parsing the parameters (ModelParams|None)...")
@@ -774,13 +787,32 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Start simulating the SSM...")
 
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
-        y_sim, x_sim, stats, tdelta = super().sim(
-            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose
+        # Create a new SSM with the same parameters as the current model, but with the matrices H, R, F and Q computed above
+
+    
+        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None)
+
+        y_sim, x_sim, variance_stats, tdelta = sim_model.sim(
+            seed, R=R, F=F, H=H, Q=Q, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose
         )
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
-        return y_sim, x_sim, Xbeta, beta, stats, tdelta
+        info = {}
+        info['formulas'] = formulas
+        info['y_name'] = y_name
+        info['xbeta_names'] = xbeta_names
+        info['Xbeta'] = Xbeta
+        info['params'] = params
+        info['stats'] = variance_stats
+        info['qdim'] = qdim
+        info['nvar'] = nvar
+        info['nlat'] = nlat
+        info['pdim'] = pdim
+        info['block_p'] = block_p
+        info['block_q'] = block_q
+
+        return y_sim, x_sim, info, tdelta
 
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
@@ -1445,12 +1477,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T
 
-    def _buildDesignMatrix(self):
+    def _buildDesignMatrix(self, gridList):
 
-        Ylist = [grid.y for grid in self.gridList if grid.y is not None]
+        Ylist = [grid.y for grid in gridList if grid.y is not None]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
-        Xbeta_list = [grid.X for grid in self.gridList if grid.X is not None]
+        Xbeta_list = [grid.X for grid in gridList if grid.X is not None]
 
         # points_train = [pt[index, :] for pt, index in zip(points, itrain)]
         # points_test = [pt[index, :] for pt, index in zip(points, itest)]

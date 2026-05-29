@@ -17,9 +17,8 @@ from geossm.utils import _select_device, _to_backend
 
 # % JAX kernel functions for SSM
 
-"""
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    ```
+    """
     JIT-compiled kernel for simulating a time series from the state-space model using JAX.
     This version uses jax.lax.scan for efficient looping.
 
@@ -29,7 +28,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     Returns:
         y_t : (p, T) JAX array of simulated observations
         x_t : (q, T+1) JAX array of simulated state vectors
-    ```
+    """
 
     p = R.shape[0]
     q = F.shape[0]
@@ -53,8 +52,6 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # Loop T times to generate T observations (y_0, ..., y_{T-1})
     for t in range(T):
         # 1. Generate the observation y_t based on the current state x_t
-        # Note: The original code had a slight lookahead (y_{t-1} from x_t).
-        # This version uses the more standard y_t from x_t.
         obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
         mean_reg = Xbeta[:, :, t] @ beta
         y_t = mean_reg + H @ x_current + obs_noise
@@ -75,11 +72,11 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     final_x_t = jnp.stack(x_history, axis=1)
 
     return final_y_t, final_x_t
-"""
 
+""" 
 @jit
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    """Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly)."""
+    ```Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly).```
     T = Xbeta.shape[2]
     p = R.shape[0]
     q = F.shape[0]
@@ -112,7 +109,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     x_t = jnp.concatenate([x_init[:, None], x_next_hist.T], axis=1)
 
     return y_t, x_t
-
+"""
 
 @jit
 def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
@@ -1031,13 +1028,13 @@ class StateSpaceModel:
             raise ValueError(msg)
 
         if isinstance(seed, KeyStream):
-            key = seed.next()
+            key = seed
         else:
             # Initialize PRNGKey stream
             main_key = jax.random.PRNGKey(seed)
             seed, main_key = jax.random.split(main_key)
 
-            key = KeyStream(seed).next()
+            key = KeyStream(seed)
 
         # Call the simulation kernel to generate the time series
         tStart = time.time()
@@ -1052,10 +1049,13 @@ class StateSpaceModel:
             self.Xbeta,
             self.beta,
         )
+        jax.block_until_ready(y_t_sim)
         tdelta = time.time() - tStart
 
         if stats:
-            stats = self.summarize_ssm_variances(x_t_sim, y_t_sim, block_p=block_p, block_q=block_q, verbose=verbose)
+            fixed_effect = jnp.einsum("pkt,k->pt", self.Xbeta, self.beta)
+            y_delta = y_t_sim - fixed_effect
+            stats = self.summarize_ssm_variances(x_t_sim, y_delta, block_p=block_p, block_q=block_q, verbose=verbose)
         else:
             stats = None
 
@@ -1082,32 +1082,38 @@ class StateSpaceModel:
         # Solve Lyapunov: P = F P F^T + Q
         P = solve_discrete_lyapunov(F, Q)
 
-        # Theoretical latent variance (average spatial variance contributed by state)
+        # Theoretical latent variance
+        # temp = jnp.diag(H @ P @ H.T)
+        # temp = jnp.diag(P)
+        # var_z_t = jnp.array([float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)])
+
+        # Theoretical variance of the latent effect (H @ x_t) is H P H^T
         temp = jnp.diag(H @ P @ H.T)
-        var_latents = [float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)]
+        var_latents = jnp.array([float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)])
 
         # Empirical latent variance:
         # H @ x_sim -> (n_locations, n_time) ; compute variance across locations per time, then average
         latent_effect = H @ x_sim
-        var_latent_empirical = [float(jnp.var(latent_effect[block_q[i]:block_q[i+1]], axis=0).mean()) for i in range(len(block_q)-1)]
+        var_latent_empirical = jnp.array([float(jnp.var(latent_effect[block_p[i]:block_p[i+1],:], axis=0).mean()) for i in range(len(block_p)-1)])
 
         # Observation noise variance (average over observation dims)
         temp = jnp.diag(R)
-        var_noise = [float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)]
+        var_noise = jnp.array([float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)])
 
         # Response variance (theoretical) and empirical
         var_y_theoretical = var_latents + var_noise
-        var_y_empirical = [float(jnp.var(y_sim[block_p[i]:block_p[i+1]], axis=0).mean()) for i in range(len(block_p)-1)]
+        var_y_empirical = jnp.array([jnp.var(y_sim[block_p[i]:block_p[i+1],:], axis=0).mean() for i in range(len(block_p)-1)])
         var_noise_empirical = var_y_empirical - var_latent_empirical
+        
         # Ratios and SNRs
         ratios = {
-            "empirical_over_theoretical_latent": var_latent_empirical / var_latents if var_latents != 0 else jnp.nan,
-            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else jnp.nan,
+            "empirical_over_theoretical_latent": var_latent_empirical / var_latents ,
+            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical,
         }
         
         # Nicely formatted printout
         if verbose:       
-            fmt = f"{{:<40}}{{:>{decimals+8}.{decimals}f}}"
+            fmt = f"{{:<40}}{{}}"
             print("\nState-space variance summary")
             print("-" * 60)
             print(f"{'Matrix shapes:':<40} F={F.shape}, Q={Q.shape}, H={H.shape}, R={R.shape}")
@@ -1118,12 +1124,12 @@ class StateSpaceModel:
             print(fmt.format("Empirical latent variance:", var_latent_empirical))
             print(fmt.format("Empirical / Theoretical (latent):", ratios["empirical_over_theoretical_latent"]))
             print()
-            print(fmt.format("Theoretical response variance (var_y = var_latent + var_noise):", var_y_theoretical))
-            print(fmt.format("Empirical response variance (avg over time):", var_y_empirical))
+            print(fmt.format("Theoretical response variance :", var_y_theoretical))
+            print(fmt.format("Empirical response variance :", var_y_empirical))
             print(fmt.format("Empirical / Theoretical (y):", ratios["empirical_over_theoretical_y"]))
             print()
-            print(fmt.format("Theoretical noise variance (avg obs-dim):", var_noise))
-            print(fmt.format("Empirical noise variance (var_y - var_latent):", var_noise_empirical))
+            print(fmt.format("Theoretical noise variance:", var_noise))
+            print(fmt.format("Empirical noise variance:", var_noise_empirical))
             print("-" * 60)
            
         # Return numeric results for downstream use
@@ -1282,10 +1288,6 @@ class StateSpaceModel:
     def Sigma0(self):
         """Returns the initial state covariance Sigma0."""
         return self._Sigma0
-
-    @property
-    def xbeta_names(self):
-        return self._xbeta_names
 
     @property
     def yname(self):
