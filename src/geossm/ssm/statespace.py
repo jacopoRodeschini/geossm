@@ -1175,9 +1175,17 @@ class StateSpaceModel:
     def params(self):
         return self._params
 
+    @params.setter
+    def params(self, value):
+        self._params = value
+
     @property
     def params_names(self):
         return self._params_names
+
+    @params_names.setter
+    def params_names(self, value):
+        self._params_names = value
 
     @property
     def params_dim(self):

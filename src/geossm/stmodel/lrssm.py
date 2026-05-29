@@ -536,6 +536,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         else:
             self._log("Formulas not provided. The model will be initialized without them")
+
             Xbeta = None
             xbeta_names = None
 
@@ -747,7 +748,7 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Computing the SSM model matrices H, R, F and Q...")
 
         # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(self.points, self.cov_function)
+        basis = self._buildBasis_list(points, self.cov_function)
         
         # ---- build parametrised matrices
         H = self._buildH_dense(A, basis)  # dense
@@ -804,6 +805,8 @@ class LRStateSpaceModel(StateSpaceModel):
         info['xbeta_names'] = xbeta_names
         info['Xbeta'] = Xbeta
         info['params'] = params
+        info['points'] = points
+        info['T'] = T
         info['stats'] = variance_stats
         info['qdim'] = qdim
         info['nvar'] = nvar
@@ -811,6 +814,7 @@ class LRStateSpaceModel(StateSpaceModel):
         info['pdim'] = pdim
         info['block_p'] = block_p
         info['block_q'] = block_q
+        info['sim_model'] = sim_model
 
         return y_sim, x_sim, info, tdelta
 
