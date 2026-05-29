@@ -40,7 +40,7 @@ plt.scatter(points[:, 0], points[:, 1], color="blue", label="Random Points")
 plt.plot(*domain.boundary.xy, color="red", label="Domain Boundary")
 plt.xlabel("X-axis")
 plt.ylabel("Y-axis")
-plt.title("Random Points in a Circular Domain")
+plt.title("Random Points in a Square Domain")
 plt.legend()
 plt.axis("equal")
 plt.show()
@@ -176,39 +176,21 @@ plt.show()
 model = lrssm(df=gdf, domain=[domain], verbose=True)
 model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
 
-# %% 
 print(model)
 
 # Set up the model cov. 
 # print(model)
 
 # %% Create the model parameters for the simulation
-params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
+params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[20], f=[0.7])
 
 # %% 
-y_sim, x_sim, Xbeta, beta, stats, tdelta = model.sim(["1"], params=params, stats=True, verbose=False)
 
-# print the variance summary
-decimals = 2
-fmt = f"{{:<40}}{{:>{decimals+4}.{decimals}f}}"
-print("\nState-space simulation variance summary")
-print("-" * 60)
-print(f"{'Matrix shapes:':<10} F={model.F.shape}, Q={model.Q.shape}, H={model.H.shape}, R={model.R.shape}")
-print("-" * 60)
-print(fmt.format("Theoretical latent variance:", stats['var_latent_theoretical']))
-print(fmt.format("Empirical latent variance:", stats['var_latent_empirical']))
-print(fmt.format("Empirical / Theoretical (latent):", stats["var_latent_empirical"]/ stats['var_latent_theoretical']))
-print(fmt.format("Theoretical response variance (var_y):", stats['var_y_theoretical']))
-print(fmt.format("Empirical response variance:", stats['var_y_empirical']))
-print(fmt.format("Empirical / Theoretical (y):", stats["var_y_empirical"]/ stats['var_y_theoretical']))
-print(fmt.format("Noise variance (avg obs-dim):", stats['var_noise']))
-print(fmt.format("SNR (latent / noise):", stats["var_latent_theoretical"] / stats['var_noise']))
-print(fmt.format("frac noise / var_y:", stats["var_noise"] / stats['var_y_empirical']))
-print(fmt.format("frac latent / var_y:", stats["var_latent_empirical"] / stats['var_y_empirical']))
-print("-" * 60)
+# print also the variance summary
+y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
 
 # %% Plot one response variable time series and state
-x_sim_temp = model.H @ x_sim
+x_sim_temp = info['sim_model'].H @ x_sim
 point_index = 40 # np.random.randint(0, n)  # Index of the point to plot
 
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -223,8 +205,8 @@ ax.legend()
 plt.show()
 
 # %% Plot the simulated response variable for one point
-T = model.T
-pt = np.array(model.points[0])
+T = info['T'][0]
+pt = np.array(info['points'][0])
 
 times = np.arange(0, T, T//9)  # Select 9 time steps evenly spaced across the simulation
 vmin, vmax = y_sim.min(), y_sim.max()  # or compute over the selected times
@@ -278,7 +260,7 @@ print(model)
 
 # %% Debug pls 
 opt = FitOptions()
-opt.max_iter = 10
+opt.max_iter = 50
 opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)

@@ -186,49 +186,16 @@ print(model)
 # Set up the model cov. 
 # print(model)
 
-# %% Create the model parameters for the simulation
+# %% Simulate the model
 params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
-# %% 
-y_sim, x_sim, Xbeta, beta, stats, tdelta = model.sim(["1"], params=params, stats=True, verbose=False)
+# Print the var. statistics (verbose = True)
+y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
 
-# print the variance summary
-decimals = 2
-fmt = f"{{:<40}}{{:>{decimals+4}.{decimals}f}}"
-print("\nState-space simulation variance summary")
-print("-" * 60)
-print(f"{'Matrix shapes:':<10} F={model.F.shape}, Q={model.Q.shape}, H={model.H.shape}, R={model.R.shape}")
-print("-" * 60)
-print(fmt.format("Theoretical latent variance:", stats['var_latent_theoretical']))
-print(fmt.format("Empirical latent variance:", stats['var_latent_empirical']))
-print(fmt.format("Empirical / Theoretical (latent):", stats["var_latent_empirical"]/ stats['var_latent_theoretical']))
-print(fmt.format("Theoretical response variance (var_y):", stats['var_y_theoretical']))
-print(fmt.format("Empirical response variance:", stats['var_y_empirical']))
-print(fmt.format("Empirical / Theoretical (y):", stats["var_y_empirical"]/ stats['var_y_theoretical']))
-print(fmt.format("Noise variance (avg obs-dim):", stats['var_noise']))
-print(fmt.format("SNR (latent / noise):", stats["var_latent_theoretical"] / stats['var_noise']))
-print(fmt.format("frac noise / var_y:", stats["var_noise"] / stats['var_y_empirical']))
-print(fmt.format("frac latent / var_y:", stats["var_latent_empirical"] / stats['var_y_empirical']))
-print("-" * 60)
-
-# %% Plot one response variable time series and state
-x_sim_temp = model.H @ x_sim
-point_index = 40 # np.random.randint(0, n)  # Index of the point to plot
-
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[point_index, :], marker="o", linestyle="-", color="blue", label="Simulated Response Variable")
-# ax.plot(x_sim[point_index, :], marker="s", linestyle="-.", color="green", label="Simulated Latent State")
-ax.plot(x_sim_temp[point_index, :], marker="x", linestyle="--", color="orange", label="Simulated Random Effect")
-ax.set_title(f"Time Series of Simulated Response Variable and Latent State for Point {point_index}")
-ax.set_xlabel("Time")
-ax.set_ylabel("Value")
-ax.grid(True, linestyle="--", alpha=0.6)
-ax.legend()
-plt.show()
 
 # %% Plot the simulated response variable for one point
-T = model.T
-pt = np.array(model.points[0])
+T = info['T'][0]
+pt = np.array(info['points'][0])
 
 times = np.arange(0, T, T//9)  # Select 9 time steps evenly spaced across the simulation
 vmin, vmax = y_sim.min(), y_sim.max()  # or compute over the selected times
@@ -271,27 +238,27 @@ print(model)
 
 # %% Debug pls 
 opt = FitOptions()
-opt.max_iter = 10
+opt.max_iter = 50
 opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
 
 
-# %% Estimate the model parameters from the simulated data (low rank)
+# %% Estimate the LOW-RANK model
 
-# 0) Create mesh with fewer points to reduce the rank of the model
+# 0) Create mesh with fewer points to reduce the rank of the model (85%)
 inx = np.random.choice(points.shape[0], size=85, replace=False)
 points_lr = points[inx, :]
 lr_mesh_io = buildMesh(domain, 0.5, points_lr, lc_buffer=0.5)
 print(lr_mesh_io)
 
 # 1) Create the covariance matrix 
-est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-est_cov_fun = est_cov_fun.setup(lr_mesh_io)
-print(est_cov_fun.summary())
+lr_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+lr_cov_fun = est_cov_fun.setup(lr_mesh_io)
+print(lr_cov_fun.summary())
 
 # 2) Create the model
-model = lrssm(
+lr_model = lrssm(
     df=gdf, 
     formulas=["y_sim ~ 1"], 
     domain=[domain], 
@@ -299,16 +266,14 @@ model = lrssm(
 
 
 # 3) Set up the model cov. 
-model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+lr_model = lr_model.setup(cov_fun=[lr_cov_fun], domain_latent=[domain])
 print(model)
 
-# 4) fit the model 
-
-# %% Debug pls 
+# 4) fit the low-rank model 
 opt = FitOptions()
 opt.max_iter = 50
 opt.tol_relat = 1e-5
 
-results = model.fit(options=opt)
+lr_results = lr_model.fit(options=opt)
 
 
