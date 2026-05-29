@@ -41,7 +41,7 @@ center = (0, 0)
 radius = 1
 circle = Point(center).buffer(radius)
 
-points = np.random.uniform(-radius, radius, (1000, 2))
+points = np.random.uniform(-radius, radius, (200, 2))
 
 # take the mask of the points that are inside the circle
 mask = np.array([circle.contains(Point(p)) for p in points])
@@ -178,38 +178,47 @@ plt.show()
 
 # %% build the lrssm and set the covariance function
 
-
 model = lrssm(
     df=gdf, 
-    formulas=["humidity ~ 1 + temperature"], 
-    domain=[circle], 
+    formulas=["humidity ~ 1 + temperature", "temperature ~ 1"], 
+    domain=[circle, circle], 
     verbose=True)
 print(model)
 
-# Set up the model cov. 
+# Set up the model cov. (univariate)
 model = model.setup(cov_fun=[cov_fun], domain_latent=[circle])
 print(model)
 
-# %% Create the model parameters for the simulation
-params = ModelParams(beta=[0.1, 0.5], A=np.array([[2]]), s2e=[0.5], ks=[2], f=[0.9])
+# %% [Case 1] Create the model parameters and simulate the model
+params = ModelParams(beta=[0.1, 0.5, 2], A=np.array([[3],[2]]), s2e=[2, 2], ks=[20], f=[0.9])
 
-# %% Simulate from the model
-y_sim, x_sim, tdelta = model.sim(params=params)
+# The simulation does not change the model propoerties
+y_sim, x_sim, info, tdelta = model.sim(params=params, stats=True, verbose=True)
+
 print(y_sim.shape)
 print(x_sim.shape)
 
+# %% [Case 2] Simulate the model with specific covariates 
+
+params = ModelParams(beta=[0.1, 0.5, 2, 1.2, 3], A=np.array([[3],[2]]), s2e=[2, 2], ks=[2], f=[0.9])
+
+y_sim, x_sim, info, tdelta = model.sim(formulas=["1 + temperature", "1 + humidity + I(humidity ** 2)"], params=params, stats=True, verbose=True)
+
+Xbeta = info['Xbeta']
+x_names = info['xbeta_names']
 
 # %% Plot the simulated data for the time = 1, 10, 20
 T = model.T
 
 pt = np.array(model.points[0])
+block = info['block_p']
+
 
 fix, ax = plt.subplots(2,3, figsize=(18, 12))
-
 for i, t in enumerate([0, 3, 6, 9, 12, 19]):
     row = i // 3
     col = i % 3
-    ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[:, t], cmap="viridis")
+    ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[block[1]: block[2], t], cmap="viridis")
     ax[row, col].plot(*circle.boundary.xy, color="red", label="Domain Boundary")
     ax[row, col].set_xlabel("X-axis")
     ax[row, col].set_ylabel("Y-axis")
