@@ -677,6 +677,7 @@ class LRStateSpaceModel(StateSpaceModel):
             pdim = self.pdim
             block_p = self.block_p
             points = self.points
+            T = self.T
             self._log("Using the formulas provided at initialization, lenght = {}.".format(len(formulas)))
         else:
             self._log("Building observation grid...")
