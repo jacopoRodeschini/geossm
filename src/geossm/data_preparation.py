@@ -563,34 +563,50 @@ class DesignMatricesBuilder:
         expressions : list[str]
             Patsy factor expressions, including transformations.
         """
-        names = []
-        expressions = []
         
+        
+        names = []
+        transformations = []
+    
         for term in termlist:
-            # Skip intercept-only term
+    
+            # Intercept
             if len(term.factors) == 0:
-                names.append("1")
-                expressions.append("1")
+                names.append("intercept")
+                transformations.append("1")
                 continue
-
+    
+            factor_exprs = []
+    
             for factor in term.factors:
-                expr = getattr(factor, "code", None)
-                if expr is None:
-                    try:
-                        expr = factor.name()
-                    except Exception:
-                        expr = str(factor)
-
-                expr = str(expr).strip()
-                
-                if "(" in expr:
-                    expressions.append(expr.split("(")[0])
-                    names.append(re.findall(r"\((.*?)\)", expr)[0])
+                expr = str(getattr(factor, "code", factor.name())).strip()
+                factor_exprs.append(expr)
+    
+            # Interaction term
+            if len(factor_exprs) > 1:
+                interaction = ":".join(factor_exprs)
+                names.append(interaction)
+                transformations.append(interaction)
+    
+            else:
+                expr = factor_exprs[0]
+    
+                names.append(expr)
+    
+                # I(...)
+                if expr.startswith("I("):
+                    transformations.append(expr)
+    
+                # Generic function call
+                elif "(" in expr and expr.endswith(")"):
+                    transformations.append(expr.split("(")[0])
+    
+                # Plain variable
                 else:
-                    names.append(expr)
-                    expressions.append("1")
-                
-        return names, expressions
+                    transformations.append("1")
+    
+        return names, transformations
+
 
     def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name, verbose=None):
         self._log(f"Checking time column consistency for '{time_col_name}'", verbose)
