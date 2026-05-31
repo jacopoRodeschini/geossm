@@ -6,7 +6,6 @@ Created on Tue Feb 10 13:38:28 2026
 @author: jacopo
 """
 # %% 
-from matplotlib.lines import lineStyles
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
@@ -208,7 +207,6 @@ Xbeta = info['Xbeta']
 x_names = info['xbeta_names']
 
 # %% Plot the simulated data for the time = 1, 10, 20
-T = model.T
 
 pt = np.array(model.points[0])
 block = info['block_p']

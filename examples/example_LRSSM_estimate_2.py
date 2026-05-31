@@ -247,7 +247,7 @@ est_cov_fun = est_cov_fun.setup(mesh_io)
 # 2) Create the model
 model = lrssm(
     df=gdf, 
-    formulas=["y_sim ~ 1"], 
+    formulas=["y_sim ~ 1 + temperature"], 
     domain=[domain], 
     verbose=True)
 
@@ -256,11 +256,11 @@ model = lrssm(
 model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
 print(model)
 
-# 4) fit the model 
-
-# %% Debug pls 
+# %% 4) fit the model 
+ 
 opt = FitOptions()
-opt.max_iter = 50
+opt.max_iter = 10
 opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
+print(results)
