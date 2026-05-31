@@ -956,10 +956,9 @@ class LRStateSpaceModel(StateSpaceModel):
                 R=R,
                 F=F,
                 Q=Q,
-                Xbeta=Xbeta,
-                beta=est_params.beta.value,
                 x0=est_params.x0.value,
                 Sigma0=est_params.Sigma0.value,
+                beta=est_params.beta.value,
             )
 
             # ---- E step

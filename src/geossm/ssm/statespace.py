@@ -554,34 +554,62 @@ class StateSpaceModel:
                 self._Sigma0 = jnp.eye(self.q, dtype=self.dtype)
 
         if Xbeta is not None:
-            self._Xbeta = jnp.asarray(Xbeta, dtype=self.dtype)
-            # infer time length from Xbeta shape (p, b, T)
-            try:
-                self._T = int(self._Xbeta.shape[2])
-            except Exception:
+            Xbeta_arr = jnp.asarray(Xbeta, dtype=self.dtype)
+            self._Xbeta = Xbeta_arr
+
+            # infer (p, b, T) when possible
+            if Xbeta_arr.ndim >= 3:
+                # common shape: (p, b, T)
+                self._b = int(Xbeta_arr.shape[1])
+                self._T = int(Xbeta_arr.shape[2])
+            elif Xbeta_arr.ndim == 2:
+                # ambiguous: treat second dim as b
+                self._b = int(Xbeta_arr.shape[1])
+                self._T = None
+            else:
+                self._b = None
                 self._T = None
 
+        # --- handle beta if provided ---
         if beta is not None:
-            self._beta = jnp.asarray(beta, dtype=self.dtype)
+            beta_arr = jnp.asarray(beta, dtype=self.dtype)
+            self._beta = beta_arr
+
             try:
-                self._b = int(self._beta.shape[0])
+                b_from_beta = int(beta_arr.shape[0])
             except Exception:
-                self._b = None       
+                b_from_beta = None
 
+            if b_from_beta is not None:
+                # if we've already inferred _b (e.g. from Xbeta), ensure consistency
+                if getattr(self, "_b", None) is not None and self._b != b_from_beta:
+                    raise ValueError(
+                        f"Shape mismatch: beta has length {b_from_beta} but existing Xbeta/b implies {self._b}."
+                    )
+                self._b = b_from_beta
+
+        # --- handle xbeta_names ---
         if xbeta_names is not None:
-            # Count total number of xbeta names across all the variables
-            len_xbeta_names = sum([len(xb_names) for xb_names in xbeta_names])
+            # support nested lists per-variable: count total names across variables
+            len_xbeta_names = sum(len(xb_names) for xb_names in xbeta_names)
 
+            # if _b not known yet, set it from names
+            if getattr(self, "_b", None) is None:
+                self._b = int(len_xbeta_names)
+
+            if self._b is None:
+                raise ValueError("Cannot infer number of xbeta terms (b) from inputs.")
             if len_xbeta_names != int(self._b):
-                raise ValueError(
-                    f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}."
-                )
+                raise ValueError(f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}.")
+
             self._xbeta_names = xbeta_names
-        elif self._b is not None:
-            # If beta is set but no names provided, create default names
-            self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
-        else:
-            self._xbeta_names = None
+        
+        if Xbeta is not None and xbeta_names is None:
+            # no names provided: if b known create defaults, else leave None
+            if getattr(self, "_b", None) is not None:
+                self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
+            else:
+                self._xbeta_names = None
 
         if y_t is not None:
             self._y_t = jnp.asarray(y_t, dtype=self.dtype)
@@ -601,6 +629,7 @@ class StateSpaceModel:
         self._params_dim = self._b
 
         return True
+
 
     def _check_parameters(self):
         """
