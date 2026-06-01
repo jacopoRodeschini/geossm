@@ -346,10 +346,7 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     # --- 1. Compute predicted observations (y_hat) ---
     # The term Xbeta @ beta can be computed efficiently using einsum.
     # y_hat_t = Xbeta_t @ beta + H @ x_t
-    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
-    y_hat_state_term = H @ x_t_slice
-    y_hat = y_hat_covariate_term + y_hat_state_term
-
+    y_hat, _ = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
     # --- 2. Compute sufficient statistics (S11, S10, S00) ---
     # E[sum(x x')] = sum(E[x]E[x]' + Cov(x)) = sum(x_T x_T') + sum(P_T)
     # The sum of outer products (x @ x') can be vectorized as X @ X.T
@@ -368,6 +365,19 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
 
     return y_hat, S11, S10, S00
 
+@jit
+def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
+    """Compute the predicted observations (y_hat) based on the smoothed states and the model parameters."""
+    
+    # Compute the expected valure
+    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
+    y_hat_state_term = H @ x_T[:, 1:]  # Use the smoothed states for prediction
+    y_hat = y_hat_covariate_term + y_hat_state_term
+
+    # compute the plugin uncertainty
+    Sigma_y_hat = jnp.einsum("pq,qrt,rq->pqt", H, P_T[:, :, 1:], H.T)
+
+    return y_hat, Sigma_y_hat
 
 # State Space Model Class
 class StateSpaceModel:
@@ -829,6 +839,13 @@ class StateSpaceModel:
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
+    def predict(self, x_T, P_T, Xbeta=None, beta=None):
+        """
+        Compute predicted observations (y_hat) based on smoothed states and model parameters.
+        """
+        y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(self.H, x_T, P_T, Xbeta, beta)
+        return y_hat, Sigma_y_hat
+    
     def filter(
         self,
         y_t,

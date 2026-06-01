@@ -817,7 +817,89 @@ class LRStateSpaceModel(StateSpaceModel):
         info['block_q'] = block_q
         info['sim_model'] = sim_model
 
-        return y_sim, x_sim, info, tdelta
+        return y_sim, x_sim, info, tdelta    
+    
+    def predict(self, df, modelresults: LRStateSpaceResults, formulas:list = None, verbose = True):
+        """
+        Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
+        """ 
+        self._log("Predicting response variable...")
+        if formulas is None:
+            self._log("Formulas not provided. The model initialized with the estimation one")
+            formulas = self.formulas
+            points = self.points
+        else:
+
+            # Compute the design matrices
+            self._log("Building observation grid...")
+
+            nvar, points, gridList, ndim, pdim, block_p, T = (
+                self._buildObservationGrid(df, formulas, verbose=verbose)
+            )
+            if nvar != self.nvar:
+                raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
+        
+            self._log("Building observation grid... Done.")
+
+            self._log("Building the design matrix...")
+
+            # self.train will be used later for estimation and for the results
+            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+            y_train, Xbeta = self._buildDesignMatrix(gridList)
+            # get response name
+            self.y_name = [g.y_name for g in gridList]
+            xbeta_names = [g.x_names for g in gridList]
+
+            self._log("Building the design matrix... Done.")
+
+        if modelresults is None:
+            raise ValueError("Model results must be provided for prediction")
+
+        self._log("Parsing the model results (LRStateSpaceResults)...")
+        params = modelresults.params
+        beta = params.beta.value
+        A = params.A.value
+        s2e = params.s2e.value
+        f = params.f.value
+        ks = params.ks.value
+
+        self._log("Get the filtered state")
+        x_T = modelresults.x_T
+        P_T = modelresults.P_T
+
+        # update the cov_function rescale
+        for cov, ksi in zip(self.cov_function, ks):
+            cov.rescale = ksi
+        
+        self._log("Computing the SSM model matrice H...")
+
+        # Compute the basis matrix (just one) - no boundary
+        basis = self._buildBasis_list(points, self.cov_function)
+        
+        # ---- build parametrised matrices
+        H = self._buildH_dense(A, basis)  # dense
+        self._log("Computing the H {} matrix... Done.".format(H.shape))
+
+    
+        self._log("Start Prediction the SSM...")
+        tStart = time.time()
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
+        tdelta = time.time()- tStart
+
+        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+
+        # return the results as a list (same lengh of points and block_p)
+        block_p = self.block_p
+        y_hat = []
+        Sigma_y_hat = []
+        for i in range(len(block_p)-1):
+            y_hat.append(y_hat_full[block_p[i]:block_p[i+1], :])
+            Sigma_y_hat.append(Sigma_y_hat_full[block_p[i]:block_p[i+1], block_p[i]:block_p[i+1],:])
+
+        return points, y_hat, Sigma_y_hat, tdelta
+            
+
+    
 
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
