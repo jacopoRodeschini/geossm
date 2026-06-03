@@ -375,7 +375,7 @@ def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
     y_hat = y_hat_covariate_term + y_hat_state_term
 
     # compute the plugin uncertainty
-    Sigma_y_hat = jnp.einsum("pq,qrt,rq->pqt", H, P_T[:, :, 1:], H.T)
+    Sigma_y_hat = jnp.einsum("ip,pqt,jq->ijt", H, P_T[:, :, 1:], H)
 
     return y_hat, Sigma_y_hat
 
