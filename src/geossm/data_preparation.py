@@ -22,6 +22,7 @@ from shapely.geometry import Point
 
 from dataclasses import dataclass, field
 from typing import Literal
+import ast
 
 from statsmodels.iolib.summary import Summary
 
@@ -232,8 +233,10 @@ class DesignMatricesBuilder:
             self.rhs_termlist,
             self.response_name,
             self.response_expressions,
+            self.response_column, 
             self.covariate_names,
             self.covariate_expressions,
+            self.covariate_columns,
         ) = self._checkFormula(self.formula, verbose=verbose)
         
         if not flag:
@@ -351,7 +354,7 @@ class DesignMatricesBuilder:
                 self.geodf,
                 self.geometry_id,
                 self.time_col_name,
-                self.response_name,
+                self.response_column,
                 formula,
                 verbose=verbose,
             )
@@ -390,7 +393,7 @@ class DesignMatricesBuilder:
         geodf,
         geometry_id,
         time_col_name,
-        response_name,
+        response_column,
         formula,
         verbose=None,
     ):
@@ -412,6 +415,7 @@ class DesignMatricesBuilder:
 
         geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
         self._log("Dropped duplicate space-time rows", verbose)
+        
 
         # check missing and count
         if len(desc.lhs_termlist) > 0:
@@ -421,7 +425,7 @@ class DesignMatricesBuilder:
             #    ).reset_index()
 
             #observed_sites = stp.loc[stp[response_name] > 0, geometry_id].tolist()
-            observed_sites = geodf.loc[geodf[response_name].notna(), geometry_id].unique().tolist()
+            observed_sites = geodf.loc[geodf[response_column].notna(), geometry_id].unique().tolist()
         else:
             observed_sites = geodf[geometry_id].unique().tolist()
 
@@ -440,7 +444,7 @@ class DesignMatricesBuilder:
         
         if len(desc.lhs_termlist) > 0:
 
-            geodf.loc[geodf[response_name].isna(), response_name] = np.inf
+            geodf.loc[geodf[response_column].isna(), response_column] = np.inf
             self._log("Temporarily replaced missing response values with inf for patsy", verbose)
             
             # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
@@ -511,7 +515,7 @@ class DesignMatricesBuilder:
         # parse the response variable
         if len(m.lhs_termlist) > 0:    
             # return False, "Formula must include a response variable on the left-hand side", None, [], [], []
-            y_names, y_exprs = self._extract_formula_metadata(m.lhs_termlist)
+            y_names, y_exprs, y_column = self._extract_formula_metadata(m.lhs_termlist)
 
             if len(y_names) == 0:
                 return (False, 
@@ -526,6 +530,9 @@ class DesignMatricesBuilder:
                     [],
                     [],
                 )
+            else:
+                y_column = y_column[0]
+
 
             y_names = y_names[0]
             self._log(f"Response name: {y_names}", verbose)
@@ -538,7 +545,7 @@ class DesignMatricesBuilder:
         
 
         # parse the covariates
-        x_names, x_exprs = self._extract_formula_metadata(m.rhs_termlist)
+        x_names, x_exprs, x_columns = self._extract_formula_metadata(m.rhs_termlist)
 
         
         self._log(
@@ -550,62 +557,153 @@ class DesignMatricesBuilder:
             verbose,
         )
 
-        return True, "", m.lhs_termlist, m.rhs_termlist, y_names, y_exprs, x_names, x_exprs
+        return True, "", m.lhs_termlist, m.rhs_termlist, y_names, y_exprs, y_column, x_names, x_exprs, x_columns
        
+
     def _extract_formula_metadata(self, termlist):
         """
-        Extract raw variable names and factor expressions from a patsy term list.
-
+        Extract variable names, transformations, and underlying dataframe columns
+        from a Patsy term list.
+    
         Returns
         -------
         names : list[str]
-            Raw variable names used in the terms.
-        expressions : list[str]
-            Patsy factor expressions, including transformations.
+            Original term expressions.
+    
+        transformations : list[str]
+            Transformation applied to each term.
+    
+        columns : list[str]
+            Underlying dataframe column(s) used by each term.
         """
         
+        def extract_columns(expr):
+            """
+            Extract dataframe column names from a Patsy expression.
         
+            Examples
+            --------
+            np.sqrt(np.abs(AQ_pm10)) -> ['AQ_pm10']
+            I(t2m**2)               -> ['t2m']
+            t2m                     -> ['t2m']
+            """
+        
+    
+            if expr.startswith("I(") and expr.endswith(")"):
+                expr = expr[2:-1]
+    
+            tree = ast.parse(expr, mode="eval")
+    
+            columns = []
+    
+            class ColumnVisitor(ast.NodeVisitor):
+    
+                def visit_Name(self, node):
+                    columns.append(node.id)
+    
+            ColumnVisitor().visit(tree)
+    
+            blacklist = {
+                "np",
+                "pd",
+                "math",
+            }
+    
+            return sorted(set(c for c in columns if c not in blacklist))
+
+        def extract_functions(expr):
+            """Extract nested function chain from an expression."""
+    
+            if expr.startswith("I(") and expr.endswith(")"):
+                return [expr]
+    
+            tree = ast.parse(expr, mode="eval")
+    
+            funcs = []
+    
+            class FunctionVisitor(ast.NodeVisitor):
+    
+                def visit_Call(self, node):
+    
+                    if isinstance(node.func, ast.Attribute):
+                        funcs.append(ast.unparse(node.func))
+    
+                    elif isinstance(node.func, ast.Name):
+                        funcs.append(node.func.id)
+    
+                    self.generic_visit(node)
+    
+            FunctionVisitor().visit(tree)
+    
+            return funcs
+    
         names = []
         transformations = []
+        columns = []
     
+        
         for term in termlist:
-    
+        
             # Intercept
             if len(term.factors) == 0:
-                names.append("intercept")
+                names.append("Intercept")
                 transformations.append("1")
+                columns.append("Intercept")
                 continue
-    
-            factor_exprs = []
-    
-            for factor in term.factors:
-                expr = str(getattr(factor, "code", factor.name())).strip()
-                factor_exprs.append(expr)
-    
-            # Interaction term
+        
+            factor_exprs = [
+                str(getattr(factor, "code", factor.name())).strip()
+                for factor in term.factors
+            ]
+        
+            # Interaction terms
             if len(factor_exprs) > 1:
+        
                 interaction = ":".join(factor_exprs)
+        
                 names.append(interaction)
                 transformations.append(interaction)
-    
+        
+                interaction_cols = []
+        
+                for expr in factor_exprs:
+                    interaction_cols.extend(extract_columns(expr))
+        
+                columns.append(":".join(sorted(set(interaction_cols))))
+        
             else:
+        
                 expr = factor_exprs[0]
-    
+        
                 names.append(expr)
-    
-                # I(...)
-                if expr.startswith("I("):
-                    transformations.append(expr)
-    
-                # Generic function call
-                elif "(" in expr and expr.endswith(")"):
-                    transformations.append(expr.split("(")[0])
-    
+        
                 # Plain variable
-                else:
+                if "(" not in expr:
+        
                     transformations.append("1")
-    
-        return names, transformations
+                    columns.append(expr)
+        
+                # I(...)
+                elif expr.startswith("I("):
+        
+                    transformations.append(expr)
+        
+                    cols = extract_columns(expr)
+        
+                    columns.append(":".join(cols))
+        
+                # Generic function(s)
+                else:
+        
+                    funcs = extract_functions(expr)
+        
+                    transformations.append(":".join(funcs))
+        
+                    cols = extract_columns(expr)
+        
+                    columns.append(":".join(cols))
+        
+        return names, transformations, columns
 
 
     def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name, verbose=None):
