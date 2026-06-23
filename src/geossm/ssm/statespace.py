@@ -123,6 +123,9 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     invR_diag = jnp.reciprocal(R_diag)
     invR = jnp.diag(invR_diag)
     H_dense = H.astype(dtype)
+    f_diag = jnp.diag(F)
+    FF = jnp.outer(f_diag, f_diag)
+
 
     # This is the function for a single loop iteration
     def kalman_step(carry, step_data):
@@ -131,8 +134,11 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         yt_slice, Xbeta_slice = step_data
 
         # PREDICTION
-        x_pred = F @ x_prev
-        P_pred = F @ P_prev @ F.T + Q
+        # x_pred = F @ x_prev
+        # P_pred = F @ P_prev @ F.T + Q
+        x_pred = f_diag * x_prev
+        P_pred = FF * P_prev + Q
+
 
         # RESIDUAL
         nan_mask = jnp.isnan(yt_slice)
@@ -144,9 +150,19 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         Hna_dense = H_dense * (~nan_mask)[:, None]
 
         # WOODBURY
-        invP_pred = solve(P_pred, Iq)
+        # invP_pred = solve(P_pred, Iq)
+        L_P = jnp.linalg.cholesky(P_pred + 1e-6 * Iq)  # Add small jitter for numerical stability
+        invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
+        invP_pred = invL_P.T @ invL_P
+
         M = invP_pred + Hna_dense.T @ (invR @ Hna_dense)
-        invM = solve(M, Iq)
+        
+        # invM = solve(M, Iq)
+        # invM via Cholesky of M (M is symmetric positive definite by construction)
+        L_M = jnp.linalg.cholesky(M + 1e-6 * Iq)  # Add small jitter for numerical stability
+        invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
+        invM = invL_M.T @ invL_M
+        
         invSigmaE = invR - invR @ Hna_dense @ invM @ Hna_dense.T @ invR
 
         # KALMAN GAIN
@@ -154,14 +170,23 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         # UPDATE STATE
         x_upd = x_pred + K @ e
-        P_upd = P_pred - K @ Hna_dense @ P_pred
+
+        # P_upd = P_pred - K @ Hna_dense @ P_pred
+        # Joseph form for P_upd keep the update symmetric and PD
+        IKH = (Iq - K @ Hna_dense)
+        P_upd =  IKH @ P_pred @ IKH.T + K @ R @ K.T
 
         # LOG-LIKELIHOOD
         logdetSigmaE = (
-            jnp.linalg.slogdet(M)[1]
-            + jnp.linalg.slogdet(P_pred)[1]
-            + jnp.sum(jnp.log(R_diag))
+           jnp.linalg.slogdet(M)[1]
+           + jnp.linalg.slogdet(P_pred)[1]
+           + jnp.sum(jnp.log(R_diag))
         )
+        
+        # logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
+        # logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
+        # logdetSigmaE = logdet_M + logdet_Ppred + jnp.sum(jnp.log(R_diag))
+
         logL_accum += logdetSigmaE + e.T @ (invSigmaE @ e)
 
         # 2. Pack carry for next step and outputs for this step
@@ -220,6 +245,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
 
     dtype = x_t.dtype.type()
     q = F.shape[0]
+    f_diag = jnp.diag(F)
 
     def smoother_step(carry, inputs):
         """
@@ -243,14 +269,19 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         ) = inputs
 
         # --- Core Smoother Logic (from your original loop) ---
-        J_t_1 = P_t_curr @ F.T @ invP_t_1_next
+        # J_t_1 = P_t_curr @ F.T @ invP_t_1_next
+        PF = P_t_curr * f_diag[None, :]          # (q,q): scale columns of P_t_curr
+        J_t_1 = PF @ invP_t_1_next               # (q,q)
 
         x_T_curr = x_t_curr + J_t_1 @ (x_T_next - x_t_1_next)
         P_T_curr = P_t_curr + J_t_1 @ (P_T_next - P_t_1_next) @ J_t_1.T
 
         # Lag-one covariance
-        J_t_2 = P_t_prev @ F.T @ invP_t_1_curr
-        term = P_T_1_next - F @ P_t_curr
+        PF_prev = P_t_prev * f_diag[None, :]          # (q,q): scale columns of P_t_prev
+        J_t_2 = PF_prev @ invP_t_1_curr               # (q,q)
+        
+        # term = P_T_1_next - F @ P_t_curr
+        term = P_T_1_next - (f_diag[:, None] * P_t_curr)
         P_T_1_curr = P_t_curr @ J_t_2.T + J_t_1 @ term @ J_t_2.T
 
         # 3. Prepare the new carry for the next iteration (time t-1)
@@ -309,12 +340,12 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         jnp.moveaxis(invP_t_1_curr_padded, 2, 0),
     )
     # Reverse time axis for backward pass
-    xs_reversed = jax.tree.map(lambda x: jnp.flip(x, axis=0), xs)
+    # xs_reversed = jax.tree.map(lambda x: jnp.flip(x, axis=0), xs)
 
     # --- Run the scan ---
     # The final carry is not needed, we use the stacked outputs
     _, (x_T_scanned, P_T_scanned, P_T_1_scanned) = jax.lax.scan(
-        smoother_step, init_carry, xs_reversed
+        smoother_step, init_carry, xs, reverse=True
     )
 
     # --- Post-process the results ---
