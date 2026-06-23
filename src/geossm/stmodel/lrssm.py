@@ -819,38 +819,31 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_sim, x_sim, info, tdelta    
     
-    def predict(self, df, modelresults: LRStateSpaceResults, formulas:list = None, verbose = True):
+    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
         """
         Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
         """ 
         self._log("Predicting response variable...")
-        if formulas is None:
-            self._log("Formulas not provided. The model initialized with the estimation one")
-            formulas = self.formulas
-            points = self.points
-        else:
-
-            # Compute the design matrices
-            self._log("Building observation grid...")
-
-            nvar, points, gridList, ndim, pdim, block_p, T = (
-                self._buildObservationGrid(df, formulas, verbose=verbose)
-            )
-            if nvar != self.nvar:
-                raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
         
-            self._log("Building observation grid... Done.")
+        # Compute the design matrices
+        self._log("Building observation grid...")
 
-            self._log("Building the design matrix...")
+        nvar, points, gridList, ndim, pdim, block_p, T = (
+            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose)
+        )
+        if nvar != self.nvar:
+            raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
+    
+        self._log("Building Prediction grid... Done.")
 
-            # self.train will be used later for estimation and for the results
-            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-            y_train, Xbeta = self._buildDesignMatrix(gridList)
-            # get response name
-            self.y_name = [g.y_name for g in gridList]
-            xbeta_names = [g.x_names for g in gridList]
+        self._log("Building the design matrix...")
 
-            self._log("Building the design matrix... Done.")
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        _, Xbeta_predict = self._buildDesignMatrix(gridList)
+        
+
+        self._log("Building the design matrix... Done.")
 
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
@@ -859,8 +852,6 @@ class LRStateSpaceModel(StateSpaceModel):
         params = modelresults.params
         beta = params.beta.value
         A = params.A.value
-        s2e = params.s2e.value
-        f = params.f.value
         ks = params.ks.value
 
         self._log("Get the filtered state")
@@ -883,7 +874,7 @@ class LRStateSpaceModel(StateSpaceModel):
     
         self._log("Start Prediction the SSM...")
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta_predict, beta)
         tdelta = time.time()- tStart
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
@@ -1546,12 +1537,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return flag, msg
 
-    def _buildObservationGrid(self, df, formulas, verbose=True):
+    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True):
 
         nvar = len(formulas)  # numer of the response variable
 
         # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
-        dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build() for f in formulas]
+        dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build(predict=predict) for f in formulas]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
@@ -1562,7 +1553,7 @@ class LRStateSpaceModel(StateSpaceModel):
         ndim = block_p[-1]
 
         return nvar, points, dfs, ndim, pdim, block_p, T
-
+    
     def _buildDesignMatrix(self, gridList):
 
         Ylist = [grid.y for grid in gridList if grid.y is not None]
@@ -1758,7 +1749,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 (
                     "Rank",
                     lambda: (
-                        [f"{q/p}"]
+                        [f"{q/p :4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
                         if q != "N/A" and p != "N/A"
                         else ["N/A"]
                     ),

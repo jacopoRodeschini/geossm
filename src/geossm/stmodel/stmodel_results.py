@@ -185,20 +185,12 @@ class LRStateSpaceResults(StateSpaceResults):
         self.bic = np.log(n) * k - 2 * llf
         return self.bic
 
-    def predict(self):
+    # todo: add the formulas as a argument to the predict method, to allow for different types of predictions (e.g. with or without fixed effects)
+    def predict(self, df, verbose=True):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
-        """
-        # Get the smoothed states and their covariances from the results
-        x_T = self.smoothed_state
-        P_T = self.smoothed_state_cov
-
-        # Get the model parameters (Xbeta and beta)
-        Xbeta = self.model.Xbeta if hasattr(self.model, "Xbeta") else None
-        beta = self.model.beta if hasattr(self.model, "beta") else None
-
-        # Compute the predicted observations using the parent class method
-        y_hat, Sigma_y_hat, tdelta = super().predict(x_T, P_T, Xbeta, beta)
+        """  
+        y_hat, Sigma_y_hat, tdelta = self.model.predict(df, modelresults=self, verbose=verbose)
 
         return y_hat, Sigma_y_hat, tdelta
     

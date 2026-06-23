@@ -108,7 +108,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
 # % FEM solver class
 class FEMSolver:
-    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True):
+    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
 
         # Validate inputs
         mesh = None
@@ -146,17 +146,21 @@ class FEMSolver:
         self._domain = domain if domain is not None else ConvexHull(self.vertex[:, :2])
 
         # Compute the stats associate with the mesh (angles and areas of the triangles)
-        self.print_info("Computing mesh quality statistics:angles and areas (takes a while)...")
-        self._angles, self._areas = self.compute_stats()
-        self.print_info("Mesh quality statistics computed successfully.")
+        if stats == True:
+            self.print_info("Computing mesh quality statistics:angles and areas (takes a while)...")
+            self._angles, self._areas = self.compute_stats()
+            self.print_info("Mesh quality statistics computed successfully.")
+        else:
+            self._angles, self._areas = None, None
         
         # Print the mesh quality statistics
-        msg = f"Angles [min, mean, max] = [{self._angles.min():.2f}, {self._angles.mean():.2f}, {self._angles.max():.2f}] degrees \n"
-        msg += f"Areas  [min, mean, max] = [{self._areas.min():.2f}, {self._areas.mean():.2f}, {self._areas.max():.2f}]"
-        self.print_info(msg)
+        if self._angles is not None and self._areas is not None:
+            msg = f"Angles [min, mean, max] = [{self._angles.min():.2f}, {self._angles.mean():.2f}, {self._angles.max():.2f}] degrees \n"
+            msg += f"Areas  [min, mean, max] = [{self._areas.min():.2f}, {self._areas.mean():.2f}, {self._areas.max():.2f}]"
+            self.print_info(msg)
 
         # Get warning if the mesh has bad quality (e.g. small angles)
-        if self._angles.min() < 10:
+        if self._angles is not None and self._angles.min() < 10:
             self.print_info(
                 f"Mesh has small angles (min angle = {self._angles.min():.2f} degrees). "
                 "This may lead to numerical instability. Consider refining the mesh or improving its quality."
@@ -687,7 +691,7 @@ class FEMSolver:
 
     def generate_summary(self):
         # compute the angles and areas of the triangles
-       
+
         top_left = dict(
                     [
                         ("Solver. type:", lambda: [self.__class__.__name__]),
@@ -700,10 +704,17 @@ class FEMSolver:
                         ("Mesh lines:", lambda: [f"{self.nbElements}"]), 
                         ("Mesh inner vertex (rank):", lambda: [f"{self.n_inner_points}"]),
                         ("Mesh outer vertex:", lambda: [f"{self.n_outer_points}"]),   
-                        ("Mesh angle [min, mean, max]:", lambda: [f"[{self.angles.min():.2f}, {self.angles.mean():.2f}, {self.angles.max():.2f}]"]),
-                        ("Mesh area [min, mean, max]:", lambda: [f"[{self.areas.min():.2f}, {self.areas.mean():.2f}, {self.areas.max():.2f}]"])
                     ]
                 )
+        if self.angles is None or self.areas is None:
+            top_left["Mesh angle [min, mean, max]:"] = lambda: ["N/A"]
+            top_left["Mesh area [min, mean, max]:"] = lambda: ["N/A"]
+        else:
+            top_left["Mesh angle [min, mean, max]:"] = lambda: [f"[{self.angles.min():.2f}, {self.angles.mean():.2f}, {self.angles.max():.2f}]"]
+            top_left["Mesh area [min, mean, max]:"] = lambda: [f"[{self.areas.min():.2f}, {self.areas.mean():.2f}, {self.areas.max():.2f}]"]
+            
+
+
         top_right = dict(
                     [
                         ("Box:", lambda: [f"{self.box}"]),
@@ -949,7 +960,7 @@ class spdeAppoxCov(Matern):
 
         return base
 
-    def setup(self, mesh_obj: meshio._mesh.Mesh):
+    def setup(self, mesh_obj: meshio._mesh.Mesh, stats=True, verbose=True):
         """
         Initialize the covariance model with a mesh.
 
@@ -960,6 +971,8 @@ class spdeAppoxCov(Matern):
         ----------
         mesh_obj : meshio.Mesh, optional
             A meshio.Mesh object (already loaded in memory)
+        stats : bool, optional
+            Whether to compute mesh quality statistics (default is True)
 
         Returns
         -------
@@ -993,7 +1006,7 @@ class spdeAppoxCov(Matern):
         # Initialize FEM solver
         try:
             self._meshIO = mesh_obj  # Store the mesh for potential reinitialization
-            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain)
+            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain, verbose=verbose, stats=stats)
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize FEM solver: {str(e)}") from e
@@ -1027,7 +1040,7 @@ class spdeAppoxCov(Matern):
         k = self.rescale
         K = (k**2) * self.fem_solver.mass + self.fem_solver.stiff
 
-        # Compute the precision matrix of the process y
+        # Compute the precision matrix of the process with unit marginal variance
         Q = self.sigma2k * (K @ Cinv @ K)
 
         return Q

@@ -270,15 +270,16 @@ class DesignMatricesBuilder:
         if self._is_verbose(verbose):
             self.print_info(msg)
 
-    def build(self, verbose=None):
-        
-        if self.formula is None:
-            msg = "Formula must be provided to compute design matrices"
-            raise ValueError(msg)
-        
+    def build(self, predict=False, verbose=None):
+         
         if isinstance(self.geodf, geopd.GeoDataFrame):
             self._log("Building design matrices from GeoDataFrame", verbose)
-            self.design_matrices = self._build_geodataframe(formula=self.formula, verbose=verbose)
+            
+            if predict == False:
+                self.design_matrices = self._build_geodataframe(self.lhs_termlist, self.rhs_termlist, verbose=verbose)
+            else: 
+                self.design_matrices = self._build_geodataframe([], self.rhs_termlist, verbose=verbose)
+
         else:
             raise ValueError("Input dataset must be a GeoDataFrame")   
         
@@ -346,16 +347,18 @@ class DesignMatricesBuilder:
 
         return True
 
-    def _build_geodataframe(self, formula, verbose=None):
+    def _build_geodataframe(self, lhs_termlist, rhs_termlist, verbose=None):
         self._log("Creating spatial-temporal design matrices", verbose)
+
 
         geodf, points, y, _y_design_info, Xbeta, _x_design_info, N, T, timestamps = (
             self._computedesignMatrix_geodataframe(
+                lhs_termlist, 
+                rhs_termlist, 
                 self.geodf,
                 self.geometry_id,
                 self.time_col_name,
                 self.response_column,
-                formula,
                 verbose=verbose,
             )
         )
@@ -390,25 +393,24 @@ class DesignMatricesBuilder:
 
     def _computedesignMatrix_geodataframe(
         self,
+        lhs_termlist,
+        rhs_termlist,
         geodf,
         geometry_id,
         time_col_name,
         response_column,
-        formula,
         verbose=None,
     ):
         self._log("Computing design matrix from GeoDataFrame", verbose)
-
-        desc = ModelDesc.from_formula(formula)
-
-        if desc.lhs_termlist is None and desc.rhs_termlist is None:
+        
+        if lhs_termlist is None and rhs_termlist is None:
             msg = "Formula must be provided to compute design matrices"
             raise ValueError(msg)
         
-        if desc.rhs_termlist is None:
+        if rhs_termlist is None:
             msg = "Covariate terms must be provided in the formula to compute design matrices"
             raise ValueError(msg)
-        
+
 
         geodf = geodf.sort_values([time_col_name, geometry_id])
         self._log("Dataset sorted by time and geometry id", verbose)
@@ -417,8 +419,9 @@ class DesignMatricesBuilder:
         self._log("Dropped duplicate space-time rows", verbose)
         
 
-        # check missing and count
-        if len(desc.lhs_termlist) > 0:
+        # len() >0 estimation
+        # len() =0 prediction 
+        if len(lhs_termlist) > 0:
             #stp = (
             #    geodf.groupby(geometry_id, observed=True)[response_name]
             #    .count()
@@ -442,7 +445,7 @@ class DesignMatricesBuilder:
 
         self._log("Generating design matrices...", verbose)
         
-        if len(desc.lhs_termlist) > 0:
+        if len(lhs_termlist) > 0:
 
             geodf.loc[geodf[response_column].isna(), response_column] = np.inf
             self._log("Temporarily replaced missing response values with inf for patsy", verbose)
@@ -451,7 +454,7 @@ class DesignMatricesBuilder:
             # geodf.loc[geodf[covariate_names].isna().any(axis=1), covariate_names] = np.inf
 
             ytemp, Xtemp = dmatrices(
-                formula,
+                self.formula,
                 data=geodf,
                 NA_action="raise",
                 return_type="matrix",
@@ -470,7 +473,7 @@ class DesignMatricesBuilder:
             # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
             
             Xtemp = dmatrix(
-                formula,
+                self.formula,
                 data=geodf,
                 NA_action="raise",
                 return_type="matrix",
@@ -541,7 +544,7 @@ class DesignMatricesBuilder:
             f"Response expression(s): {', '.join(y_exprs) if y_exprs else y_names}",
             verbose)
         else:
-            y_names, y_exprs = None, None
+            y_names, y_exprs, y_column = None, None, None
         
 
         # parse the covariates
