@@ -212,7 +212,8 @@ class DesignMatrices:
 
 class DesignMatricesBuilder:
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True):
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True,
+                 tmin: datetime = None, tmax: datetime = None):
         """
         Prepare the spatial-temporal dataset for modeling.
         """
@@ -262,6 +263,18 @@ class DesignMatricesBuilder:
             self._log("Input GeoDataFrame validated successfully", verbose)
         else:
             raise ValueError("Input dataset must be a GeoDataFrame")
+        
+        # Cut the dataset to the specified time range if tmin and tmax are provided       
+        if tmin is not None or tmax is not None:
+            self._log("Filtering dataset by time range", verbose)
+            if tmin is not None:
+                self.geodf = self.geodf[self.geodf[self.time_col_name] >= pd.to_datetime(tmin)]
+                self._log(f"Filtered dataset to tmin={pd.to_datetime(tmin).strftime('%Y-%m-%d')}", verbose)
+            if tmax is not None:
+                self.geodf = self.geodf[self.geodf[self.time_col_name] <= pd.to_datetime(tmax)]
+                self._log(f"Filtered dataset to tmax={pd.to_datetime(tmax).strftime('%Y-%m-%d')}", verbose)
+            self._log(f"Dataset filtered to {len(self.geodf)} rows", verbose)
+
 
     def _is_verbose(self, verbose=None) -> bool:
         return self.verbose if verbose is None else verbose
