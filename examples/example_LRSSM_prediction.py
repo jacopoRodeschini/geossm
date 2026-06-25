@@ -6,39 +6,53 @@ Created on Tue Feb 10 13:38:28 2026
 @author: jacopo
 """
 
+# %% Imports 
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon
 import numpy as np
 import pygmsh
 import gmsh
+import pandas as pd
 import geopandas as geodf
-import geossm.datasets as df
+from geossm import datasets
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
 from geossm.covmodel import FEMSolver
 
+# %% Download the the Full agrimonia dataset from zenodo repository
+
+agri_path = 'Download/Agrimonia_Dataset_v_3_0_0.csv'
+
 # %% Load the agrimonia dataset
 
-agri, shape = df.load_dataset("agrimonia")
+agri = pd.read_csv(agri_path, na_values=[
+                   "      NaN", "", "NA", "null", "-"], keep_default_na=True)
+agri['Time'] = pd.to_datetime(agri['Time'], format="%Y-%m-%d")
+
+# Import the Lombardy shape file
+_, shape = datasets.load_dataset("agrimonia")
+buffer = shape.geometry.boundary[0].buffer(0.3).boundary
+line_strings = list(buffer.geoms)
+buffer = Polygon(line_strings[0].coords)
+
+# %% Cut the dataset from 2019 to 2020
+tmin = np.datetime64("2020-01-01")
+tmax = np.datetime64("2020-12-31")
+agri = agri[(agri["Time"] >= tmin) & (agri["Time"] <= tmax)].copy()
 
 
 # %% From .csv to geopandas
 
 ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
 agri["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
 agri = geodf.GeoDataFrame(agri, crs=4326)
-
-domain = list(shape.geometry[0].geoms)[0].boundary
-buffer = list(domain.buffer(0.3).boundary.geoms)[0]
 
 
 # %% Build the model
 
 model = lrssm(
-    agri, ["np.sqrt(np.abs(AQ_pm10)) ~ 1 + WE_temp_2m"], verbose=True, domain=[Polygon(buffer)]
-)
+    agri, ["AQ_pm10 ~ 1 + WE_temp_2m + WE_tot_precipitation + WE_wind_speed_10m_mean"], verbose=True, domain=[buffer])
 
 
 print(model)
@@ -121,8 +135,8 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 opt = FitOptions()
-opt.max_iter = 5
-opt.tol_relat = 1e-4
+opt.max_iter = 50
+opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
 print(results)  # resutls.summary()
@@ -165,10 +179,101 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 
 # %% Model prediction 
 
-# call the model method 
-pred = model.predict(grid, results)
+# use the model.predict method to get the prediction and the uncertainty 
+points, y_hat, Sigma_y_hat, tdelta = model.predict(grid, results)
+# points, y_hat_v1, Sigma_y_hat, tdelta = results.predict(grid, verbose=True)
 
-# %% Call the result method
-results.predict(grid, verbose=True)
+# %% PLot the results using imshow (for each time step)
+from matplotlib.colors import Normalize
 
+# Define month boundaries (assuming daily data for a year)
+# Days: Jan(31), Feb(28), Mar(31), Apr(30), May(31), Jun(30), 
+#       Jul(31), Aug(31), Sep(30), Oct(31), Nov(30), Dec(31)
+month_ranges = [
+    (0, 31, "January"),
+    (31, 59, "February"),
+    (59, 90, "March"),
+    (90, 120, "April"),
+    (120, 151, "May"),
+    (151, 181, "June"),
+    (181, 212, "July"),
+    (212, 243, "August"),
+    (243, 273, "September"),
+    (273, 304, "October"),
+    (304, 334, "November"),
+    (334, 365, "December")
+]
 
+# Calculate monthly averages
+monthly_avg = []
+month_names = []
+for start, end, name in month_ranges:
+    avg = np.nanmean(y_hat[0][:, start:end], axis=1)
+    monthly_avg.append(avg)
+    month_names.append(name)
+
+# Plot
+fig, axs = plt.subplots(3, 4, figsize=(14, 10))
+
+# Create normalization for consistent coloring
+vmin = np.nanmin([np.nanmin(m) for m in monthly_avg])
+vmax = np.nanmax([np.nanmax(m) for m in monthly_avg])
+norm = Normalize(vmin=vmin, vmax=vmax)
+
+for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
+    ax = axs[i // 4, i % 4]
+
+    # Get unique sorted coordinates
+    x_unique = np.sort(np.unique(points[0][:, 0]))
+    y_unique = np.sort(np.unique(points[0][:, 1]))
+    
+    # Create mapping dictionaries
+    x_to_idx = {x: idx for idx, x in enumerate(x_unique)}
+    y_to_idx = {y: idx for idx, y in enumerate(y_unique)}
+    
+    # Create 2D grid
+    rows, cols = len(y_unique), len(x_unique)
+    Z = np.full((rows, cols), np.nan)
+    
+    # Fill grid
+    x_indices = np.array([x_to_idx[x] for x in points[0][:, 0]])
+    y_indices = np.array([y_to_idx[y] for y in points[0][:, 1]])
+    Z[y_indices, x_indices] = avg_data
+    
+    # Mask pixels outside boundary
+    for row_idx in range(rows):
+        for col_idx in range(cols):
+            x_coord = x_unique[col_idx]
+            y_coord = y_unique[row_idx]
+            point = Point(x_coord, y_coord)
+            if not shape.geometry.iloc[0].contains(point):
+                Z[row_idx, col_idx] = np.nan
+    
+    # Set extent
+    extent = [x_unique.min(), x_unique.max(), y_unique.min(), y_unique.max()]
+    
+    # Plot with white background for NaN values
+    cmap = plt.cm.YlOrBr.copy()
+    cmap.set_bad(color='white')
+    
+    im = ax.imshow(
+        Z,
+        cmap=cmap,
+        origin="lower",
+        extent=extent,
+        interpolation="none",
+        aspect="auto",
+        norm=norm
+    )
+    shape.boundary.plot(ax=ax, color="black", linewidth=1)
+
+    # Style
+    ax.set_title(month_name, fontsize=12, fontweight="bold")
+    ax.grid(True, linestyle="--", alpha=0.6)
+
+# Add shared colorbar
+fig.subplots_adjust(right=0.88)
+cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
+fig.colorbar(im, cax=cbar_ax, label="PM10 (µg/m³)")
+
+plt.tight_layout(rect=[0, 0, 0.88, 1])
