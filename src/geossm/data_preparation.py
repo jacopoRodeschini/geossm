@@ -445,18 +445,17 @@ class DesignMatricesBuilder:
 
         self._log("Generating design matrices...", verbose)
         
+        from patsy import NAAction
+        class NAPassthrough(NAAction):
+            def __init__(self):
+                super().__init__(NA_types=[])  # tell patsy not to treat anything as NA
+        
         if len(lhs_termlist) > 0:
-
-            geodf.loc[geodf[response_column].isna(), response_column] = np.inf
-            self._log("Temporarily replaced missing response values with inf for patsy", verbose)
-            
-            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
-            # geodf.loc[geodf[covariate_names].isna().any(axis=1), covariate_names] = np.inf
 
             ytemp, Xtemp = dmatrices(
                 self.formula,
                 data=geodf,
-                NA_action="raise",
+                NA_action=NAPassthrough(),
                 return_type="matrix",
             )
             self._log(f"y name: {ytemp.design_info.column_names[0]}", verbose)
@@ -468,14 +467,12 @@ class DesignMatricesBuilder:
             y = ytemp.reshape(T, N).T
             self._log(f"Reshaped y to {y.shape}", verbose)
 
-
         else:
-            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
             
             Xtemp = dmatrix(
-                self.formula,
+                ModelDesc(lhs_termlist, rhs_termlist),
                 data=geodf,
-                NA_action="raise",
+                NA_action=NAPassthrough(),
                 return_type="matrix",
             )
             y = None
