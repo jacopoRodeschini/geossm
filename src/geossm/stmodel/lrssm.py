@@ -887,7 +887,6 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
         # return the results as a list (same lengh of points and block_p)
-        block_p = self.block_p
         y_hat = []
         Sigma_y_hat = []
         for i in range(len(block_p)-1):

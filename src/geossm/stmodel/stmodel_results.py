@@ -190,9 +190,9 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
         """  
-        y_hat, Sigma_y_hat, tdelta = self.model.predict(df, modelresults=self, verbose=verbose)
+        points, y_hat, Sigma_y_hat, tdelta = self.model.predict(df, modelresults=self, verbose=verbose)
 
-        return y_hat, Sigma_y_hat, tdelta
+        return points, y_hat, Sigma_y_hat, tdelta
     
 
     def generate_summary(self):
