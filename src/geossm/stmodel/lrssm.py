@@ -824,13 +824,20 @@ class LRStateSpaceModel(StateSpaceModel):
         Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
         """ 
         self._log("Predicting response variable...")
-        
+
+        # Cut the dataframe time to the time range of the model results
+        self._log("Cutting the dataframe to the time range of the model results...")
+        tmin = self.gridList[0].timestamps.min()
+        tmax = self.gridList[0].timestamps.max()
+
+         
         # Compute the design matrices
         self._log("Building observation grid...")
 
         nvar, points, gridList, ndim, pdim, block_p, T = (
-            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose)
+            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose, tmin=tmin, tmax=tmax)
         )
+        
         if nvar != self.nvar:
             raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
     
@@ -855,8 +862,8 @@ class LRStateSpaceModel(StateSpaceModel):
         ks = params.ks.value
 
         self._log("Get the filtered state")
-        x_T = modelresults.x_T
-        P_T = modelresults.P_T
+        x_T = modelresults.x_smoothed
+        P_T = modelresults.P_smoothed
 
         # update the cov_function rescale
         for cov, ksi in zip(self.cov_function, ks):
@@ -1099,7 +1106,20 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Create the results object...")
         
         results = LRStateSpaceResults(
-            model=self, y_hat=y_hat, params=est_params, nstats=nstat, options=options)
+            model=self, 
+            params=est_params, 
+            nstats=nstat, 
+            options=options,
+            # main arrays
+            y_hat=y_hat, 
+            x_smoothed=x_T,
+            P_smoothed=P_T,
+            P_pred_smoothed=None,
+            # sufficient statistics
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            )
 
         return results
 
@@ -1537,12 +1557,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return flag, msg
 
-    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True):
+    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None):
 
         nvar = len(formulas)  # numer of the response variable
 
         # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
-        dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build(predict=predict) for f in formulas]
+        dfs = [DesignMatricesBuilder(df, f, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]

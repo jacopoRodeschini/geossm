@@ -869,11 +869,11 @@ class StateSpaceModel:
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
-    def predict(self, x_T, P_T, Xbeta=None, beta=None):
+    def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
         """
-        y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(self.H, x_T, P_T, Xbeta, beta)
+        y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
         return y_hat, Sigma_y_hat
     
     def filter(
