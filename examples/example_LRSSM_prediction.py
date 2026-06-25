@@ -121,7 +121,7 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 opt = FitOptions()
-opt.max_iter = 10
+opt.max_iter = 5
 opt.tol_relat = 1e-4
 
 results = model.fit(options=opt)
@@ -144,17 +144,12 @@ def converter(value):
 
 # grid = pd.read_csv(path, na_values=[
 #                    "      NaN", "        NA", "", "NA", "null", "-"], keep_default_na=True, converters={col: converter for col in range(45)})
-
-grid = pd.read_csv(path, na_values=["      NaN", "        NA", "", "NA", "null", "-"])
+grid = pd.read_csv(path, na_values=["      NaN", "        NA", "", "NA", "null", "-", '       NA'])
 grid['Time'] = pd.to_datetime(grid['Time'], format="%Y-%m-%d")
 
-
-cols_to_convert = grid.select_dtypes(include=["object"]).columns
-
-grid[cols_to_convert] = grid[cols_to_convert].apply(
-    pd.to_numeric,
-    errors="coerce"
-)
+# Remove columns with object type (non-numeric) to avoid issues during prediction
+cols_to_remove = grid.select_dtypes(include=["object"]).columns
+grid = grid.drop(columns=cols_to_remove)
 
 
 # Create Point(lat,lon) for each observation
@@ -170,6 +165,10 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 
 # %% Model prediction 
 
+# call the model method 
+pred = model.predict(grid, results)
+
+# %% Call the result method
 results.predict(grid, verbose=True)
 
 
