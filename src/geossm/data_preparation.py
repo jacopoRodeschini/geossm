@@ -385,11 +385,11 @@ class DesignMatricesBuilder:
         return DesignMatrices(
             y=y,
             y_design_info=_y_design_info,
-            y_name = self.response_name,
+            y_name = _y_design_info.design_info.column_names if _y_design_info else None,
             y_expr = self.response_expressions,
             X=Xbeta,
             X_design_info=_x_design_info,
-            x_names = self.covariate_names,
+            x_names = _x_design_info.design_info.column_names if _x_design_info else None,
             x_exprs = self.covariate_expressions,
             points=points,
             formula=self.formula,
