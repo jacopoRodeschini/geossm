@@ -121,7 +121,8 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.llf_path = [v["logL"] for v in self.nstats]
         self.llf = self.llf_path[-1]
-
+        
+    
     @property
     def bse(self):
         se = np.sqrt(np.diag(self.cov_params))
@@ -184,6 +185,15 @@ class LRStateSpaceResults(StateSpaceResults):
         self.bic = np.log(n) * k - 2 * llf
         return self.bic
 
+    # todo: add the formulas as a argument to the predict method, to allow for different types of predictions (e.g. with or without fixed effects)
+    def predict(self, df, verbose=True):
+        """
+        Compute predicted observations (y_hat) based on smoothed states and model parameters.
+        """  
+        points, y_hat, Sigma_y_hat, tdelta = self.model.predict(df, modelresults=self, verbose=verbose)
+
+        return points, y_hat, Sigma_y_hat, tdelta
+    
 
     def generate_summary(self):
 
@@ -258,20 +268,21 @@ class LRStateSpaceResults(StateSpaceResults):
         ]  # Create a list with one SimpleNamespace for compatibility with summary structure
 
         def conf_int_params(params, bse, alpha=0.05):
-            lower = m.params - 1.96 * m.bse
-            upper = m.params + 1.96 * m.bse
+            lower = params - 1.96 * bse
+            upper = params + 1.96 * bse
             return np.column_stack([lower, upper])
 
         # fixed effect
-        for i, m in enumerate(self.measurement):
+        for m in self.measurement:
             m.results = np.array([0])  # Dummy results for compatibility
             m.model = None
 
             # Get the parameter values for this variable and assign them to the model namespace
-            m.params = self.params.beta.value[0:2]
+            m.params = self.params.beta.value
 
             # Get the parameter names for this variable and assign them to the model namespace
-            m.params_name = self.model.xbeta_names
+            xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
+            m.params_name = xnames_stack
 
             m.bse = np.full(
                 len(m.params), np.nan
