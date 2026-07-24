@@ -25,14 +25,13 @@ class FitOptions:
     def __repr__(self):
         return self.__str__()
 
-
+@tree_util.register_pytree_node_class
 @dataclass
 class Param:
     name: str
     value: jnp.ndarray | None
     fixed: bool = False
     bse: jnp.ndarray | None = None  # standard error of the parameter estimate (optional, can be computed later)
-
 
     def __post_init__(self):
         if self.value is not None:
@@ -68,13 +67,30 @@ class Param:
 
     def __len__(self):
         return self.size
+    
+    def tree_flatten(self):
+        # value is the only differentiable leaf
+        children = (self.value,)
+        aux_data = (self.name, self.fixed, self.bse)
+        return children, aux_data
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        name, fixed, bse = aux_data
+        (value,) = children
+        return cls(
+            name=name,
+            value=value,
+            fixed=fixed,
+            bse=bse,
+        )
 
     def __repr__(self):
         status = "fixed" if self.fixed else "free"
         shape = self.shape
         return f"Param(name='{self.name}', shape={shape}, {status})"
 
-
+@tree_util.register_pytree_node_class
 @dataclass
 class ModelParams:
     beta: Param | None = None
@@ -129,6 +145,23 @@ class ModelParams:
     @property
     def shape(self):
         return (self.size,)
+    
+    def tree_flatten(self):
+        children = (
+            self.beta,
+            self.s2e,
+            self.f,
+            self.A,
+            self.ks,
+            self.x0,
+            self.Sigma0,
+        )
+
+        return children, None
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        return cls(*children)
 
     def __str__(self):
         lines = ["ModelParams:"]

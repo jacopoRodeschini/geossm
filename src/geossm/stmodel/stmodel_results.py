@@ -8,34 +8,8 @@ from scipy import stats
 import time
 import jax
 import jax.numpy as jnp
-from jax import tree_util
 
 ArrayLike = Optional[Any]
-
-# %% Utils function to make the params dataclass differentiable with JAX
-def _modelparams_flatten(params):
-    values = (params.beta.value, params.s2e.value, params.f.value, 
-              params.A.value, params.ks.value, params.x0.value, params.Sigma0.value)
-    keys = ('beta', 's2e', 'f', 'A', 'ks', 'x0', 'Sigma0')
-    return values, keys
-
-def _modelparams_unflatten(keys, values):
-    return ModelParams(
-        beta=Param('beta', values[0]) if values[0] is not None else None,
-        s2e=Param('s2e', values[1]) if values[1] is not None else None,
-        f=Param('f', values[2]) if values[2] is not None else None,
-        A=Param('A', values[3]) if values[3] is not None else None,
-        ks=Param('ks', values[4]) if values[4] is not None else None,
-        x0=Param('x0', values[5]) if values[5] is not None else None,
-        Sigma0=Param('Sigma0', values[6]) if values[6] is not None else None,
-    )
-
-# This way JAX treats only the .value fields as differentiable leaf nodes.
-tree_util.register_pytree_namespace(
-    ModelParams,
-    _modelparams_flatten,
-    _modelparams_unflatten,
-)
 
 # %% Results class for LR State Space Model
 
