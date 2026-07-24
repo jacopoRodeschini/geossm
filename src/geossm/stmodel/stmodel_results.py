@@ -5,6 +5,9 @@ from geossm.stmodel.param import ModelParams, FitOptions
 from geossm.ssm import StateSpaceResults
 from types import SimpleNamespace
 from scipy import stats
+import time
+import jax
+import jax.numpy as jnp
 
 ArrayLike = Optional[Any]
 
@@ -48,13 +51,13 @@ class LRStateSpaceResults(StateSpaceResults):
         self.llf_path = None  # log-likelihood across EM iterations
 
         # Inference (see attributes and methods below)
-        self._cov_params = None
         self._tvalues = None
         self._pvalues = None
         self._aic = None
         self._bic = None
         self._n_params = None
         self._hessian = None
+        self._cov_params = None
 
         self._p_block = None
         self._q_block = None
@@ -121,7 +124,51 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.llf_path = [v["logL"] for v in self.nstats]
         self.llf = self.llf_path[-1]
+
+    
+    def _compute_hessian(self):
+        """
+        Compute the Hessian matrix of the log-likelihood function at the estimated parameters.
+        """
+        if self._hessian is not None:
+            return self._hessian
+
+        params = self.params.copy()  # Create a copy of the parameters to avoid modifying the original
+
+        ts = time.time()
+
+        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
+        hesfun = jax.hessian(self.model._observed_logL)
+
+        # Evaluate the Hessian at the estimated parameters
+        # the Information matrix, which is the negative of the second derivative of the log-likelihood 
+        # function
+        hessian = hesfun(params)
+        jax.block_until_ready(hessian)
+        tdelta = time.time() - ts
+
+        self._hessian = hessian
+        return hessian, tdelta
         
+    def _compute_cov_params(self):
+        """
+        Compute the standard errors of the estimated parameters based on the Hessian matrix.
+        """
+        if self._cov_params is not None:
+            return self._cov_params
+
+        self._log("Computing Hessian and standard errors of the parameters", verbose=True)
+        hessian, tdelta = self._compute_hessian()
+        self._log(f"Hessian computed in {tdelta:.3f} seconds", verbose=True)
+
+        # Compute the covariance matrix as the inverse of the Hessian
+        cov_params = jnp.linalg.inv(hessian)
+
+        # check if it is postive definte
+        # chol = jnp.linalg.cholesky(cov_params)
+
+        self._cov_params = cov_params
+        return cov_params
     
     @property
     def bse(self):
@@ -185,7 +232,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self.bic = np.log(n) * k - 2 * llf
         return self.bic
 
-    # todo: add the formulas as a argument to the predict method, to allow for different types of predictions (e.g. with or without fixed effects)
     def predict(self, df, verbose=True):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
+from geossm.ssm import _filter_kernelJAX
 from geossm.covmodel import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
@@ -1315,6 +1316,70 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
+
+    
+    def _compute_observed_logL_geossm(self, params, stack_dim, y_t, Xbeta, basis,
+                           x0, Sigma0, pdim, qdim,
+                           stiff_list, mass_list, inner_idx_list,
+                           nvar, nlat):
+        """
+        Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
+        Note that x0, Sigma0 are considered fixed and known, and are passed as arguments. No std computation on them.
+        """
+        
+        beta0 = params.beta.value
+        A0    = params.A.value.reshape((nvar, nlat))
+        s2e0  = params.s2e.value
+        f0    = params.f.value
+        ks0   = params.ks.value
+
+        H    = self._buildH_dense(A0, basis)
+        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
+
+        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_idx_list)
+        Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0]))
+
+        _, _, _, _, _, _, logL = self._filter_kernelJAX(
+            y_t, H, R, F, Q,
+            jnp.array(x0,     dtype=y_t.dtype),
+            jnp.array(Sigma0, dtype=y_t.dtype),
+            Xbeta, beta0
+        )
+        return logL
+
+    # analogo di compute_invQ_jax() di utils.py
+    # usa fem_solver.stiff / mass / inner di geossm invece di stiff[i]/mass[i]/ninner[i]
+    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_idx_list):
+        """
+        Precision matrix — JAX-differenziabile rispetto a ks.
+        stiff_list, mass_list : liste di np.array (estratti da fem_solver)
+        inner_idx_list        : lista di np.array di indici interi
+                                (np.where(fcov.fem_solver.inner)[0])
+        """
+        invQ_blocks = []
+        for i in range(len(ks)):
+            ki = ks[i]
+            C  = jnp.array(mass_list[i])
+            G  = jnp.array(stiff_list[i])
+
+            Ci      = jnp.diag(1.0 / C.diagonal())
+            K       = ki**2 * C + G
+            sigma2k = (jax.scipy.special.gamma(1.0) /
+                    (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
+            Qi = sigma2k * (K @ Ci @ K)
+
+            # usa indici interi (non boolean) per compatibilità JAX
+            ii  = jnp.array(inner_idx_list[i])
+            oi  = jnp.array([j for j in range(Qi.shape[0])
+                            if j not in set(inner_idx_list[i].tolist())])
+
+            Q_11 = Qi[jnp.ix_(ii, ii)]
+            Q_12 = Qi[jnp.ix_(ii, oi)]
+            Q_22 = Qi[jnp.ix_(oi, oi)]
+            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0])) @ Q_12.T
+            invQ_blocks.append(Q_mar)
+
+        return jax.scipy.linalg.block_diag(*invQ_blocks)
 
     def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
 
