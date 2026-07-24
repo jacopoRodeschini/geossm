@@ -112,10 +112,6 @@ print(mesh_io)
 # plot the mesh (use the fem_solver utlities)
 fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
 
-# plot the mesh using the utilities
-fig, ax = plt.subplots(figsize=(8, 8))
-fem_solver.plot_mesh(ax=ax)
-
 # %% Set up the lrssm model (univiarte latent)
 
 # add the mesh object and the domain where the laten domain is defined
@@ -126,20 +122,16 @@ model = model.setup([mesh_io])
 # %% Estimate the Model (default estimation options)
 
 opt = FitOptions()
-opt.max_iter = 15
+opt.max_iter = 5
 opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
 print(results)  # resutls.summary()
 
 
-# %% Plot the likelihood curve
-fig, ax = plt.subplots()
-ax.plot(np.array(results.llf_path[1:]))
-ax.set_xlabel("Iteration")
-ax.set_ylabel("Log Likelihood")
-ax.set_title("Log Likelihood Curve")
-ax.grid()
+# %% Compute the standard errors of the parameters
 
-# %% 
+hessian = results.compute_cov_params()
+
+
 
