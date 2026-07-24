@@ -69,21 +69,30 @@ class Param:
         return self.size
     
     def tree_flatten(self):
-        # value is the only differentiable leaf
-        children = (self.value,)
-        aux_data = (self.name, self.fixed, self.bse)
+
+        if self.fixed:
+            children = ()
+            aux_data = (self.name, self.value, self.fixed, self.bse)
+        else:
+            children = (self.value,)
+            aux_data = (self.name, self.fixed, self.bse)
+
         return children, aux_data
+
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        name, fixed, bse = aux_data
-        (value,) = children
-        return cls(
-            name=name,
-            value=value,
-            fixed=fixed,
-            bse=bse,
-        )
+
+        if len(children) == 0:
+            name, value, fixed, bse = aux_data
+        else:
+            name, fixed, bse = aux_data
+            (value,) = children
+
+        return cls(name=name,
+                value=value,
+                fixed=fixed,
+                bse=bse)
 
     def __repr__(self):
         status = "fixed" if self.fixed else "free"
