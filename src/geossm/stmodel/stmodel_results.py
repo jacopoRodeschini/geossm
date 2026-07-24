@@ -137,10 +137,21 @@ class LRStateSpaceResults(StateSpaceResults):
 
         params = self.params.copy()  # Create a copy of the parameters to avoid modifying the original
 
+        # fix x0, Sigma0, so that no derivatives are computed
+        params.x0.fixed = True
+        params.Sigma0.fixed = True
+        
         ts = time.time()
-
+        
+        # Compute the function 
+        x0 = params.x0.value
+        Sigma0 = params.Sigma0.value
+        
+        fun = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
+        fun(params)
+        
         # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
-        hesfun = jax.hessian(self.model._observed_logL)
+        hesfun = jax.hessian(fun)
 
         # Evaluate the Hessian at the estimated parameters
         # the Information matrix, which is the negative of the second derivative of the log-likelihood 

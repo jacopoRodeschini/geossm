@@ -1318,12 +1318,9 @@ class LRStateSpaceModel(StateSpaceModel):
         return fun / 1e4
 
     
-    def _observed_logL(self, params):
+    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
 
-        # Define the likelihood function with fixed parameters for Hessian computation
-        est_x0 = self.params.x0.value
-        est_Sigma0 = self.params.Sigma0.value
-
+        
         # Compute the FEM basis functions for the latent field
         basis = self._buildBasis_list(self.points, self.cov_function)
 
@@ -1338,31 +1335,31 @@ class LRStateSpaceModel(StateSpaceModel):
         # get the stiff and the mass matrix list
         stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=jnp.float32) for cov in self.cov_function]
         mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=jnp.float32) for cov in self.cov_function]
-        ninner = [jnp.array(cov.fem_solver.inner, dtype=jnp.int32) for cov in self.cov_function]
+        ninner = [jnp.array(cov.fem_solver.inner, dtype=bool) for cov in self.cov_function]
 
         observed_logL = partial(
             self._compute_observed_logL,
-            y_t=self.y_obs,           # ensure JAX array
-            Xbeta=self.Xbeta,
+            y_t=y_obs,           # ensure JAX array
+            Xbeta=Xbeta,
             basis=basis,
-            x0=est_x0,
-            Sigma0=est_Sigma0,
+            x0=x0,
+            Sigma0=Sigma0,
             pdim=pdim,
             qdim=qdim,
-            stiff=stiff,
-            mass=mass,
-            ninner=ninner,
+            stiff_list=stiff,
+            mass_list=mass,
+            inner_list=ninner,
             nvar= self.nvar,
             nlat= self.nlat,
             )
-        
+         
         return observed_logL
 
 
 
-    def _compute_observed_logL(self, params, stack_dim, y_t, Xbeta, basis,
+    def _compute_observed_logL(self, params, y_t, Xbeta, basis,
                            x0, Sigma0, pdim, qdim,
-                           stiff_list, mass_list, inner_idx_list,
+                           stiff_list, mass_list, inner_list,
                            nvar, nlat):
         """
         Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
@@ -1377,11 +1374,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         H    = self._buildH_dense(A0, basis)
         R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
+        
 
-        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_idx_list)
+        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
         Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0]))
 
-        _, _, _, _, _, _, logL = self._filter_kernelJAX(
+        _, _, _, _, _, _, logL = _filter_kernelJAX(
             y_t, H, R, F, Q,
             jnp.array(x0,     dtype=y_t.dtype),
             jnp.array(Sigma0, dtype=y_t.dtype),
@@ -1389,9 +1387,7 @@ class LRStateSpaceModel(StateSpaceModel):
         )
         return logL
 
-    # analogo di compute_invQ_jax() di utils.py
-    # usa fem_solver.stiff / mass / inner di geossm invece di stiff[i]/mass[i]/ninner[i]
-    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_idx_list):
+    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_list):
         """
         Precision matrix — JAX-differenziabile rispetto a ks.
         stiff_list, mass_list : liste di np.array (estratti da fem_solver)
@@ -1403,7 +1399,8 @@ class LRStateSpaceModel(StateSpaceModel):
             ki = ks[i]
             C  = jnp.array(mass_list[i])
             G  = jnp.array(stiff_list[i])
-
+            current_inner = inner_list[i]
+            
             Ci      = jnp.diag(1.0 / C.diagonal())
             K       = ki**2 * C + G
             sigma2k = (jax.scipy.special.gamma(1.0) /
@@ -1411,13 +1408,19 @@ class LRStateSpaceModel(StateSpaceModel):
             Qi = sigma2k * (K @ Ci @ K)
 
             # usa indici interi (non boolean) per compatibilità JAX
-            ii  = jnp.array(inner_idx_list[i])
-            oi  = jnp.array([j for j in range(Qi.shape[0])
-                            if j not in set(inner_idx_list[i].tolist())])
-
-            Q_11 = Qi[jnp.ix_(ii, ii)]
-            Q_12 = Qi[jnp.ix_(ii, oi)]
-            Q_22 = Qi[jnp.ix_(oi, oi)]
+            n = len(current_inner)
+            n_inner = sum(current_inner)
+            n_outer = n - n_inner
+            ii = jnp.where(current_inner, size=n_inner)[0]
+            oi = jnp.where(~current_inner, size=n_outer)[0]
+            
+            perm = jnp.concatenate((ii, oi))
+            Qperm = Qi[perm][:, perm]
+            
+            Q_11 = Qperm[:n_inner, :n_inner]
+            Q_12 = Qperm[:n_inner, n_inner:]
+            Q_22 = Qperm[n_inner:, n_inner:]
+               
             Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0])) @ Q_12.T
             invQ_blocks.append(Q_mar)
 
