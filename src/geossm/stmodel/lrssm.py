@@ -1318,7 +1318,49 @@ class LRStateSpaceModel(StateSpaceModel):
         return fun / 1e4
 
     
-    def _compute_observed_logL_geossm(self, params, stack_dim, y_t, Xbeta, basis,
+    def _observed_logL(self, params):
+
+        # Define the likelihood function with fixed parameters for Hessian computation
+        est_x0 = self.params.x0.value
+        est_Sigma0 = self.params.Sigma0.value
+
+        # Compute the FEM basis functions for the latent field
+        basis = self._buildBasis_list(self.points, self.cov_function)
+
+        # cov_function = self.cov_function
+        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
+        
+        # Get latent dimension (i.e. the rank)
+        qdim = jnp.array(
+            [cov.fem_solver.n_inner_points for cov in self.cov_function],
+            dtype=jnp.int32)
+        
+        # get the stiff and the mass matrix list
+        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=jnp.float32) for cov in self.cov_function]
+        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=jnp.float32) for cov in self.cov_function]
+        ninner = [jnp.array(cov.fem_solver.inner, dtype=jnp.int32) for cov in self.cov_function]
+
+        observed_logL = partial(
+            self._compute_observed_logL,
+            y_t=self.y_obs,           # ensure JAX array
+            Xbeta=self.Xbeta,
+            basis=basis,
+            x0=est_x0,
+            Sigma0=est_Sigma0,
+            pdim=pdim,
+            qdim=qdim,
+            stiff=stiff,
+            mass=mass,
+            ninner=ninner,
+            nvar= self.nvar,
+            nlat= self.nlat,
+            )
+        
+        return observed_logL
+
+
+
+    def _compute_observed_logL(self, params, stack_dim, y_t, Xbeta, basis,
                            x0, Sigma0, pdim, qdim,
                            stiff_list, mass_list, inner_idx_list,
                            nvar, nlat):

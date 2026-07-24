@@ -1,8 +1,8 @@
 from dataclasses import dataclass, replace
 import jax.numpy as jnp
+from jax import tree_util
 
 # %% Data class supports
-
 
 @dataclass
 class FitOptions:
@@ -31,10 +31,14 @@ class Param:
     name: str
     value: jnp.ndarray | None
     fixed: bool = False
+    bse: jnp.ndarray | None = None  # standard error of the parameter estimate (optional, can be computed later)
+
 
     def __post_init__(self):
         if self.value is not None:
             self.value = jnp.atleast_1d(jnp.asarray(self.value))
+        if self.bse is not None:
+            self.bse = jnp.atleast_1d(jnp.asarray(self.bse))
 
     def set(self, new_value):
         """Update parameter value if not fixed."""
@@ -104,6 +108,7 @@ class ModelParams:
         # raw value, wrap into Param
         return Param(name=name, value=jnp.atleast_1d(jnp.asarray(value)), fixed=False)
 
+
     def as_dict(self):
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}
 
@@ -152,3 +157,15 @@ class ModelParams:
 
     def __repr__(self):
         return self.__str__()
+
+    def copy(self):
+        """Return a deep copy of the ModelParams."""
+        return ModelParams(
+            beta=Param(self.beta.name, self.beta.value.copy() if self.beta.value is not None else None, self.beta.fixed, self.beta.bse.copy() if self.beta.bse is not None else None),
+            s2e=Param(self.s2e.name, self.s2e.value.copy() if self.s2e.value is not None else None, self.s2e.fixed, self.s2e.bse.copy() if self.s2e.bse is not None else None),
+            f=Param(self.f.name, self.f.value.copy() if self.f.value is not None else None, self.f.fixed, self.f.bse.copy() if self.f.bse is not None else None),
+            A=Param(self.A.name, self.A.value.copy() if self.A.value is not None else None, self.A.fixed, self.A.bse.copy() if self.A.bse is not None else None),
+            ks=Param(self.ks.name, self.ks.value.copy() if self.ks.value is not None else None, self.ks.fixed, self.ks.bse.copy() if self.ks.bse is not None else None),
+            x0=Param(self.x0.name, self.x0.value.copy() if self.x0.value is not None else None, self.x0.fixed, self.x0.bse.copy() if self.x0.bse is not None else None),
+            Sigma0=Param(self.Sigma0.name, self.Sigma0.value.copy() if self.Sigma0.value is not None else None, self.Sigma0.fixed, self.Sigma0.bse.copy() if self.Sigma0.bse is not None else None),
+        )
