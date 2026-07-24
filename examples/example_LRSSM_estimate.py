@@ -6,6 +6,8 @@ Created on Tue Feb 10 13:38:28 2026
 @author: jacopo
 """
 
+# %% 
+
 import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon
 import numpy as np
@@ -19,6 +21,8 @@ from geossm.stmodel import ModelParams
 from geossm.covmodel import FEMSolver
 
 # %% Load the agrimonia dataset
+
+print(df.list_datasets())
 
 agri, shape = df.load_dataset("agrimonia")
 
@@ -80,7 +84,7 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
         # Allow triangles to be very large
-        gmsh.infooption.setNumber("Mesh.CharacteristicLengthMax", lc)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
         # Only limit the absolute minimum to prevent crashes
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
 
