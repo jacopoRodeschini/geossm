@@ -1385,8 +1385,10 @@ class LRStateSpaceModel(StateSpaceModel):
             jnp.array(Sigma0, dtype=y_t.dtype),
             Xbeta, beta0
         )
-        return logL
 
+        # return the positive log-likelihood (to be maximized)
+        return logL
+    
     def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_list):
         """
         Precision matrix — JAX-differenziabile rispetto a ks.

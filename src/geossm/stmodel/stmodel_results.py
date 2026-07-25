@@ -8,8 +8,77 @@ from scipy import stats
 import time
 import jax
 import jax.numpy as jnp
+from dataclasses import replace, fields
+
 
 ArrayLike = Optional[Any]
+
+# %% [Utils] Define pack/unpack helpers to flatten params to a 1D array
+
+def _pack_params(params):
+    """Flatten free parameter values into one 1D JAX array."""
+    parts = []
+    meta = []
+    start = 0
+
+    for f in fields(params):
+        p = getattr(params, f.name)
+
+        if p is None or p.value is None or p.fixed:
+            continue
+
+        arr = jnp.asarray(p.value).ravel()
+        stop = start + arr.size
+        parts.append(arr)
+        meta.append((f.name, p.value.shape, start, stop))
+        start = stop
+
+    if parts:
+        vec = jnp.concatenate(parts)
+    else:
+        vec = jnp.zeros((0,), dtype=jnp.float32)
+
+    return vec, meta
+
+
+def _unpack_params(vec, template_params, meta):
+    """Rebuild ModelParams from flat vector using template_params as template."""
+    meta_map = {name: (shape, start, stop) for name, shape, start, stop in meta}
+    updated = {}
+
+    for f in fields(template_params):
+        p = getattr(template_params, f.name)
+
+        if p is None or p.value is None or p.fixed or f.name not in meta_map:
+            updated[f.name] = p
+            continue
+
+        shape, start, stop = meta_map[f.name]
+        updated[f.name] = replace(p, value=vec[start:stop].reshape(shape))
+
+    return ModelParams(**updated)
+
+
+def _vector_to_bse_params(vec, template_params, meta):
+    """Attach a flat BSE vector back into a ModelParams object."""
+    meta_map = {name: (shape, start, stop) for name, shape, start, stop in meta}
+    updated = {}
+
+    for f in fields(template_params):
+        p = getattr(template_params, f.name)
+
+        if p is None or p.value is None:
+            updated[f.name] = p
+            continue
+
+        if p.fixed or f.name not in meta_map:
+            updated[f.name] = replace(p, bse=None)
+            continue
+
+        shape, start, stop = meta_map[f.name]
+        updated[f.name] = replace(p, bse=vec[start:stop].reshape(shape))
+
+    return ModelParams(**updated)
 
 # %% Results class for LR State Space Model
 
@@ -133,33 +202,40 @@ class LRStateSpaceResults(StateSpaceResults):
         Compute the Hessian matrix of the log-likelihood function at the estimated parameters.
         """
         if self._hessian is not None:
-            return self._hessian
+            return self._hessian, 0.0  # Return cached Hessian and zero time delta
 
         params = self.params.copy()  # Create a copy of the parameters to avoid modifying the original
 
         # fix x0, Sigma0, so that no derivatives are computed
         params.x0.fixed = True
         params.Sigma0.fixed = True
-        
-        ts = time.time()
-        
-        # Compute the function 
         x0 = params.x0.value
         Sigma0 = params.Sigma0.value
         
-        fun = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
-        fun(params)
+        # Get the scalar positive log-likelihood function
+        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
+        # fun(params)
         
-        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
-        hesfun = jax.hessian(fun)
+        # Pack free params into a flat array
+        vec0, meta = _pack_params(params)
+        self._free_meta = meta
 
+        
+        # Wrap fun to accept a flat vector
+        def fun_flat(vec):
+            p = _unpack_params(vec, params, meta)
+            return logL(p)
+
+        ts = time.time()
+        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
+        hesfun = jax.hessian(fun_flat)
         # Evaluate the Hessian at the estimated parameters
-        # the Information matrix, which is the negative of the second derivative of the log-likelihood 
-        # function
-        hessian = hesfun(params)
+        hessian = hesfun(vec0)
         jax.block_until_ready(hessian)
         tdelta = time.time() - ts
 
+        # the Information matrix, which is the negative of the second derivative of the log-likelihood 
+        # function
         self._hessian = hessian
         return hessian, tdelta
         
@@ -171,11 +247,16 @@ class LRStateSpaceResults(StateSpaceResults):
             return self._cov_params
 
         self.model._log("Computing Hessian and standard errors of the parameters", verbose=True)
-        hessian, tdelta = self._compute_hessian()
+        H, tdelta = self._compute_hessian()
         self.model._log(f"Hessian computed in {tdelta:.3f} seconds", verbose=True)
 
-        # Compute the covariance matrix as the inverse of the Hessian
-        cov_params = jnp.linalg.inv(hessian)
+        # Compute the covariance matrix as the inverse of the Hessian (of the positive log-likelihood)
+        # Sigma = -jnp.linalg.pinv(H)
+        # cov_params = -jnp.linalg.inv(H)
+        H = 0.5 * (H + H.T)
+        # eps = 1e-6
+        # H += eps * jnp.eye(H.shape[0], dtype=H.dtype)
+        cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
         # check if it is postive definte
         # chol = jnp.linalg.cholesky(cov_params)
@@ -185,9 +266,29 @@ class LRStateSpaceResults(StateSpaceResults):
     
     @property
     def bse(self):
-        se = np.sqrt(np.diag(self.cov_params))
-        return se
+        
+        bse_vec = jnp.sqrt(jnp.clip(jnp.diag(self._cov_params), a_min=0.0))
+        # se = np.sqrt(np.diag(self.cov_params))
 
+        params  = _unpack_params(bse_vec, self.params, 
+            {name: (getattr(self.params, name).value.shape, 
+                getattr(self.params, name).value.size) 
+                    for name in self.params.__dataclass_fields__})
+        return params
+
+    @property
+    def bse_vector(self):
+        cov = self.compute_cov_params()
+        return np.sqrt(np.clip(np.asarray(jnp.diag(cov)), a_min=0.0, a_max=None))
+
+    @property
+    def bse(self):
+        # structured ModelParams with bse stored in each Param
+        if getattr(self, "_bse_params", None) is None:
+            self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
+        return self._bse_params
+
+       
     @property
     def tvalues(self):
         with np.errstate(divide="ignore", invalid="ignore"):
@@ -209,6 +310,7 @@ class LRStateSpaceResults(StateSpaceResults):
         upper = self.params + z * se
         return np.vstack([lower, upper]).T
 
+
     @property
     def aic(self):
         return self.compute_aic()
@@ -217,33 +319,21 @@ class LRStateSpaceResults(StateSpaceResults):
     def bic(self):
         return self.compute_bic()
 
-        # Compute AIC and BIC
-
+    # Compute AIC and BIC
     def compute_aic(self):
-        """Computes the AIC (Akaike Information Criterion)."""
         llf = self.llf
-
-        # number of estimated parameters: try to infer from model
-        k = getattr(self, "n_params", None)
-        if k is None and hasattr(self.model, "beta"):
-            k = np.size(np.array(self.model.beta))
+        k = getattr(self, "n_params", 0)
         k = int(k) if k is not None else 0
-        self.aic = 2 * k - 2 * llf
-        return self.aic
+        self._aic = 2 * k - 2 * llf
+        return self._aic
 
     def compute_bic(self):
-        """Computes the BIC (Bayesian Information Criterion)."""
         llf = self.llf
-
-        # number of estimated parameters: try to infer from model
-        k = getattr(self, "n_params", None)
-        if k is None and hasattr(self.model, "beta"):
-            k = np.size(np.array(self.model.beta))
+        k = getattr(self, "n_params", 0)
         k = int(k) if k is not None else 0
-
         n = self.nobs if self.nobs is not None else 1
-        self.bic = np.log(n) * k - 2 * llf
-        return self.bic
+        self._bic = np.log(n) * k - 2 * llf
+        return self._bic
 
     def predict(self, df, verbose=True):
         """
