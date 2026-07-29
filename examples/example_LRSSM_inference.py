@@ -122,7 +122,7 @@ model = model.setup([mesh_io])
 # %% Estimate the Model (default estimation options)
 
 opt = FitOptions()
-opt.max_iter = 50
+opt.max_iter = 5
 opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
