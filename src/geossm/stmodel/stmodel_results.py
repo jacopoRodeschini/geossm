@@ -436,6 +436,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
+    # todo: add the formulas as a argument to the predict method, to allow for different types of predictions (e.g. with or without fixed effects)
     def predict(self, df, verbose=True):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.

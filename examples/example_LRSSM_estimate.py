@@ -84,7 +84,7 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
         # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
+        gmsh.infooption.setNumber("Mesh.CharacteristicLengthMax", lc)
         # Only limit the absolute minimum to prevent crashes
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
 
