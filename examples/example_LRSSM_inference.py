@@ -84,7 +84,7 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
 
         # Allow triangles to be very large
-        gmsh.infooption.setNumber("Mesh.CharacteristicLengthMax", lc)
+        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
         # Only limit the absolute minimum to prevent crashes
         gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
 
@@ -112,10 +112,6 @@ print(mesh_io)
 # plot the mesh (use the fem_solver utlities)
 fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
 
-# plot the mesh using the utilities
-fig, ax = plt.subplots(figsize=(8, 8))
-fem_solver.plot_mesh(ax=ax)
-
 # %% Set up the lrssm model (univiarte latent)
 
 # add the mesh object and the domain where the laten domain is defined
@@ -125,56 +121,29 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 
-results = model.fit()
-
-# %%  
-print(results)  # resutls.summary()
-
-
-# %% Plot the likelihood curve
-fig, ax = plt.subplots()
-ax.plot(-np.array(results.llf_path[1:]))
-ax.set_yscale("log")
-ax.set_xlabel("Iteration")
-ax.set_ylabel("Log Likelihood")
-ax.set_title("Log Likelihood Curve")
-ax.grid()
-plt.show()
-
-
-# %% Estimate the model with other options
-
 opt = FitOptions()
-opt.max_iter = 2
-opt.tol_relat = 1e-4
-
-print(opt)
+opt.max_iter = 5
+opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
-print(results)
+
+#print(results)  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
+print(results.summary(hessian=False, alpha=0.05))  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
+# %% Compute the standard errors of the parameters
+
+hessian = results.compute_cov_params()
+
+# %% Get the model parameter inference
+
+# bse
+params = results.bse
+print(params.beta.bse)
+
+# %% CI 
+ci = results.conf_int(alpha=0.05)
 
 
-# %% Estimate the model with inital values
-# set the pars0
 
-par0 = ModelParams(beta=[29, -0.5], s2e=25, A=[[12]])
-print(par0)
 
-# % fit the model
-results = model.fit(params0=par0, options=opt)
 
-print(results)
-# %% More controll on the model paramiters
-from geossm.stmodel import Param
 
-b0 = Param("beta", [29, -0.5], fixed=True)
-
-# set the pars0
-par0 = ModelParams(beta=b0, s2e=10)
-print(par0)
-
-# % fit the model
-results = model.fit(params0=par0, options=opt)
-
-# print the estimate paramiters
-print(results)
