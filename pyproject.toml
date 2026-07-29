@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geossm"
-version = "1.1.0"
-description = "GeoSSM: geospatial state-space modeling tools"
+version = "1.2.0"
+description = "GeoSSM: geostatistics state-space modeling tools"
 readme = { file = "README.md", content-type = "text/markdown" }
 authors = [
   { name = "Jacopo Rodeschini", email = "jacopo.rodeschini@unibg.it" }
@@ -31,10 +31,14 @@ dependencies = [
   "pyproj>=3.7.1",
   "scipy>=1.15.3",
   "shapely>=2.1.2",
-  "statsmodels>=0.14.6"
+  "statsmodels>=0.14.6", 
+  "jax>=0.6.2",
+  "jaxlib>=0.6.2",
+  "optax>=0.2.0", 
+  "gstools>=1.7.0"
 ]
 
-keywords = ["geospatial", "state-space-models", "python"]
+keywords = ["geospatial", "state-space-models", "python", "geostatistics"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Science/Research",
@@ -46,7 +50,7 @@ classifiers = [
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
-  "Operating System :: OS Independent"
+  "Operating System :: Linux"
 ]
 
 [project.optional-dependencies]

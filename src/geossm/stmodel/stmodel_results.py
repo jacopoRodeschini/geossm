@@ -436,7 +436,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
-    # todo: add the formulas as a argument to the predict method, to allow for different types of predictions (e.g. with or without fixed effects)
     def predict(self, df, verbose=True):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
@@ -474,8 +473,7 @@ class LRStateSpaceResults(StateSpaceResults):
         top_right_em = {
             "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
             "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
-            "EM iters :", lambda: [f"{self.iterations}"], 
-            
+            "EM iters :": lambda: [f"{self.iterations}"], 
         }
 
         # Generate the dictionaly
