@@ -30,7 +30,7 @@ def _pack_params(params):
         arr = jnp.asarray(p.value).ravel()
         stop = start + arr.size
         parts.append(arr)
-        meta.append((f.name, p.value.shape, start, stop))
+        meta.append((f.name, p.value.shape, start, stop, p.fixed))
         start = stop
 
     if parts:
@@ -43,7 +43,7 @@ def _pack_params(params):
 
 def _unpack_params(vec, template_params, meta):
     """Rebuild ModelParams from flat vector using template_params as template."""
-    meta_map = {name: (shape, start, stop) for name, shape, start, stop in meta}
+    meta_map = {name: (shape, start, stop, fixed) for name, shape, start, stop, fixed in meta}
     updated = {}
 
     for f in fields(template_params):
@@ -53,15 +53,16 @@ def _unpack_params(vec, template_params, meta):
             updated[f.name] = p
             continue
 
-        shape, start, stop = meta_map[f.name]
+        shape, start, stop, fixed = meta_map[f.name]
         updated[f.name] = replace(p, value=vec[start:stop].reshape(shape))
+        updated[f.name] = replace(updated[f.name], fixed=fixed)
 
     return ModelParams(**updated)
 
 
 def _vector_to_bse_params(vec, template_params, meta):
     """Attach a flat BSE vector back into a ModelParams object."""
-    meta_map = {name: (shape, start, stop) for name, shape, start, stop in meta}
+    meta_map = {name: (shape, start, stop, fixed) for name, shape, start, stop, fixed in meta}
     updated = {}
 
     for f in fields(template_params):
@@ -75,10 +76,32 @@ def _vector_to_bse_params(vec, template_params, meta):
             updated[f.name] = replace(p, bse=None)
             continue
 
-        shape, start, stop = meta_map[f.name]
+        shape, start, stop, _fixed = meta_map[f.name]
         updated[f.name] = replace(p, bse=vec[start:stop].reshape(shape))
 
     return ModelParams(**updated)
+
+
+def _equalize_row_widths(text: str) -> str:
+    """Pad every line of a rendered Summary to the same width.
+
+    statsmodels sizes each sub-table's borders independently, so the top
+    info table and the parameter tables can end up with different total
+    widths and look misaligned when printed together. This re-pads every
+    line to the overall max width: pure rule lines ('===' / '---') are
+    extended with their own character, everything else with trailing
+    spaces, so the borders line up without touching column contents.
+    """
+    lines = text.split("\n")
+    width = max((len(line) for line in lines), default=0)
+
+    padded = []
+    for line in lines:
+        if line and len(set(line)) == 1 and line[0] in "=-":
+            padded.append(line[0] * width)
+        else:
+            padded.append(line.ljust(width))
+    return "\n".join(padded)
 
 # %% Results class for LR State Space Model
 
@@ -129,6 +152,8 @@ class LRStateSpaceResults(StateSpaceResults):
         self._n_params = None
         self._hessian = None
         self._cov_params = None
+        self._free_meta = None
+        self._frozen_params = None
 
         self._p_block = None
         self._q_block = None
@@ -173,8 +198,14 @@ class LRStateSpaceResults(StateSpaceResults):
         self.param_names = names
         self.param_values = values
         self.param_dim = dims
-        self.n_params = sum(dims)
+        self.param_fixed = [getattr(self.params, name).fixed for name in names]
 
+    @property
+    def n_params(self):
+        if self._n_params is None:
+            self._n_params = sum(d for d, f in zip(self.param_dim, self.param_fixed) if not f) if self.param_dim is not None and self.param_fixed else 0
+        return self._n_params
+    
     def _process_nstats(self):
         """
         Extract iteration statistics from EM output.
@@ -195,8 +226,39 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.llf_path = [v["logL"] for v in self.nstats]
         self.llf = self.llf_path[-1]
-
     
+    def _inference_params(self):
+        """
+        Params used for Hessian/inference: a copy of self.params with x0 and
+        Sigma0 forced fixed (no derivatives are computed for the initial state).
+
+        theta_hat, bse_vector, tvalues, pvalues and conf_int all derive their
+        flat-vector layout from this same frozen copy, so they stay aligned
+        even if self.params.x0 / self.params.Sigma0 are marked free.
+        """
+        if self._frozen_params is None:
+            params = self.params.copy()
+            params.x0.fixed = True
+            params.Sigma0.fixed = True
+            self._frozen_params = params
+        return self._frozen_params
+
+    def _nan_bse_params(self):
+        """
+        ModelParams copy with every `.bse` replaced by NaN placeholders,
+        used by summary(hessian=False) to print point estimates without
+        forcing the (possibly slow) Hessian computation.
+        """
+        updated = {}
+        for f in fields(self.params):
+            p = getattr(self.params, f.name)
+            if p is None or p.value is None:
+                updated[f.name] = p
+                continue
+            nan_bse = jnp.full(p.value.shape, jnp.nan, dtype=jnp.asarray(p.value).dtype)
+            updated[f.name] = replace(p, bse=nan_bse)
+        return ModelParams(**updated)
+
     def _compute_hessian(self):
         """
         Compute the Hessian matrix of the log-likelihood function at the estimated parameters.
@@ -204,18 +266,14 @@ class LRStateSpaceResults(StateSpaceResults):
         if self._hessian is not None:
             return self._hessian, 0.0  # Return cached Hessian and zero time delta
 
-        params = self.params.copy()  # Create a copy of the parameters to avoid modifying the original
-
-        # fix x0, Sigma0, so that no derivatives are computed
-        params.x0.fixed = True
-        params.Sigma0.fixed = True
+        params = self._inference_params()
         x0 = params.x0.value
         Sigma0 = params.Sigma0.value
-        
+
         # Get the scalar positive log-likelihood function
         logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
         # fun(params)
-        
+
         # Pack free params into a flat array
         vec0, meta = _pack_params(params)
         self._free_meta = meta
@@ -264,17 +322,28 @@ class LRStateSpaceResults(StateSpaceResults):
         self._cov_params = cov_params
         return cov_params
     
-    @property
-    def bse(self):
         
-        bse_vec = jnp.sqrt(jnp.clip(jnp.diag(self._cov_params), a_min=0.0))
-        # se = np.sqrt(np.diag(self.cov_params))
+    # @property
+    # def bse(self):
+        
+    #     bse_vec = jnp.sqrt(jnp.clip(jnp.diag(self._cov_params), a_min=0.0))
+    #     # se = np.sqrt(np.diag(self.cov_params))
 
-        params  = _unpack_params(bse_vec, self.params, 
-            {name: (getattr(self.params, name).value.shape, 
-                getattr(self.params, name).value.size) 
-                    for name in self.params.__dataclass_fields__})
-        return params
+    #     params  = _unpack_params(bse_vec, self.params, 
+    #         {name: (getattr(self.params, name).value.shape, 
+    #             getattr(self.params, name).value.size) 
+    #                 for name in self.params.__dataclass_fields__})
+    #     return params
+
+    
+    @property
+    def df_resid(self):
+        """
+        Compute the degrees of freedom of the residuals.
+        """
+        nobs = self.nobs if self.nobs is not None else 0
+        n_params = self.n_params if self.n_params is not None else 0
+        return nobs - n_params
 
     @property
     def bse_vector(self):
@@ -287,28 +356,43 @@ class LRStateSpaceResults(StateSpaceResults):
         if getattr(self, "_bse_params", None) is None:
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
         return self._bse_params
+    
+    def _stats_from_arrays(self, params, bse, alpha=0.05):
+        params = np.asarray(params, dtype=float).ravel()
+        bse = np.asarray(bse, dtype=float).ravel()
+    
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = params / bse
+    
+        if self.df_resid is not None:
+            p = 2 * stats.t.sf(np.abs(t), df=self.df_resid)
+            crit = stats.t.ppf(1 - alpha / 2.0, df=self.df_resid)
+        else:
+            p = 2 * stats.norm.sf(np.abs(t))
+            crit = stats.norm.ppf(1 - alpha / 2.0)
+    
+        ci = np.column_stack([params - crit * bse, params + crit * bse])
+        return t, p, ci
 
        
     @property
+    def theta_hat(self):
+        vec, _ = _pack_params(self._inference_params())
+        return np.asarray(vec)
+    
+    @property
     def tvalues(self):
-        with np.errstate(divide="ignore", invalid="ignore"):
-            return self.params / self.bse
-
+        t, _, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
+        return t
+    
     @property
     def pvalues(self):
-        tv = self.tvalues
-        if self.df_resid is not None:
-            pv = 2 * stats.t.sf(np.abs(tv), df=self.df_resid)
-        else:
-            pv = 2 * stats.norm.sf(np.abs(tv))
-        return pv
-
+        _, p, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
+        return p
+    
     def conf_int(self, alpha=0.05):
-        z = stats.norm.ppf(1 - alpha / 2.0)
-        se = self.bse
-        lower = self.params - z * se
-        upper = self.params + z * se
-        return np.vstack([lower, upper]).T
+        _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha)
+        return ci
 
 
     @property
@@ -321,14 +405,24 @@ class LRStateSpaceResults(StateSpaceResults):
 
     # Compute AIC and BIC
     def compute_aic(self):
-        llf = self.llf
+        llf = getattr(self, "llf", None)
+        if llf is None:
+            raise AttributeError(
+                "AIC requires the log-likelihood, which is only set when "
+                "`nstats` is provided to LRStateSpaceResults."
+            )
         k = getattr(self, "n_params", 0)
         k = int(k) if k is not None else 0
         self._aic = 2 * k - 2 * llf
         return self._aic
 
     def compute_bic(self):
-        llf = self.llf
+        llf = getattr(self, "llf", None)
+        if llf is None:
+            raise AttributeError(
+                "BIC requires the log-likelihood, which is only set when "
+                "`nstats` is provided to LRStateSpaceResults."
+            )
         k = getattr(self, "n_params", 0)
         k = int(k) if k is not None else 0
         n = self.nobs if self.nobs is not None else 1
@@ -364,12 +458,14 @@ class LRStateSpaceResults(StateSpaceResults):
             [
                 ("EM iters :", lambda: [f"{self.iterations}"]),
                 ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
+                ("AIC:", lambda: [f"{self.aic:.4g}"]),
             ]
         )
 
         top_right_em = {
             "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
             "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
+            "BIC:": lambda: [f"{self.bic:.4g}"],
         }
 
         # Generate the dictionaly
@@ -388,7 +484,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
 
         return gen_top_left, gen_top_right
-    def summary(self):
+    def summary(self, hessian=True, alpha=0.05):
 
         # self.results = np.array([0])
         # self.params = self.beta
@@ -396,7 +492,16 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.bse = np.zeros(len(self.beta))
         # self.tvalues = np.zeros(len(self.beta))
         # self.pvalues = np.zeros(len(self.beta))
-
+        
+        if hessian:
+            bse_struct = self.bse  # structured ModelParams with bse fields
+        else:
+            if self._hessian is not None:
+                bse_struct = self.bse
+            else:
+                # Hessian/SE not requested yet (e.g. deferred because it's slow) -
+                # show point estimates with NaN placeholders for bse/t/p/CI.
+                bse_struct = self._nan_bse_params()
 
         gen_top_left, gen_top_right = self.generate_summary()
         
@@ -417,58 +522,52 @@ class LRStateSpaceResults(StateSpaceResults):
             SimpleNamespace() for _ in range(self.model.nvar)
         ]  # Create a list with one SimpleNamespace for compatibility with summary structure
 
-        def conf_int_params(params, bse, alpha=0.05):
-            lower = params - 1.96 * bse
-            upper = params + 1.96 * bse
-            return np.column_stack([lower, upper])
-
         # fixed effect
         for m in self.measurement:
             m.results = np.array([0])  # Dummy results for compatibility
             m.model = None
 
-            # Get the parameter values for this variable and assign them to the model namespace
-            m.params = self.params.beta.value
-
             # Get the parameter names for this variable and assign them to the model namespace
             xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
+
+            
+            # Get the fixed effect block statistics
+            beta_vals = np.asarray(self.params.beta.value).ravel()
+            beta_bse = np.asarray(bse_struct.beta.bse).ravel()
+            beta_t, beta_p, _ = self._stats_from_arrays(beta_vals, beta_bse)
+
+            m.params = beta_vals
+            m.bse = beta_bse
+            m.tvalues = beta_t
+            m.pvalues = beta_p
             m.params_name = xnames_stack
+            m.conf_int = lambda alpha=alpha, v=beta_vals, s=beta_bse: self._stats_from_arrays(v, s, alpha)[2]
 
-            m.bse = np.full(
-                len(m.params), np.nan
-            )  # Set standard errors to NaN (not available)
-            m.tvalues = np.full(
-                len(m.params), np.nan
-            )  # Set t-values to NaN (not available)
-            m.pvalues = np.full(
-                len(m.params), np.nan
-            )  # Set p-values to NaN (not available)
-
-            m.conf_int = lambda alpha=0.05: conf_int_params(m.params, m.bse, alpha)
-
-            smry.add_table_params(m, xname=m.params_name, alpha=0.05)
+            smry.add_table_params(m, xname=m.params_name, alpha=alpha)
 
         # Measrement error
         temp = SimpleNamespace()
         temp.results = np.array([0])
         temp.model = None
-        temp.params = np.hstack((self.params.s2e.value, self.params.A.value.flatten()))
         temp.params_name = [f"s2e_{i}" for i in range(self.params.s2e.size)] + [
-            f"A_{i,j}"
+            f"A_{i}_{j}"
             for i in range(self.params.A.shape[0])
             for j in range(self.params.A.shape[1])
         ]
-        temp.bse = np.full(
-            len(temp.params), np.nan
-        )  # Set standard errors to NaN (not available)
-        temp.tvalues = np.full(
-            len(temp.params), np.nan
-        )  # Set t-values to NaN (not available)
-        temp.pvalues = np.full(
-            len(temp.params), np.nan
-        )  # Set p-values to NaN (not available)
-        temp.conf_int = lambda alpha=0.05: conf_int_params(temp.params, temp.bse, alpha)
-        smry.add_table_params(temp, xname=temp.params_name, alpha=0.05)
+        
+        
+        s2e_vals = np.asarray(self.params.s2e.value).ravel()
+        A_vals = np.asarray(self.params.A.value).ravel()
+        
+        s2e_bse = np.asarray(bse_struct.s2e.bse).ravel()
+        A_bse = np.asarray(bse_struct.A.bse).ravel()
+        
+        temp.params = np.hstack((s2e_vals, A_vals))
+        temp.bse = np.hstack((s2e_bse, A_bse))
+        temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        
+        smry.add_table_params(temp, xname=temp.params_name, alpha=alpha)
 
         
         # todo: add the parameters table (state equation parameters)
@@ -479,29 +578,28 @@ class LRStateSpaceResults(StateSpaceResults):
         temp.model = None
 
         # Get the parameter values for this variable and assign them to the model namespace
-        temp.matern_params = np.array([cov.rescale for cov in self.model.cov_function])
-        temp.markov_params = self.params.f.value
-        temp.params = np.hstack((temp.matern_params, temp.markov_params))
+        ks_val = np.asarray(self.params.ks.value).ravel()
+        ks_bse = np.asarray(bse_struct.ks.bse).ravel()
+        f_val = np.asarray(self.params.f.value).ravel()
+        f_bse = np.asarray(bse_struct.f.bse).ravel()
 
-        temp.matern_names = [
+        matern_names = [
             f"rescale_{j}" for j in range(len(self.model.cov_function))
         ]
-        temp.latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
+        latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
 
         # Combine all parameters and names into a single list for the summary
-        temp.param_names = temp.matern_names + temp.latent_names
+        temp.param_names = matern_names + latent_names
 
-        temp.bse = np.full(
-            len(temp.params), np.nan
-        )  # Set standard errors to NaN (not available)
-        temp.tvalues = np.full(
-            len(temp.params), np.nan
-        )  # Set t-values to NaN (not available)
-        temp.pvalues = np.full(
-            len(temp.params), np.nan
-        )  # Set p-values to NaN (not available)
+        temp.params = np.hstack((ks_val, f_val))
+        temp.bse = np.hstack((ks_bse, f_bse))
+        temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        
+        smry.add_table_params(temp, xname=temp.param_names, alpha=alpha)
 
-        temp.conf_int = lambda alpha=0.05: conf_int_params(temp.params, temp.bse, alpha)
-        smry.add_table_params(temp, xname=temp.param_names, alpha=0.05)
+        # Re-pad every rendered row to a common width so the top info table
+        # and the parameter tables line up when printed together.
+        smry.as_text = lambda _orig=smry.as_text: _equalize_row_widths(_orig())
 
         return smry
