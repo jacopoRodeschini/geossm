@@ -22,6 +22,7 @@ from shapely.geometry import Point
 
 from dataclasses import dataclass, field
 from typing import Literal
+import ast
 
 from statsmodels.iolib.summary import Summary
 
@@ -211,7 +212,8 @@ class DesignMatrices:
 
 class DesignMatricesBuilder:
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True):
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True,
+                 tmin: datetime = None, tmax: datetime = None):
         """
         Prepare the spatial-temporal dataset for modeling.
         """
@@ -232,8 +234,10 @@ class DesignMatricesBuilder:
             self.rhs_termlist,
             self.response_name,
             self.response_expressions,
+            self.response_column, 
             self.covariate_names,
             self.covariate_expressions,
+            self.covariate_columns,
         ) = self._checkFormula(self.formula, verbose=verbose)
         
         if not flag:
@@ -259,6 +263,18 @@ class DesignMatricesBuilder:
             self._log("Input GeoDataFrame validated successfully", verbose)
         else:
             raise ValueError("Input dataset must be a GeoDataFrame")
+        
+        # Cut the dataset to the specified time range if tmin and tmax are provided       
+        if tmin is not None or tmax is not None:
+            self._log("Filtering dataset by time range", verbose)
+            if tmin is not None:
+                self.geodf = self.geodf[self.geodf[self.time_col_name] >= pd.to_datetime(tmin)]
+                self._log(f"Filtered dataset to tmin={pd.to_datetime(tmin).strftime('%Y-%m-%d')}", verbose)
+            if tmax is not None:
+                self.geodf = self.geodf[self.geodf[self.time_col_name] <= pd.to_datetime(tmax)]
+                self._log(f"Filtered dataset to tmax={pd.to_datetime(tmax).strftime('%Y-%m-%d')}", verbose)
+            self._log(f"Dataset filtered to {len(self.geodf)} rows", verbose)
+
 
     def _is_verbose(self, verbose=None) -> bool:
         return self.verbose if verbose is None else verbose
@@ -267,15 +283,16 @@ class DesignMatricesBuilder:
         if self._is_verbose(verbose):
             self.print_info(msg)
 
-    def build(self, verbose=None):
-        
-        if self.formula is None:
-            msg = "Formula must be provided to compute design matrices"
-            raise ValueError(msg)
-        
+    def build(self, predict=False, verbose=None):
+         
         if isinstance(self.geodf, geopd.GeoDataFrame):
             self._log("Building design matrices from GeoDataFrame", verbose)
-            self.design_matrices = self._build_geodataframe(formula=self.formula, verbose=verbose)
+            
+            if predict == False:
+                self.design_matrices = self._build_geodataframe(self.lhs_termlist, self.rhs_termlist, verbose=verbose)
+            else: 
+                self.design_matrices = self._build_geodataframe([], self.rhs_termlist, verbose=verbose)
+
         else:
             raise ValueError("Input dataset must be a GeoDataFrame")   
         
@@ -343,16 +360,18 @@ class DesignMatricesBuilder:
 
         return True
 
-    def _build_geodataframe(self, formula, verbose=None):
+    def _build_geodataframe(self, lhs_termlist, rhs_termlist, verbose=None):
         self._log("Creating spatial-temporal design matrices", verbose)
+
 
         geodf, points, y, _y_design_info, Xbeta, _x_design_info, N, T, timestamps = (
             self._computedesignMatrix_geodataframe(
+                lhs_termlist, 
+                rhs_termlist, 
                 self.geodf,
                 self.geometry_id,
                 self.time_col_name,
-                self.response_name,
-                formula,
+                self.response_column,
                 verbose=verbose,
             )
         )
@@ -366,11 +385,11 @@ class DesignMatricesBuilder:
         return DesignMatrices(
             y=y,
             y_design_info=_y_design_info,
-            y_name = self.response_name,
+            y_name = _y_design_info.design_info.column_names if _y_design_info else None,
             y_expr = self.response_expressions,
             X=Xbeta,
             X_design_info=_x_design_info,
-            x_names = self.covariate_names,
+            x_names = _x_design_info.design_info.column_names if _x_design_info else None,
             x_exprs = self.covariate_expressions,
             points=points,
             formula=self.formula,
@@ -387,41 +406,42 @@ class DesignMatricesBuilder:
 
     def _computedesignMatrix_geodataframe(
         self,
+        lhs_termlist,
+        rhs_termlist,
         geodf,
         geometry_id,
         time_col_name,
-        response_name,
-        formula,
+        response_column,
         verbose=None,
     ):
         self._log("Computing design matrix from GeoDataFrame", verbose)
-
-        desc = ModelDesc.from_formula(formula)
-
-        if desc.lhs_termlist is None and desc.rhs_termlist is None:
+        
+        if lhs_termlist is None and rhs_termlist is None:
             msg = "Formula must be provided to compute design matrices"
             raise ValueError(msg)
         
-        if desc.rhs_termlist is None:
+        if rhs_termlist is None:
             msg = "Covariate terms must be provided in the formula to compute design matrices"
             raise ValueError(msg)
-        
+
 
         geodf = geodf.sort_values([time_col_name, geometry_id])
         self._log("Dataset sorted by time and geometry id", verbose)
 
         geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
         self._log("Dropped duplicate space-time rows", verbose)
+        
 
-        # check missing and count
-        if len(desc.lhs_termlist) > 0:
+        # len() >0 estimation
+        # len() =0 prediction 
+        if len(lhs_termlist) > 0:
             #stp = (
             #    geodf.groupby(geometry_id, observed=True)[response_name]
             #    .count()
             #    ).reset_index()
 
             #observed_sites = stp.loc[stp[response_name] > 0, geometry_id].tolist()
-            observed_sites = geodf.loc[geodf[response_name].notna(), geometry_id].unique().tolist()
+            observed_sites = geodf.loc[geodf[response_column].notna(), geometry_id].unique().tolist()
         else:
             observed_sites = geodf[geometry_id].unique().tolist()
 
@@ -438,18 +458,17 @@ class DesignMatricesBuilder:
 
         self._log("Generating design matrices...", verbose)
         
-        if len(desc.lhs_termlist) > 0:
-
-            geodf.loc[geodf[response_name].isna(), response_name] = np.inf
-            self._log("Temporarily replaced missing response values with inf for patsy", verbose)
-            
-            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
-            # geodf.loc[geodf[covariate_names].isna().any(axis=1), covariate_names] = np.inf
+        from patsy import NAAction
+        class NAPassthrough(NAAction):
+            def __init__(self):
+                super().__init__(NA_types=[])  # tell patsy not to treat anything as NA
+        
+        if len(lhs_termlist) > 0:
 
             ytemp, Xtemp = dmatrices(
-                formula,
+                self.formula,
                 data=geodf,
-                NA_action="raise",
+                NA_action=NAPassthrough(),
                 return_type="matrix",
             )
             self._log(f"y name: {ytemp.design_info.column_names[0]}", verbose)
@@ -461,14 +480,12 @@ class DesignMatricesBuilder:
             y = ytemp.reshape(T, N).T
             self._log(f"Reshaped y to {y.shape}", verbose)
 
-
         else:
-            # TODO: temporarily replace inf values with NaN after patsy processing, since patsy does not handle NaN values in the covariates
             
             Xtemp = dmatrix(
-                formula,
+                ModelDesc(lhs_termlist, rhs_termlist),
                 data=geodf,
-                NA_action="raise",
+                NA_action=NAPassthrough(),
                 return_type="matrix",
             )
             y = None
@@ -511,7 +528,7 @@ class DesignMatricesBuilder:
         # parse the response variable
         if len(m.lhs_termlist) > 0:    
             # return False, "Formula must include a response variable on the left-hand side", None, [], [], []
-            y_names, y_exprs = self._extract_formula_metadata(m.lhs_termlist)
+            y_names, y_exprs, y_column = self._extract_formula_metadata(m.lhs_termlist)
 
             if len(y_names) == 0:
                 return (False, 
@@ -526,6 +543,9 @@ class DesignMatricesBuilder:
                     [],
                     [],
                 )
+            else:
+                y_column = y_column[0]
+
 
             y_names = y_names[0]
             self._log(f"Response name: {y_names}", verbose)
@@ -534,11 +554,11 @@ class DesignMatricesBuilder:
             f"Response expression(s): {', '.join(y_exprs) if y_exprs else y_names}",
             verbose)
         else:
-            y_names, y_exprs = None, None
+            y_names, y_exprs, y_column = None, None, None
         
 
         # parse the covariates
-        x_names, x_exprs = self._extract_formula_metadata(m.rhs_termlist)
+        x_names, x_exprs, x_columns = self._extract_formula_metadata(m.rhs_termlist)
 
         
         self._log(
@@ -550,47 +570,154 @@ class DesignMatricesBuilder:
             verbose,
         )
 
-        return True, "", m.lhs_termlist, m.rhs_termlist, y_names, y_exprs, x_names, x_exprs
+        return True, "", m.lhs_termlist, m.rhs_termlist, y_names, y_exprs, y_column, x_names, x_exprs, x_columns
        
+
     def _extract_formula_metadata(self, termlist):
         """
-        Extract raw variable names and factor expressions from a patsy term list.
-
+        Extract variable names, transformations, and underlying dataframe columns
+        from a Patsy term list.
+    
         Returns
         -------
         names : list[str]
-            Raw variable names used in the terms.
-        expressions : list[str]
-            Patsy factor expressions, including transformations.
+            Original term expressions.
+    
+        transformations : list[str]
+            Transformation applied to each term.
+    
+        columns : list[str]
+            Underlying dataframe column(s) used by each term.
         """
+        
+        def extract_columns(expr):
+            """
+            Extract dataframe column names from a Patsy expression.
+        
+            Examples
+            --------
+            np.sqrt(np.abs(AQ_pm10)) -> ['AQ_pm10']
+            I(t2m**2)               -> ['t2m']
+            t2m                     -> ['t2m']
+            """
+        
+    
+            if expr.startswith("I(") and expr.endswith(")"):
+                expr = expr[2:-1]
+    
+            tree = ast.parse(expr, mode="eval")
+    
+            columns = []
+    
+            class ColumnVisitor(ast.NodeVisitor):
+    
+                def visit_Name(self, node):
+                    columns.append(node.id)
+    
+            ColumnVisitor().visit(tree)
+    
+            blacklist = {
+                "np",
+                "pd",
+                "math",
+            }
+    
+            return sorted(set(c for c in columns if c not in blacklist))
+
+        def extract_functions(expr):
+            """Extract nested function chain from an expression."""
+    
+            if expr.startswith("I(") and expr.endswith(")"):
+                return [expr]
+    
+            tree = ast.parse(expr, mode="eval")
+    
+            funcs = []
+    
+            class FunctionVisitor(ast.NodeVisitor):
+    
+                def visit_Call(self, node):
+    
+                    if isinstance(node.func, ast.Attribute):
+                        funcs.append(ast.unparse(node.func))
+    
+                    elif isinstance(node.func, ast.Name):
+                        funcs.append(node.func.id)
+    
+                    self.generic_visit(node)
+    
+            FunctionVisitor().visit(tree)
+    
+            return funcs
+    
         names = []
-        expressions = []
+        transformations = []
+        columns = []
+    
         
         for term in termlist:
-            # Skip intercept-only term
+        
+            # Intercept
             if len(term.factors) == 0:
-                names.append("1")
-                expressions.append("1")
+                names.append("Intercept")
+                transformations.append("1")
+                columns.append("Intercept")
                 continue
-
-            for factor in term.factors:
-                expr = getattr(factor, "code", None)
-                if expr is None:
-                    try:
-                        expr = factor.name()
-                    except Exception:
-                        expr = str(factor)
-
-                expr = str(expr).strip()
-                
-                if "(" in expr:
-                    expressions.append(expr.split("(")[0])
-                    names.append(re.findall(r"\((.*?)\)", expr)[0])
+        
+            factor_exprs = [
+                str(getattr(factor, "code", factor.name())).strip()
+                for factor in term.factors
+            ]
+        
+            # Interaction terms
+            if len(factor_exprs) > 1:
+        
+                interaction = ":".join(factor_exprs)
+        
+                names.append(interaction)
+                transformations.append(interaction)
+        
+                interaction_cols = []
+        
+                for expr in factor_exprs:
+                    interaction_cols.extend(extract_columns(expr))
+        
+                columns.append(":".join(sorted(set(interaction_cols))))
+        
+            else:
+        
+                expr = factor_exprs[0]
+        
+                names.append(expr)
+        
+                # Plain variable
+                if "(" not in expr:
+        
+                    transformations.append("1")
+                    columns.append(expr)
+        
+                # I(...)
+                elif expr.startswith("I("):
+        
+                    transformations.append(expr)
+        
+                    cols = extract_columns(expr)
+        
+                    columns.append(":".join(cols))
+        
+                # Generic function(s)
                 else:
-                    names.append(expr)
-                    expressions.append("1")
-                
-        return names, expressions
+        
+                    funcs = extract_functions(expr)
+        
+                    transformations.append(":".join(funcs))
+        
+                    cols = extract_columns(expr)
+        
+                    columns.append(":".join(cols))
+        
+        return names, transformations, columns
+
 
     def _checkTimeColumn(self, geodf, response_name, geometry_id, time_col_name, verbose=None):
         self._log(f"Checking time column consistency for '{time_col_name}'", verbose)

@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 @author: jacopo
+@title: Example of estimating the parameters of a LRSSM from simulated data with random points in a convex domain (regular grid) and a Matern covariance function with nu=1. The model is fitted using the maximum likelihood estimation (MLE) method. 
+The example also includes a summary of the variance of the simulated data and the theoretical variance 
+of the model, as well as plots of the simulated response variable and the latent state for one point, 
+and the simulated response variable for multiple time steps.
 """
 
 # %% Import the necessary libraries
@@ -29,10 +33,9 @@ if geossm.__file__:
 domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
 # points = np.random.uniform(0, 1, (200, 2))
-# Create regular grid points
-x = np.linspace(0, 1, 15, endpoint=True)
-y = np.linspace(0, 1, 15, endpoint=True)
-points = np.array([[xi, yi] for xi in x for yi in y])
+# Create random grid points
+n = 100
+points = np.random.uniform(0, 1, (n, 2))
 
 # plot the points and the domain
 plt.figure(figsize=(6, 6))
@@ -40,7 +43,7 @@ plt.scatter(points[:, 0], points[:, 1], color="blue", label="Random Points")
 plt.plot(*domain.boundary.xy, color="red", label="Domain Boundary")
 plt.xlabel("X-axis")
 plt.ylabel("Y-axis")
-plt.title("Random Points in a Square Domain")
+plt.title("Random Points in a Circular Domain")
 plt.legend()
 plt.axis("equal")
 plt.show()
@@ -98,15 +101,18 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
     return mesh
 
 
-mesh_io = buildMesh(domain, 0.1, points, lc_buffer=0.5)
+
+# %% Create the covariance function 
+# Create the mesh 
+mesh_io = buildMesh(domain, 0.25, points, lc_buffer=1)
 print(mesh_io)
-
-
-# %% Create the covariance function    
+ 
+# Create the covariance function  
 cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
 cov_fun = cov_fun.setup(mesh_io)
 
 print(cov_fun.summary())
+cov_fun.fem_solver.plot_mesh()
 
 # %% Plot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -175,34 +181,17 @@ plt.show()
 
 model = lrssm(df=gdf, domain=[domain], verbose=True)
 model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
-
 print(model)
 
 # Set up the model cov. 
 # print(model)
 
-# %% Create the model parameters for the simulation
-params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[20], f=[0.7])
+# %% Simulate the model
+params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
-# %% 
-
-# print also the variance summary
+# Print the var. statistics (verbose = True)
 y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
 
-# %% Plot one response variable time series and state
-x_sim_temp = info['sim_model'].H @ x_sim
-point_index = 40 # np.random.randint(0, n)  # Index of the point to plot
-
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[point_index, :], marker="o", linestyle="-", color="blue", label="Simulated Response Variable")
-# ax.plot(x_sim[point_index, :], marker="s", linestyle="-.", color="green", label="Simulated Latent State")
-ax.plot(x_sim_temp[point_index, :], marker="x", linestyle="--", color="orange", label="Simulated Random Effect")
-ax.set_title(f"Time Series of Simulated Response Variable and Latent State for Point {point_index}")
-ax.set_xlabel("Time")
-ax.set_ylabel("Value")
-ax.grid(True, linestyle="--", alpha=0.6)
-ax.legend()
-plt.show()
 
 # %% Plot the simulated response variable for one point
 T = info['T'][0]
@@ -214,19 +203,8 @@ vmin, vmax = y_sim.min(), y_sim.max()  # or compute over the selected times
 fig, ax = plt.subplots(3, 3, figsize=(18, 12), constrained_layout=True)
 for i, t in enumerate(times[:-1]):
     row, col = divmod(i, 3)
-    xs = np.unique(pt[:, 0]) 
-    ys = np.unique(pt[:, 1])
-    grid = y_sim[:, t].reshape(xs.size, ys.size).T
-    im = ax[row, col].imshow(
-        grid,
-        extent=(xs.min(), xs.max(), ys.min(), ys.max()),
-        origin="lower",
-        cmap="coolwarm",
-        aspect="equal",
-        interpolation="nearest",
-        vmin=vmin,
-        vmax=vmax
-    )
+    im = ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[:, t], cmap="coolwarm", vmin=vmin, vmax=vmax)
+
     # ax[row, col].plot(*domain.boundary.xy, color="red")
     ax[row, col].set_title(f"Simulated $PM_{{10}}$ at Time Step {t+1}")
 
@@ -235,7 +213,7 @@ cbar = fig.colorbar(im, ax=ax)
 plt.show()
 
 
-# %% Estimate the model parameters from the simulated data
+# %% Estimate the model parameters from the simulated data (full rank)
 
 # 0) Create the geopandas dataframe with the simulated data
 gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
@@ -247,7 +225,7 @@ est_cov_fun = est_cov_fun.setup(mesh_io)
 # 2) Create the model
 model = lrssm(
     df=gdf, 
-    formulas=["y_sim ~ 1 + temperature"], 
+    formulas=["y_sim ~ 1"], 
     domain=[domain], 
     verbose=True)
 
@@ -256,11 +234,46 @@ model = lrssm(
 model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
 print(model)
 
-# %% 4) fit the model 
- 
+# 4) fit the model 
+
+# %% Debug pls 
 opt = FitOptions()
-opt.max_iter = 10
+opt.max_iter = 50
 opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
-print(results)
+
+
+# %% Estimate the LOW-RANK model
+
+# 0) Create mesh with fewer points to reduce the rank of the model (85%)
+inx = np.random.choice(points.shape[0], size=85, replace=False)
+points_lr = points[inx, :]
+lr_mesh_io = buildMesh(domain, 0.5, points_lr, lc_buffer=0.5)
+print(lr_mesh_io)
+
+# 1) Create the covariance matrix 
+lr_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+lr_cov_fun = est_cov_fun.setup(lr_mesh_io)
+print(lr_cov_fun.summary())
+
+# 2) Create the model
+lr_model = lrssm(
+    df=gdf, 
+    formulas=["y_sim ~ 1"], 
+    domain=[domain], 
+    verbose=True)
+
+
+# 3) Set up the model cov. 
+lr_model = lr_model.setup(cov_fun=[lr_cov_fun], domain_latent=[domain])
+print(model)
+
+# 4) fit the low-rank model 
+opt = FitOptions()
+opt.max_iter = 50
+opt.tol_relat = 1e-5
+
+lr_results = lr_model.fit(options=opt)
+
+

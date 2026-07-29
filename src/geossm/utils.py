@@ -8,6 +8,29 @@ import jax
 import platform
 import psutil
 
+
+# %% [Utils] Select the device for JAX computations
+
+def _select_device(backend: str):
+    backend = (backend or "auto").lower()
+    if backend == "cpu":
+        return jax.devices("cpu")[0]
+    if backend == "gpu":
+        gpus = jax.devices("gpu")
+        if not gpus:
+            raise ValueError("backend='gpu' was requested, but no GPU device is available.")
+        return gpus[0]
+    if backend == "auto":
+        return jax.devices()[0]
+    raise ValueError("backend must be one of {'auto', 'cpu', 'gpu'}")
+
+
+def _to_backend(backend: str, *xs):
+    # Places the inputs on the requested JAX device before compilation.
+    device = _select_device(backend)
+    return [jax.device_put(x, device=device) for x in xs]
+
+
 # %% [Utils] key stream
 
 

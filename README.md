@@ -1,12 +1,9 @@
 <p align="center">
-  <picture>
-    <!-- Dark mode -->
-    <source src="docs/images/logo-dark.svg" media="(prefers-color-scheme: dark)">
-    <!-- Light mode -->
-    <source src="docs/images/logo-white.svg" media="(prefers-color-scheme: light)">
-    <!-- Fallback -->
-    <img src="docs/images/logo-white.svg" alt="GEOSSM Logo" width="320">
-  </picture>
+  <!-- Dark mode -->
+  <img src="docs/images/logo-white.svg#gh-dark-mode-only" width="320">
+
+  <!-- Light mode -->
+  <img src="docs/images/logo-dark.svg#gh-light-mode-only" width="320">
 </p>
 
 # Geossm 🌍
@@ -103,7 +100,7 @@ The `*` symbol indicates dataset more than 10MB.
 - **Multiple Model Types**: Support for linear time-invariant and time-varying SSMs
 
 ## Requirements
-
+- **OS**: Linux or macOS (Windows not currently supported)
 - **Python**: 3.8 or higher
 - **Key Dependencies**:
   - `geopandas` ≥ 1.1.2 (geospatial data handling)
@@ -357,7 +354,7 @@ help(geossm.ssm.StateSpaceModel)
 Contributions are welcome! To contribute:
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/your-feature`)
+2. Create a feature branch (`git switch -c feature/your-feature`)
 3. Commit your changes (`git commit -m 'Add your feature'`)
 4. Push to the branch (`git push origin feature/your-feature`)
 5. Open a Pull Request
@@ -386,28 +383,39 @@ After the work is complete, open a **Pull Request into `develop`**.
 
 **Typical Workflow**
 
-1. Create a branch from `develop`
+1. **Update your local branches**
 
 ```bash
-git checkout develop
-git checkout -b feature/your-feature (or fix/your-bug)
+git switch main
+git pull origin main
+git switch develop
+git pull origin develop
 ```
 
-2. Commit your changes
+2. Create a branch from `develop`
 
 ```bash
+git switch -c feature/your-feature
+```
+
+> Use `fix/your-bug` as the branch name prefix for bug fixes.
+
+3. Commit your changes
+
+```bash
+git add .
 git commit -m "Describe your change"
 ```
 
-3. Push the branch
+4. Push the branch
 
 ```bash
-git push origin feature/your-feature
+git push -u origin feature/your-feature
 ```
 
-4. Open a Pull Request into `develop`.
-
-5. When a new version is ready, `develop` is merged into `main` and a tag is created.
+5. Open a Pull Request into `develop`.
+   - After review/approval, merge your PR into `develop`
+   - `main` will only be updated when a new release is ready
 
 ## License
 

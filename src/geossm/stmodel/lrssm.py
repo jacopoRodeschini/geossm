@@ -2,14 +2,12 @@
 Adapter scaffolding making the project's StateSpaceModel usable with
 statsmodels' MLEModel API.
 """
-
-from scipy.signal.windows import triang
-from _cffi_backend import new_pointer_type
 import numpy as np
 import jax.numpy as jnp
 
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
+from geossm.ssm import _filter_kernelJAX
 from geossm.covmodel import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
@@ -252,6 +250,83 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
     return s2e
 
 
+# @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
+# def _compute_A2_jax_kernel(
+#     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
+# ):
+#     """
+#     Optimized JAX implementation using einsum and vmap.
+#     Assumes blocks are uniform or padded to fixed sizes.
+#     """
+#     T = y_t.shape[1]
+#     nvar = len(block_p) - 1
+#     nlat = x_T.shape[0] - 1 # Assuming x_T includes intercept or similar
+    
+#     # 1. Compute Residuals: (Total_M, T)
+#     # y_t is (Total_M, T), Xbeta is (Total_M, P, T), beta is (P,)
+#     # If Xbeta is already (Total_M, T), use it directly.
+#     residual = y_t - jnp.einsum("mpt,p->mt", Xbeta, beta)
+#     # residual = y_t - jnp.dot(Xbeta, beta) # simplified based on your snippet
+    
+#     # Handle NaNs: create mask and zero out NaNs in residuals
+#     mask = jnp.where(jnp.isnan(residual), 0.0, 1.0)
+#     residual_clean = jnp.nan_to_num(residual)
+
+#     # 2. Prepare Latent States
+#     # z_t = x_T[:, 1:] (Shape: nlat, T)
+#     # M_t = z_t z_t' + P_t (Shape: T, nlat, nlat)
+#     z_t = x_T[:, 1:] 
+#     P_t = P_T[:, :, 1:] # (nlat, nlat, T)
+    
+#     # Outer product zz' over all T: (nlat, nlat, T)
+#     ZZ_T = jnp.einsum('it,jt->ijt', z_t, z_t) + P_t
+
+#     # Initialize result matrix
+#     W = jnp.zeros((nvar, nlat), dtype=y_t.dtype)
+
+#     # 3. Loop over blocks (i)
+#     # Since nvar is static, this loop is unrolled during JIT compilation.
+#     # Because 'i' is a concrete integer here, slicing block_p[i] works.
+#     for i in range(nvar):
+#         # Slice indices for current block i
+#         start_p, end_p = block_p[i], block_p[i+1]
+        
+#         # Phi_i shape: (mdim_i, nlat)
+#         # Note: Your block_q logic suggests Phi is sliced by both i and j
+#         # But if Phi maps factors to variables, it's usually (mdim_i, nlat)
+#         Phi_i = Phi[start_p:end_p, :] 
+#         Resid_i = residual_clean[start_p:end_p, :] * mask[start_p:end_p, :] # (mdim_i, T)
+
+#         # --- Compute g_i ---
+#         # Equation: sum_t (Resid_i_t' * Phi_i_j * z_t_j)
+#         # jnp.einsum('mt, mj, jt -> j', Resid_i, Phi_i, z_t)
+#         # m: mdim_i, t: T, j: nlat
+#         g_i = jnp.einsum('mt, mj, jt -> j', Resid_i, Phi_i, z_t)
+
+#         # --- Compute R_i ---
+#         # Equation: sum_t (Phi_i_j' * Phi_i_k) * ZZ_T_jk_t
+#         # m: mdim_i, j: nlat, k: nlat, t: T
+        
+#         # First, precompute dot products of Phi columns: (nlat, nlat)
+#         # However, because of the mask, we need to account for 't' in the Phi dot product
+#         # Mask_i is (mdim_i, T)
+#         Mask_i = mask[start_p:end_p, :]
+        
+#         # Weighted Phi-Phi product: (nlat, nlat, T)
+#         # For every t, compute (Phi * mask_t)' @ (Phi * mask_t)
+#         Phi_dot_Phi_t = jnp.einsum('mj, mk, mt -> jkt', Phi_i, Phi_i, Mask_i)
+        
+#         # Now contract with ZZ_T
+#         R_i = jnp.einsum('jkt, jkt -> jk', Phi_dot_Phi_t, ZZ_T)
+
+#         # Solve for w_i: R_i w_i = g_i
+#         # Add a small epsilon to diagonal for stability if needed
+#         w_i = jnp.linalg.solve(R_i, g_i)
+        
+#         W = W.at[i, :].set(w_i)
+    
+#     return W
+
 @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
 def _compute_A2_jax_kernel(
     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
@@ -418,7 +493,7 @@ def _ei_jax(i, dim):
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas = None, domain=None, verbose=True):
+    def __init__(self, df, formulas:list = None, domain:list = None, verbose=True):
 
         self.df = df.copy()
         self.formulas = formulas
@@ -441,6 +516,7 @@ class LRStateSpaceModel(StateSpaceModel):
             # Compute the design matrices
             self._log("Building observation grid...")
 
+
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
                 self._buildObservationGrid(df, formulas, verbose=verbose)
             )
@@ -451,7 +527,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-            self.y_train, Xbeta = self._buildDesignMatrix()
+            self.y_train, Xbeta = self._buildDesignMatrix(self.gridList)
 
             # get response name
             self.y_name = [g.y_name for g in self.gridList]
@@ -461,12 +537,13 @@ class LRStateSpaceModel(StateSpaceModel):
 
         else:
             self._log("Formulas not provided. The model will be initialized without them")
+
             Xbeta = None
             xbeta_names = None
 
 
         # Check the domain
-        self._log("Checking the domain...")
+        self._log(f"Checking {len(domain)} domains (start)...")
 
         flag, msg = self._checkDomain(domain)
         if flag:
@@ -474,6 +551,7 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             self._domain = self._setDomain(domain)
             self._log(f"{len(self._domain)} valid domains found and set.")
+        self._log(f"Checking {len(domain)} domains (done)")
 
         self._cov_matern = None
 
@@ -490,13 +568,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # this domain is the domain on which the mesh is defined, and where the
         # covariance function has a meaning
         if domain_latent is not None:
-            self._log("Checking the domain...")
+            self._log(f"Checking {len(domain_latent)} domains (start)...")
             flag, msg = self._checkDomain(domain_latent)
             if flag:
                 raise ValueError(msg)
         else:
             domain_latent = self._domain
             self._log(f"{len(self._domain)} valid domains found and set.")
+        self._log("Checking domains (done)")
 
         # mehs_obj = list of the latent domain
         self._cov_matern = []
@@ -529,7 +608,7 @@ class LRStateSpaceModel(StateSpaceModel):
         elif cov_fun is not None:
             # If cov_fun is provided, we check that it is a list of covariance functions of the same length
             # as the number of domains, and we store it in the list _cov_matern
-            self._log(f"Checking {len(cov_fun)} covariance functions...")
+            self._log(f"Checking {len(cov_fun)} covariance functions (start)...")
 
             if len(cov_fun) != len(domain_latent):
                 raise ValueError(
@@ -537,16 +616,26 @@ class LRStateSpaceModel(StateSpaceModel):
                 )
 
             for i, (covi, domi) in enumerate(zip(cov_fun, domain_latent)):
-                self._log(f"Checking the {i}th covariance function...")
+                # self._log(f"Cov_fun-{i} covariance function...")
 
                 # check if the covariance function is an instance of spdeAppoxCov
                 if not isinstance(covi, spdeAppoxCov):
                     raise ValueError(
                         "Covariance function must be an instance of spdeAppoxCov"
                     )
-
+                self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
                 self._cov_matern.append(covi)
+            
+            
+            self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=jnp.int32)
         
+            self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
+            self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
+            self._log("Checking covariance functions (done)")
+
+
+
+
         else:
             raise ValueError("Invalid input: either mesh_obj or cov_fun must be provided")
 
@@ -555,31 +644,74 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return self
 
-    def sim(self, formulas: str, seed=1234, params: ModelParams = None, verbose=None, stats=False):
+    @property
+    def shape(self):
+        p = None
+        q = None
+        T = None
+
+        if self.y_train is not None:
+            p, T = self.y_train.shape
         
-        if formulas is None:
+        if self.Xbeta is not None:
+            p, b, T = self.Xbeta.shape
+        
+        if self._cov_matern is not None and len(self._cov_matern) > 0:
+            q = sum([cov.fem_solver.n_inner_points for cov in self._cov_matern])
+
+        return p, q, T
+
+
+
+    def sim(self, formulas:list = None , seed=1234, params: ModelParams = None, verbose=None, stats=False):
+        
+        if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
         
-        self._log("Building observation grid...")
-        self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
-            self._buildObservationGrid(self.df, formulas, verbose=verbose)
-        )
-        self._log("Building observation grid... Done.")
+        if formulas is None:
+            formulas = self.formulas
+            Xbeta = self.Xbeta
+            xbeta_names = self.xbeta_names
+            y_name = self.y_name
+            nvar = self.nvar
+            nlat = self.nlat
+            pdim = self.pdim
+            block_p = self.block_p
+            points = self.points
+            T = self.T
+            self._log("Using the formulas provided at initialization, lenght = {}.".format(len(formulas)))
+        else:
+            self._log("Building observation grid...")
+            
+            nvar, points, gridList, ndim, pdim, block_p, T = (
+                self._buildObservationGrid(self.df, formulas, verbose=verbose)
+            )
+            self._log("Building observation grid... Done.")
 
 
-        # self.train will be used later for estimation and for the results
-        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        self._log("Building the design matrix...")
-        self.y_train, Xbeta = self._buildDesignMatrix()
+            # self.train will be used later for estimation and for the results
+            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+            self._log("Building the design matrix...")
+            y, Xbeta = self._buildDesignMatrix(gridList)
+            
+            y_name = [g.y_name for g in gridList]
+            xbeta_names = [g.x_names for g in gridList]
 
-        # get response name
-        self.y_name = [g.y_name for g in self.gridList]
-        self.xbeta_names = [g.x_names for g in self.gridList]
 
-        self._log("Building the design matrix... Done.")
+            # get response name
+            # self.y_name = [g.y_name for g in self.gridList]
+            # self.xbeta_names = [g.x_names for g in self.gridList]
+
+            self._log("Building the design matrix... Done.")
+        
         # check if the covariance function is defined
         if self._cov_matern is None or len(self._cov_matern) == 0:
             raise ValueError("Covariance function is not defined. Please run the setup method first.")
+        else:
+            qdim = self.qdim
+            block_q = self.block_q
+            nlat = self.nlat
+
         
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
         self._log("Parsing the parameters (ModelParams|None)...")
@@ -597,6 +729,14 @@ class LRStateSpaceModel(StateSpaceModel):
         if beta is not None and len(beta) != Xbeta.shape[1]:
             raise ValueError(f"Length of beta ({len(beta)}) must match number of columns in Xbeta ({Xbeta.shape[1]})")
         
+        # Check the lenght of A
+        if A is None or A.shape[0] != nvar or A.shape[1] != self.nlat:
+            raise ValueError(f"Shape of A ({A.shape}) must match (nvar, nlat) = ({nvar}, {self.nlat})")
+        
+         # Check the lenght of ks
+        if ks is None or len(ks) != len(self._cov_matern):
+            raise ValueError(f"Length of ks ({len(ks)}) must match number of covariance functions ({len(self._cov_matern)})")
+        
         # set the covarriance rescale paramiter to the value of ks (if provided, otherwise it will be set to 1)
         if ks is not None:
             for cov, ksi in zip(self.cov_function, ks):
@@ -604,17 +744,13 @@ class LRStateSpaceModel(StateSpaceModel):
         
         self._log("Parsing the parameters (ModelParams|None)... Done.")
         
-        # Get the dimensions of the model
-        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
-        qdim = jnp.array(
-            [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=jnp.int32,
-        )
+        # Get the dimensions of the latent variable
+        qdim = np.sum(self.block_q)
 
-        self._log("Computing the SSM H, R, F and Q matrices...")
+        self._log("Computing the SSM model matrices H, R, F and Q...")
 
         # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(self.points, self.cov_function)
+        basis = self._buildBasis_list(points, self.cov_function)
         
         # ---- build parametrised matrices
         H = self._buildH_dense(A, basis)  # dense
@@ -654,13 +790,114 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Start simulating the SSM...")
 
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
-        y_sim, x_sim, stats, tdelta = super().sim(
-            seed, R=R, F=F, H=H, Q=Q, x0=None, Sigma0=None, Xbeta=Xbeta, beta=beta, stats=stats, verbose=verbose
+        # Create a new SSM with the same parameters as the current model, but with the matrices H, R, F and Q computed above
+
+        print(xbeta_names)
+        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None)
+
+        y_sim, x_sim, variance_stats, tdelta = sim_model.sim(
+            seed, R=R, F=F, H=H, Q=Q, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose
         )
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
-        return y_sim, x_sim, Xbeta, beta, stats, tdelta
+        info = {}
+        info['formulas'] = formulas
+        info['y_name'] = y_name
+        info['xbeta_names'] = xbeta_names
+        info['Xbeta'] = Xbeta
+        info['params'] = params
+        info['points'] = points
+        info['T'] = T
+        info['stats'] = variance_stats
+        info['qdim'] = qdim
+        info['nvar'] = nvar
+        info['nlat'] = nlat
+        info['pdim'] = pdim
+        info['block_p'] = block_p
+        info['block_q'] = block_q
+        info['sim_model'] = sim_model
+
+        return y_sim, x_sim, info, tdelta    
+    
+    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
+        """
+        Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
+        """ 
+        self._log("Predicting response variable...")
+
+        # Cut the dataframe time to the time range of the model results
+        self._log("Cutting the dataframe to the time range of the model results...")
+        tmin = self.gridList[0].timestamps.min()
+        tmax = self.gridList[0].timestamps.max()
+
+         
+        # Compute the design matrices
+        self._log("Building observation grid...")
+
+        nvar, points, gridList, ndim, pdim, block_p, T = (
+            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose, tmin=tmin, tmax=tmax)
+        )
+        
+        if nvar != self.nvar:
+            raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
+    
+        self._log("Building Prediction grid... Done.")
+
+        self._log("Building the design matrix...")
+
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        _, Xbeta_predict = self._buildDesignMatrix(gridList)
+        
+
+        self._log("Building the design matrix... Done.")
+
+        if modelresults is None:
+            raise ValueError("Model results must be provided for prediction")
+
+        self._log("Parsing the model results (LRStateSpaceResults)...")
+        params = modelresults.params
+        beta = params.beta.value
+        A = params.A.value
+        ks = params.ks.value
+
+        self._log("Get the filtered state")
+        x_T = modelresults.x_smoothed
+        P_T = modelresults.P_smoothed
+
+        # update the cov_function rescale
+        for cov, ksi in zip(self.cov_function, ks):
+            cov.rescale = ksi
+        
+        self._log("Computing the SSM model matrice H...")
+
+        # Compute the basis matrix (just one) - no boundary
+        basis = self._buildBasis_list(points, self.cov_function)
+        
+        # ---- build parametrised matrices
+        H = self._buildH_dense(A, basis)  # dense
+        self._log("Computing the H {} matrix... Done.".format(H.shape))
+
+    
+        self._log("Start Prediction the SSM...")
+        tStart = time.time()
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta_predict, beta)
+        tdelta = time.time()- tStart
+
+        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+
+        # return the results as a list (same lengh of points and block_p)
+        y_hat = []
+        Sigma_y_hat = []
+        for i in range(len(block_p)-1):
+            y_hat.append(y_hat_full[block_p[i]:block_p[i+1], :])
+            Sigma_y_hat.append(Sigma_y_hat_full[block_p[i]:block_p[i+1], block_p[i]:block_p[i+1],:])
+
+        return points, y_hat, Sigma_y_hat, tdelta
+            
+
+    
 
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
@@ -669,7 +906,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # set the global options
         self.verbose = options.verbose if options is not None else True
         
-        smr = self.summary(print_output="header")
+        smr = self.summary(print_full = False)
         if self.verbose:
             print(smr)
         self._log("Starting the estimation of the model parameters using EM algorithm...")
@@ -767,8 +1004,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # R, F = buildRF(est_s2e, est_f, pdim, qdim)
             R, F = self._buildRF_dense(
-                est_params.s2e.value, est_params.f.value, pdim, qdim
-            )
+                est_params.s2e.value, est_params.f.value, pdim, qdim)
 
             # Compute the maginal precision matrix
             invQ = []
@@ -800,10 +1036,9 @@ class LRStateSpaceModel(StateSpaceModel):
                 R=R,
                 F=F,
                 Q=Q,
-                Xbeta=Xbeta,
-                beta=est_params.beta.value,
                 x0=est_params.x0.value,
                 Sigma0=est_params.Sigma0.value,
+                beta=est_params.beta.value,
             )
 
             # ---- E step
@@ -871,7 +1106,20 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Create the results object...")
         
         results = LRStateSpaceResults(
-            model=self, y_hat=y_hat, params=est_params, nstats=nstat, options=options)
+            model=self, 
+            params=est_params, 
+            nstats=nstat, 
+            options=options,
+            # main arrays
+            y_hat=y_hat, 
+            x_smoothed=x_T,
+            P_smoothed=P_T,
+            P_pred_smoothed=None,
+            # sufficient statistics
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            )
 
         return results
 
@@ -1069,6 +1317,117 @@ class LRStateSpaceModel(StateSpaceModel):
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
+    
+    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
+
+        
+        # Compute the FEM basis functions for the latent field
+        basis = self._buildBasis_list(self.points, self.cov_function)
+
+        # cov_function = self.cov_function
+        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
+        
+        # Get latent dimension (i.e. the rank)
+        qdim = jnp.array(
+            [cov.fem_solver.n_inner_points for cov in self.cov_function],
+            dtype=jnp.int32)
+        
+        # get the stiff and the mass matrix list
+        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=jnp.float32) for cov in self.cov_function]
+        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=jnp.float32) for cov in self.cov_function]
+        ninner = [jnp.array(cov.fem_solver.inner, dtype=bool) for cov in self.cov_function]
+
+        observed_logL = partial(
+            self._compute_observed_logL,
+            y_t=y_obs,           # ensure JAX array
+            Xbeta=Xbeta,
+            basis=basis,
+            x0=x0,
+            Sigma0=Sigma0,
+            pdim=pdim,
+            qdim=qdim,
+            stiff_list=stiff,
+            mass_list=mass,
+            inner_list=ninner,
+            nvar= self.nvar,
+            nlat= self.nlat,
+            )
+         
+        return observed_logL
+
+
+
+    def _compute_observed_logL(self, params, y_t, Xbeta, basis,
+                           x0, Sigma0, pdim, qdim,
+                           stiff_list, mass_list, inner_list,
+                           nvar, nlat):
+        """
+        Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
+        Note that x0, Sigma0 are considered fixed and known, and are passed as arguments. No std computation on them.
+        """
+        
+        beta0 = params.beta.value
+        A0    = params.A.value.reshape((nvar, nlat))
+        s2e0  = params.s2e.value
+        f0    = params.f.value
+        ks0   = params.ks.value
+
+        H    = self._buildH_dense(A0, basis)
+        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
+        
+
+        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
+        Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0]))
+
+        _, _, _, _, _, _, logL = _filter_kernelJAX(
+            y_t, H, R, F, Q,
+            jnp.array(x0,     dtype=y_t.dtype),
+            jnp.array(Sigma0, dtype=y_t.dtype),
+            Xbeta, beta0
+        )
+
+        # return the positive log-likelihood (to be maximized)
+        return logL
+    
+    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_list):
+        """
+        Precision matrix — JAX-differenziabile rispetto a ks.
+        stiff_list, mass_list : liste di np.array (estratti da fem_solver)
+        inner_idx_list        : lista di np.array di indici interi
+                                (np.where(fcov.fem_solver.inner)[0])
+        """
+        invQ_blocks = []
+        for i in range(len(ks)):
+            ki = ks[i]
+            C  = jnp.array(mass_list[i])
+            G  = jnp.array(stiff_list[i])
+            current_inner = inner_list[i]
+            
+            Ci      = jnp.diag(1.0 / C.diagonal())
+            K       = ki**2 * C + G
+            sigma2k = (jax.scipy.special.gamma(1.0) /
+                    (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
+            Qi = sigma2k * (K @ Ci @ K)
+
+            # usa indici interi (non boolean) per compatibilità JAX
+            n = len(current_inner)
+            n_inner = sum(current_inner)
+            n_outer = n - n_inner
+            ii = jnp.where(current_inner, size=n_inner)[0]
+            oi = jnp.where(~current_inner, size=n_outer)[0]
+            
+            perm = jnp.concatenate((ii, oi))
+            Qperm = Qi[perm][:, perm]
+            
+            Q_11 = Qperm[:n_inner, :n_inner]
+            Q_12 = Qperm[:n_inner, n_inner:]
+            Q_22 = Qperm[n_inner:, n_inner:]
+               
+            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0])) @ Q_12.T
+            invQ_blocks.append(Q_mar)
+
+        return jax.scipy.linalg.block_diag(*invQ_blocks)
+
     def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
 
         # Compute the initial values of the parameters
@@ -1080,7 +1439,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
         box = [cv.fem_solver.box for cv in self.cov_function]
-        est_ks = [jnp.sqrt(8 * 1) / ((jnp.abs(bx[0] - bx[1])).min() / 3) for bx in box]
+        est_ks = [
+            jnp.sqrt(8.0) / (jnp.minimum(jnp.abs(bx[2] - bx[0]), jnp.abs(bx[3] - bx[1])) / 3.0)
+            for bx in box
+        ]
 
         # Create the est_params object with the estimated initial values (if not provided, they will be set to None and the model will use default initial values)
         est_params = self._createParams(
@@ -1301,14 +1663,17 @@ class LRStateSpaceModel(StateSpaceModel):
                     flag = True
                     msg = f"Each domain element must be a shapely Polygon, got {type(poly).__name__}"
                 else:
-                    self._log("Domain {}: area = {}, bounds = {}".format(i, poly.area, poly.bounds))
+                    bounds_str = ", ".join(f"{b:.2f}" for b in poly.bounds)
+                    self._log("Domain-{}: area = {:2f}, box = ({})".format(i+1, poly.area, bounds_str))
 
         return flag, msg
 
-    def _buildObservationGrid(self, df, formulas, verbose=True):
+    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None):
 
         nvar = len(formulas)  # numer of the response variable
-        dfs = [DesignMatricesBuilder(df, f, verbose=verbose).build() for f in formulas]
+
+        # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
+        dfs = [DesignMatricesBuilder(df, f, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
@@ -1316,15 +1681,16 @@ class LRStateSpaceModel(StateSpaceModel):
         # get dimnesion of each grid
         pdim = [grid.N for grid in dfs]
         block_p = np.hstack((0, np.cumsum(pdim)))
+        ndim = block_p[-1]
 
-        return nvar, points, dfs, pdim, block_p[-1], block_p, T
+        return nvar, points, dfs, ndim, pdim, block_p, T
+    
+    def _buildDesignMatrix(self, gridList):
 
-    def _buildDesignMatrix(self):
-
-        Ylist = [grid.y for grid in self.gridList if grid.y is not None]
+        Ylist = [grid.y for grid in gridList if grid.y is not None]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
-        Xbeta_list = [grid.X for grid in self.gridList if grid.X is not None]
+        Xbeta_list = [grid.X for grid in gridList if grid.X is not None]
 
         # points_train = [pt[index, :] for pt, index in zip(points, itrain)]
         # points_test = [pt[index, :] for pt, index in zip(points, itest)]
@@ -1434,19 +1800,21 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return history
 
 
-    def generate_summary(self, compute_stats=False):
-
-        return 
-
-    def summary(self, print_output: str = "full") -> Summary:
-        """Return or print a structured summary of the model."""
-        self.model = SimpleNamespace()
-        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
+    def generate_summary(self, print_full=True):
 
         # top-left / top-right small tables
-        p, q, T = self.shape if hasattr(self, "shape") else [("N/A", "N/A", "N/A")]
+        p = self.shape[0] if hasattr(self, "shape") else "N/A"
+        q = self.shape[1] if hasattr(self, "shape") else "N/A"
+        T = self.shape[2] if hasattr(self, "shape") else "N/A"
 
-        # Headser
+        if p is None:
+            p = "N/A"
+        if q is None:
+            q = "N/A"
+        if T is None:
+            T = "N/A"
+
+        # Header information for the summary table
         top_left = dict(
             [
                 ("Model name:", lambda: [self.__class__.__name__]),
@@ -1470,7 +1838,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         top_right = dict(
             [
-                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
                     lambda: (
@@ -1509,6 +1877,14 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                         else ["N/A"]
                     ),
                 ),
+                (
+                    "Rank",
+                    lambda: (
+                        [f"{q/p :4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
+                        if q != "N/A" and p != "N/A"
+                        else ["N/A"]
+                    ),
+                ),
             ]
         )
 
@@ -1526,64 +1902,75 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             gen_top_right = gen_top_right + [("", [""])] * len_empty
         elif len_empty < 0:
             gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
+
+        if not print_full:
+            return gen_top_left, gen_top_right
+
+        else:  
+            # Get the generate table from the gridlist
+            if hasattr(self,"gridList") and self.gridList is not None:
+
+                gen_top_left_grid = []
+                gen_top_right_grid = []
+                for i, grid in enumerate(self.gridList):
+
+                    left, righ = grid.generate_summary()
+                    
+                    # check the length of the left and right tables and add empty rows if they are different
+                    len_empty = len(left) - len(righ)
+                    if len_empty > 0:
+                        righ = righ + [("", [""])] * len_empty
+                    elif len_empty < 0:
+                        left = left + [("", [""])] * (-len_empty)
+                    
+                    left = [(f"Grid {i}", ["-" * 28])] + left
+                    righ = [(f"Grid {i}", ["-" * 28])] + righ
+                    
+
+                    
+                    gen_top_left_grid = gen_top_left_grid + left
+                    gen_top_right_grid = gen_top_right_grid + righ
+
+                gen_top_left = gen_top_left + gen_top_left_grid
+                gen_top_right = gen_top_right + gen_top_right_grid
+
             
-        # Get the generate table from the gridlist
-        if hasattr(self,"gridList") and self.gridList is not None:
+            # Get the generate table from the covariance
+            if hasattr(self,"_cov_matern") and self._cov_matern is not None:
 
-            gen_top_left_grid = []
-            gen_top_right_grid = []
-            for i, grid in enumerate(self.gridList):
+                gen_top_left_cov = []
+                gen_top_right_cov = []
+                for i, cov in enumerate(self._cov_matern):
+                    left, righ = cov.generate_summary()
 
-                left, righ = grid.generate_summary()
-                
-                # check the length of the left and right tables and add empty rows if they are different
-                len_empty = len(left) - len(righ)
-                if len_empty > 0:
-                    righ = righ + [("", [""])] * len_empty
-                elif len_empty < 0:
-                    left = left + [("", [""])] * (-len_empty)
-                
-                left = [(f"Grid {i}", ["-" * 30])] + left
-                righ = [(f"Grid {i}", ["-" * 30])] + righ
-                
+                    # check the length of the left and right tables and add empty rows if they are different
+                    len_empty = len(left) - len(righ)
+                    if len_empty > 0:
+                        righ = righ + [("", [""])] * len_empty
+                    elif len_empty < 0:
+                        left = left + [("", [""])] * (-len_empty)
 
-                
-                gen_top_left_grid = gen_top_left_grid + left
-                gen_top_right_grid = gen_top_right_grid + righ
+                    
+                    left = [(f"Latent. {i}", ["-" * 28])] + left
+                    righ = [(f"Latent {i}", ["-" * 28])] + righ
 
-            gen_top_left = gen_top_left + gen_top_left_grid
-            gen_top_right = gen_top_right + gen_top_right_grid
+                    
+                    gen_top_left_cov = gen_top_left_cov + left
+                    gen_top_right_cov = gen_top_right_cov + righ
 
+                gen_top_left = gen_top_left + gen_top_left_cov
+                gen_top_right = gen_top_right + gen_top_right_cov
+            
+            return gen_top_left, gen_top_right 
+
+    def summary(self, print_full=True) -> Summary:
+        """Return or print a structured summary of the model."""
+        self.model = SimpleNamespace()
+        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
+
+        # Generate the summary tables
+        gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
         
-        # Get the generate table from the covariance
-        if hasattr(self,"_cov_matern") and self._cov_matern is not None:
-
-            gen_top_left_cov = []
-            gen_top_right_cov = []
-            for cov in self._cov_matern:
-                left, righ = cov.generate_summary(compute_stats=True)
-
-                # check the length of the left and right tables and add empty rows if they are different
-                len_empty = len(left) - len(righ)
-                if len_empty > 0:
-                    righ = righ + [("", [""])] * len_empty
-                elif len_empty < 0:
-                    left = left + [("", [""])] * (-len_empty)
-
-                
-                left = [(f"Latent. {i}", ["-" * 26])] + left
-                righ = [(f"Latent {i}", ["-" * 26])] + righ
-
-                
-                gen_top_left_cov = gen_top_left_cov + left
-                gen_top_right_cov = gen_top_right_cov + righ
-
-            gen_top_left = gen_top_left + gen_top_left_cov
-            gen_top_right = gen_top_right + gen_top_right_cov
-           
-        # Update the summary with the generated tables
-
-
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(

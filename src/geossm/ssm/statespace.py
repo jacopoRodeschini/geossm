@@ -8,14 +8,15 @@ from jax.scipy.linalg import solve
 from jax import jit
 import time
 from geossm.utils import KeyStream
-import numpy as np
 from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
+from geossm.utils import _select_device, _to_backend
 
 
 # % JAX kernel functions for SSM
+
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """
     JIT-compiled kernel for simulating a time series from the state-space model using JAX.
@@ -51,8 +52,6 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # Loop T times to generate T observations (y_0, ..., y_{T-1})
     for t in range(T):
         # 1. Generate the observation y_t based on the current state x_t
-        # Note: The original code had a slight lookahead (y_{t-1} from x_t).
-        # This version uses the more standard y_t from x_t.
         obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
         mean_reg = Xbeta[:, :, t] @ beta
         y_t = mean_reg + H @ x_current + obs_noise
@@ -74,6 +73,43 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     return final_y_t, final_x_t
 
+""" 
+@jit
+def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
+    ```Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly).```
+    T = Xbeta.shape[2]
+    p = R.shape[0]
+    q = F.shape[0]
+
+    chol_R = jnp.linalg.cholesky(R)
+    chol_Q = jnp.linalg.cholesky(Q)
+    chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
+
+    key0, key_obs, key_state = jax.random.split(keys, 3)
+    eps0 = jax.random.normal(key0, shape=(q,), dtype=jnp.float32)
+    obs_eps = jax.random.normal(key_obs, shape=(T, p), dtype=jnp.float32)
+    state_eps = jax.random.normal(key_state, shape=(T, q), dtype=jnp.float32)
+
+    x_init = x0 + chol_Sigma0 @ eps0
+    fixed_effect = jnp.einsum("pkt,k->pt", Xbeta, beta)
+
+    def step(x_curr, inputs):
+        obs_eps_t, state_eps_t, fe_t = inputs
+        y_t = fe_t + H @ x_curr + chol_R @ obs_eps_t
+        x_next = F @ x_curr + chol_Q @ state_eps_t
+        return x_next, (y_t, x_next)
+
+    _, (y_hist, x_next_hist) = jax.lax.scan(
+        step,
+        x_init,
+        (obs_eps, state_eps, fixed_effect.T),
+    )
+
+    y_t = y_hist.T
+    x_t = jnp.concatenate([x_init[:, None], x_next_hist.T], axis=1)
+
+    return y_t, x_t
+"""
 
 @jit
 def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
@@ -87,6 +123,8 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     invR_diag = jnp.reciprocal(R_diag)
     invR = jnp.diag(invR_diag)
     H_dense = H.astype(dtype)
+    f_diag = jnp.diag(F)
+    FF = jnp.outer(f_diag, f_diag)
 
     # This is the function for a single loop iteration
     def kalman_step(carry, step_data):
@@ -95,8 +133,11 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         yt_slice, Xbeta_slice = step_data
 
         # PREDICTION
-        x_pred = F @ x_prev
-        P_pred = F @ P_prev @ F.T + Q
+        # x_pred = F @ x_prev
+        # P_pred = F @ P_prev @ F.T + Q
+        x_pred = f_diag * x_prev
+        P_pred = FF * P_prev + Q
+
 
         # RESIDUAL
         nan_mask = jnp.isnan(yt_slice)
@@ -108,9 +149,17 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         Hna_dense = H_dense * (~nan_mask)[:, None]
 
         # WOODBURY
-        invP_pred = solve(P_pred, Iq)
+        #invP_pred = solve(P_pred, Iq)
+        L_P = jnp.linalg.cholesky(P_pred + 1e-6 * Iq)  # Add small jitter for numerical stability
+        invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
+        invP_pred = invL_P.T @ invL_P
+
         M = invP_pred + Hna_dense.T @ (invR @ Hna_dense)
-        invM = solve(M, Iq)
+        
+        L_M = jnp.linalg.cholesky(M + 1e-6 * Iq)  # Add small jitter for numerical stability
+        invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
+        invM = invL_M.T @ invL_M
+        
         invSigmaE = invR - invR @ Hna_dense @ invM @ Hna_dense.T @ invR
 
         # KALMAN GAIN
@@ -119,13 +168,22 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # UPDATE STATE
         x_upd = x_pred + K @ e
         P_upd = P_pred - K @ Hna_dense @ P_pred
+        # Joseph form for P_upd keep the update symmetric and PD
+        # IKH = (Iq - K @ Hna_dense)
+        # P_upd =  IKH @ P_pred @ IKH.T + K @ R @ K.T
+
 
         # LOG-LIKELIHOOD
-        logdetSigmaE = (
-            jnp.linalg.slogdet(M)[1]
-            + jnp.linalg.slogdet(P_pred)[1]
-            + jnp.sum(jnp.log(R_diag))
-        )
+        # logdetSigmaE = (
+        #     jnp.linalg.slogdet(M)[1]
+        #     + jnp.linalg.slogdet(P_pred)[1]
+        #     + jnp.sum(jnp.log(R_diag))
+        # )
+        
+        logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
+        logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
+        logdetSigmaE = logdet_M + logdet_Ppred + jnp.sum(jnp.log(R_diag))
+
         logL_accum += logdetSigmaE + e.T @ (invSigmaE @ e)
 
         # 2. Pack carry for next step and outputs for this step
@@ -184,6 +242,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
 
     dtype = x_t.dtype.type()
     q = F.shape[0]
+    f_diag = jnp.diag(F)
 
     def smoother_step(carry, inputs):
         """
@@ -207,14 +266,21 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         ) = inputs
 
         # --- Core Smoother Logic (from your original loop) ---
-        J_t_1 = P_t_curr @ F.T @ invP_t_1_next
+        #J_t_1 = P_t_curr @ F.T @ invP_t_1_next
+        PF = P_t_curr * f_diag[None, :]          # (q,q): scale columns of P_t_curr
+        J_t_1 = PF @ invP_t_1_next               # (q,q)
+
 
         x_T_curr = x_t_curr + J_t_1 @ (x_T_next - x_t_1_next)
         P_T_curr = P_t_curr + J_t_1 @ (P_T_next - P_t_1_next) @ J_t_1.T
 
         # Lag-one covariance
-        J_t_2 = P_t_prev @ F.T @ invP_t_1_curr
-        term = P_T_1_next - F @ P_t_curr
+        #J_t_2 = P_t_prev @ F.T @ invP_t_1_curr
+        PF_prev = P_t_prev * f_diag[None, :]          # (q,q): scale columns of P_t_prev
+        J_t_2 = PF_prev @ invP_t_1_curr               # (q,q)
+        
+        # term = P_T_1_next - F @ P_t_curr
+        term = P_T_1_next - (f_diag[:, None] * P_t_curr)
         P_T_1_curr = P_t_curr @ J_t_2.T + J_t_1 @ term @ J_t_2.T
 
         # 3. Prepare the new carry for the next iteration (time t-1)
@@ -310,10 +376,7 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     # --- 1. Compute predicted observations (y_hat) ---
     # The term Xbeta @ beta can be computed efficiently using einsum.
     # y_hat_t = Xbeta_t @ beta + H @ x_t
-    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
-    y_hat_state_term = H @ x_t_slice
-    y_hat = y_hat_covariate_term + y_hat_state_term
-
+    y_hat, _ = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
     # --- 2. Compute sufficient statistics (S11, S10, S00) ---
     # E[sum(x x')] = sum(E[x]E[x]' + Cov(x)) = sum(x_T x_T') + sum(P_T)
     # The sum of outer products (x @ x') can be vectorized as X @ X.T
@@ -332,6 +395,19 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
 
     return y_hat, S11, S10, S00
 
+@jit
+def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
+    """Compute the predicted observations (y_hat) based on the smoothed states and the model parameters."""
+    
+    # Compute the expected valure
+    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
+    y_hat_state_term = H @ x_T[:, 1:]  # Use the smoothed states for prediction
+    y_hat = y_hat_covariate_term + y_hat_state_term
+
+    # compute the plugin uncertainty
+    Sigma_y_hat = jnp.einsum("ip,pqt,jq->ijt", H, P_T[:, :, 1:], H)
+
+    return y_hat, Sigma_y_hat
 
 # State Space Model Class
 class StateSpaceModel:
@@ -350,12 +426,14 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
+        backend: str = "auto", 
         dtype=jnp.float32,
     ):
         """
         Initialize the State Space Model with system matrices and initial state.
         """
         self.dtype = dtype  # Data type for computations
+        self.backend = backend  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
         self._H = None  # Observation matrix
@@ -382,15 +460,15 @@ class StateSpaceModel:
 
         # Set the initial state starting values if not provided
         if x0 is None and F is not None and Q is not None:
-            x0 = np.zeros(F.shape[0])
+            x0 = jnp.zeros(F.shape[0])
         if Sigma0 is None and F is not None and Q is not None:
-            Sigma0 = np.eye(F.shape[0])
+            Sigma0 = jnp.eye(F.shape[0])
 
         # Set default Xbeta and beta if not provided
         if Xbeta is None and H is not None:
-            Xbeta = np.zeros((H.shape[0], 1, 1))
+            Xbeta = jnp.zeros((H.shape[0], 1, 1))
         if beta is None and Xbeta is not None:
-            beta = np.zeros(Xbeta.shape[1])
+            beta = jnp.zeros(Xbeta.shape[1])
 
         # Update parameters without checking (we will check after setting all parameters)
         self.set(
@@ -416,7 +494,7 @@ class StateSpaceModel:
             if not flag:
                 raise ValueError(msg)
 
-    
+
     def __call__(self, y_t):
         """
         Docstring for __call__
@@ -516,34 +594,62 @@ class StateSpaceModel:
                 self._Sigma0 = jnp.eye(self.q, dtype=self.dtype)
 
         if Xbeta is not None:
-            self._Xbeta = jnp.asarray(Xbeta, dtype=self.dtype)
-            # infer time length from Xbeta shape (p, b, T)
-            try:
-                self._T = int(self._Xbeta.shape[2])
-            except Exception:
+            Xbeta_arr = jnp.asarray(Xbeta, dtype=self.dtype)
+            self._Xbeta = Xbeta_arr
+
+            # infer (p, b, T) when possible
+            if Xbeta_arr.ndim >= 3:
+                # common shape: (p, b, T)
+                self._b = int(Xbeta_arr.shape[1])
+                self._T = int(Xbeta_arr.shape[2])
+            elif Xbeta_arr.ndim == 2:
+                # ambiguous: treat second dim as b
+                self._b = int(Xbeta_arr.shape[1])
+                self._T = None
+            else:
+                self._b = None
                 self._T = None
 
+        # --- handle beta if provided ---
         if beta is not None:
-            self._beta = jnp.asarray(beta, dtype=self.dtype)
+            beta_arr = jnp.asarray(beta, dtype=self.dtype)
+            self._beta = beta_arr
+
             try:
-                self._b = int(self._beta.shape[0])
+                b_from_beta = int(beta_arr.shape[0])
             except Exception:
-                self._b = None       
+                b_from_beta = None
 
+            if b_from_beta is not None:
+                # if we've already inferred _b (e.g. from Xbeta), ensure consistency
+                if getattr(self, "_b", None) is not None and self._b != b_from_beta:
+                    raise ValueError(
+                        f"Shape mismatch: beta has length {b_from_beta} but existing Xbeta/b implies {self._b}."
+                    )
+                self._b = b_from_beta
+
+        # --- handle xbeta_names ---
         if xbeta_names is not None:
-            # Count total number of xbeta names across all the variables
-            len_xbeta_names = sum([len(xb_names) for xb_names in xbeta_names])
+            # support nested lists per-variable: count total names across variables
+            len_xbeta_names = sum(len(xb_names) for xb_names in xbeta_names)
 
+            # if _b not known yet, set it from names
+            if getattr(self, "_b", None) is None:
+                self._b = int(len_xbeta_names)
+
+            if self._b is None:
+                raise ValueError("Cannot infer number of xbeta terms (b) from inputs.")
             if len_xbeta_names != int(self._b):
-                raise ValueError(
-                    f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}."
-                )
+                raise ValueError(f"Expected {int(self._b)} xbeta names, got {len_xbeta_names}.")
+
             self._xbeta_names = xbeta_names
-        elif self._b is not None:
-            # If beta is set but no names provided, create default names
-            self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
-        else:
-            self._xbeta_names = None
+        
+        if Xbeta is not None and xbeta_names is None:
+            # no names provided: if b known create defaults, else leave None
+            if getattr(self, "_b", None) is not None:
+                self._xbeta_names = [f"X_{i}" for i in range(int(self._b))]
+            else:
+                self._xbeta_names = None
 
         if y_t is not None:
             self._y_t = jnp.asarray(y_t, dtype=self.dtype)
@@ -564,6 +670,7 @@ class StateSpaceModel:
 
         return True
 
+
     def _check_parameters(self):
         """
         Checks the dimensions of the parameters.
@@ -579,7 +686,7 @@ class StateSpaceModel:
 
         def shape_str(x):
             try:
-                return tuple(np.asarray(x).shape)
+                return tuple(jnp.asarray(x).shape)
             except Exception:
                 return None
 
@@ -604,16 +711,15 @@ class StateSpaceModel:
 
         # Helper: check positive semidefinite (symmetric) with tolerance
         def is_pos_semidef(mat):
-            A = np.asarray(mat)
+            A = jnp.asarray(mat)
             if A.ndim != 2 or A.shape[0] != A.shape[1]:
                 return False
             # symmetry check
-            if not np.allclose(A, A.T, atol=1e-8):
+            if not jnp.allclose(A, A.T, atol=1e-8):
                 return False
             # eigenvalues >= -tol
-            eigs = np.linalg.eigvalsh(A)
-            return np.all(eigs >= -1e-8)
-
+            eigs = jnp.linalg.eigvalsh(A)
+            return jnp.all(eigs >= -1e-8)
         # Sigma0: should be (q, q)
         sigma0_shape = shape_str(self.Sigma0)
         if sigma0_shape not in [(q, q), (q,), (q,)]:
@@ -640,7 +746,7 @@ class StateSpaceModel:
                     flag = False
             else:
                 # scalar case
-                Rval = np.asarray(self.R).ravel()[0]
+                Rval = jnp.asarray(self.R).ravel()[0]
                 if Rval < 0:
                     messages.append("R (variance) must be non-negative.")
                     flag = False
@@ -763,6 +869,13 @@ class StateSpaceModel:
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
+    def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
+        """
+        Compute predicted observations (y_hat) based on smoothed states and model parameters.
+        """
+        y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
+        return y_hat, Sigma_y_hat
+    
     def filter(
         self,
         y_t,
@@ -826,9 +939,9 @@ class StateSpaceModel:
         tDelta = time.time() - tStart
 
         # compute expected values (given the filterd values)
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-            x_t, P_t, P_t_1
-        )
+        # y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+        #     x_t, P_t, P_t_1
+        # )
 
         results = StateSpaceResults(
             model=self,
@@ -840,11 +953,11 @@ class StateSpaceModel:
             invP_pred=invP_t_1,
             llf=logL,
             time_filter=tDelta,
-            y_hat=y_hat,
-            S11=S11,
-            S10=S10,
-            S00=S00,
-            time_expectation=tdelta_expectation,
+            y_hat=None,
+            S11=None,
+            S10=None,
+            S00=None,
+            time_expectation=0.0,
         )
 
         return results
@@ -951,8 +1064,10 @@ class StateSpaceModel:
         Sigma0=None,
         Xbeta=None,
         beta=None,
+        block_p=None, 
+        block_q=None,
         stats=True,
-        verbose=True,
+        verbose=False,
     ) -> jnp.ndarray:
         """
         Simulates a time series from the state-space model using JAX and a Python for-loop.
@@ -989,18 +1104,18 @@ class StateSpaceModel:
             raise ValueError(msg)
 
         if isinstance(seed, KeyStream):
-            keys = seed
+            key = seed
         else:
             # Initialize PRNGKey stream
             main_key = jax.random.PRNGKey(seed)
             seed, main_key = jax.random.split(main_key)
 
-            keys = KeyStream(seed)
+            key = KeyStream(seed)
 
         # Call the simulation kernel to generate the time series
         tStart = time.time()
         y_t_sim, x_t_sim = _sim_kernelJAX(
-            keys,
+            key,
             self.H,
             self.R,
             self.F,
@@ -1010,22 +1125,28 @@ class StateSpaceModel:
             self.Xbeta,
             self.beta,
         )
+        jax.block_until_ready(y_t_sim)
         tdelta = time.time() - tStart
 
         if stats:
-            stats = self.summarize_ssm_variances(x_t_sim, y_t_sim, verbose=verbose)
+            fixed_effect = jnp.einsum("pkt,k->pt", self.Xbeta, self.beta)
+            y_delta = y_t_sim - fixed_effect
+            stats = self.summarize_ssm_variances(x_t_sim, y_delta, block_p=block_p, block_q=block_q, verbose=verbose)
         else:
             stats = None
 
         return y_t_sim, x_t_sim, stats, tdelta
 
 
-    def summarize_ssm_variances(self, x_sim, y_sim, decimals=4, verbose=True) -> dict:
+    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=True) -> dict:
         """
         Compute and print a compact summary of theoretical vs empirical variances
         for the LR-SSM. Returns a dict with numeric results.
+
+        block_p is the dimension of the observation (number of locations) for each process in case of multivariate processes simulation
+        block_q is the dimension of the latent state for each process in case of multivariate processes simulation
+        
         """
-        import numpy as np
         from scipy.linalg import solve_discrete_lyapunov
 
         # Basic checks
@@ -1037,65 +1158,64 @@ class StateSpaceModel:
         # Solve Lyapunov: P = F P F^T + Q
         P = solve_discrete_lyapunov(F, Q)
 
-        # Theoretical latent variance (average spatial variance contributed by state)
-        var_latent = float(np.trace(H @ P @ H.T) / H.shape[0])
+        # Theoretical latent variance
+        # temp = jnp.diag(H @ P @ H.T)
+        # temp = jnp.diag(P)
+        # var_z_t = jnp.array([float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)])
+
+        # Theoretical variance of the latent effect (H @ x_t) is H P H^T
+        temp = jnp.diag(H @ P @ H.T)
+        var_latents = jnp.array([float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)])
 
         # Empirical latent variance:
         # H @ x_sim -> (n_locations, n_time) ; compute variance across locations per time, then average
         latent_effect = H @ x_sim
-        var_latent_empirical = float(np.var(latent_effect, axis=0).mean())
+        var_latent_empirical = jnp.array([float(jnp.var(latent_effect[block_p[i]:block_p[i+1],:], axis=0).mean()) for i in range(len(block_p)-1)])
 
         # Observation noise variance (average over observation dims)
-        var_noise = float(np.trace(R) / R.shape[0])
+        temp = jnp.diag(R)
+        var_noise = jnp.array([float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)])
 
         # Response variance (theoretical) and empirical
-        var_y_theoretical = var_latent + var_noise
-        var_y_empirical = float(np.var(y_sim, axis=0).mean())
-
+        var_y_theoretical = var_latents + var_noise
+        var_y_empirical = jnp.array([jnp.var(y_sim[block_p[i]:block_p[i+1],:], axis=0).mean() for i in range(len(block_p)-1)])
+        var_noise_empirical = var_y_empirical - var_latent_empirical
+        
         # Ratios and SNRs
         ratios = {
-            "empirical_over_theoretical_latent": var_latent_empirical / var_latent if var_latent != 0 else np.nan,
-            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical if var_y_theoretical != 0 else np.nan,
+            "empirical_over_theoretical_latent": var_latent_empirical / var_latents ,
+            "empirical_over_theoretical_y": var_y_empirical / var_y_theoretical,
         }
-        snrs = {
-            "SNR_latent_vs_noise": var_latent / var_noise if var_noise != 0 else np.nan,
-            "frac_noise_over_y": var_noise / var_y_theoretical if var_y_theoretical != 0 else np.nan,
-            "frac_latent_over_y": var_latent / var_y_theoretical if var_y_theoretical != 0 else np.nan,
-            "empirical_SNR_latent_over_y": var_latent_empirical / var_y_empirical if var_y_empirical != 0 else np.nan,
-        }
-
+        
         # Nicely formatted printout
         if verbose:       
-            fmt = f"{{:<40}}{{:>{decimals+8}.{decimals}f}}"
+            fmt = f"{{:<40}}{{}}"
             print("\nState-space variance summary")
             print("-" * 60)
             print(f"{'Matrix shapes:':<40} F={F.shape}, Q={Q.shape}, H={H.shape}, R={R.shape}")
+            print(f"{'Observation blocks:':<40} {block_p}")
+            print(f"{'Latent blocks:':<40} {block_q}")
             print("-" * 60)
-            print(fmt.format("Theoretical latent variance (avg spatial):", var_latent))
-            print(fmt.format("Empirical latent variance (avg over time):", var_latent_empirical))
+            print(fmt.format("Theoretical latent variance:", var_latents))
+            print(fmt.format("Empirical latent variance:", var_latent_empirical))
             print(fmt.format("Empirical / Theoretical (latent):", ratios["empirical_over_theoretical_latent"]))
             print()
-            print(fmt.format("Theoretical response variance (var_y = var_latent + var_noise):", var_y_theoretical))
-            print(fmt.format("Empirical response variance (avg over time):", var_y_empirical))
+            print(fmt.format("Theoretical response variance :", var_y_theoretical))
+            print(fmt.format("Empirical response variance :", var_y_empirical))
             print(fmt.format("Empirical / Theoretical (y):", ratios["empirical_over_theoretical_y"]))
             print()
-            print(fmt.format("Noise variance (avg obs-dim):", var_noise))
-            print(fmt.format("SNR (latent / noise):", snrs["SNR_latent_vs_noise"]))
-            print(fmt.format("frac noise / var_y:", snrs["frac_noise_over_y"]))
-            print(fmt.format("frac latent / var_y:", snrs["frac_latent_over_y"]))
-            print(fmt.format("Empirical SNR (latent_empirical / emp_var_y):", snrs["empirical_SNR_latent_over_y"]))
+            print(fmt.format("Theoretical noise variance:", var_noise))
+            print(fmt.format("Empirical noise variance:", var_noise_empirical))
             print("-" * 60)
-        
-
+           
         # Return numeric results for downstream use
         stats = {
-            "var_latent_theoretical": var_latent,
+            "var_latent_theoretical": var_latents,
             "var_latent_empirical": var_latent_empirical,
             "var_noise": var_noise,
             "var_y_theoretical": var_y_theoretical,
             "var_y_empirical": var_y_empirical,
             "ratios": ratios,
-            "snrs": snrs,
             "P": P,
         }
         
@@ -1131,9 +1251,17 @@ class StateSpaceModel:
     def params(self):
         return self._params
 
+    @params.setter
+    def params(self, value):
+        self._params = value
+
     @property
     def params_names(self):
         return self._params_names
+
+    @params_names.setter
+    def params_names(self, value):
+        self._params_names = value
 
     @property
     def params_dim(self):
@@ -1246,10 +1374,6 @@ class StateSpaceModel:
         return self._Sigma0
 
     @property
-    def xbeta_names(self):
-        return self._xbeta_names
-
-    @property
     def yname(self):
         return self._yname
 
@@ -1259,6 +1383,7 @@ class StateSpaceModel:
 
         Convert JAX arrays to NumPy arrays and store basic metadata.
         """
+        import numpy as np
 
         def to_np(x):
             if x is None:
@@ -1424,13 +1549,13 @@ class StateSpaceModel:
     def summary(self) -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
-        self.model.results = np.array([0])
+        self.model.results = jnp.array([0])
         
         self.params = ""
         self.params_names = ""
-        self.model.bse = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.tvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
-        self.model.pvalues = np.zeros(len(self.beta)) if self.beta is not None else np.array([0])
+        self.model.bse = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
+        self.model.tvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
+        self.model.pvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
 
         gen_top_left, gen_top_right = self.generate_summary()
 
@@ -1450,7 +1575,7 @@ class StateSpaceModel:
     def __str__(self):
         """String representation of the model."""
 
-        return str(self.summary(print_output="short"))
+        return str(self.summary())
 
     def __repr__(self):
         return self.__str__()

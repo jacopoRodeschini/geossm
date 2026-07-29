@@ -17,6 +17,9 @@ from shapely.geometry import Point, Polygon
 from gstools.covmodel import Matern
 from scipy.spatial import ConvexHull
 from statsmodels.iolib.summary import Summary
+from datetime import datetime, timezone
+import time
+
 
 # % Utility functions
 
@@ -105,7 +108,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
 # % FEM solver class
 class FEMSolver:
-    def __init__(self, meshio_obj: meshio.Mesh, domain=None):
+    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
 
         # Validate inputs
         mesh = None
@@ -116,7 +119,10 @@ class FEMSolver:
                         f"meshio_obj must be meshio.Mesh, got {type(meshio_obj).__name__}"
                     )
                 # Convert to MFEM if needed (or keep as meshio)
+                self.print_info("Converting meshio.Mesh to mfem.Mesh...")
                 mesh = meshio_to_mfem_mesh(meshio_obj)
+                self.print_info("Mesh conversion successful.")
+
         except Exception as e:
             raise RuntimeError(f"Error loading mesh: {str(e)}") from e
 
@@ -139,6 +145,29 @@ class FEMSolver:
         self._mesh = mesh
         self._domain = domain if domain is not None else ConvexHull(self.vertex[:, :2])
 
+        # Compute the stats associate with the mesh (angles and areas of the triangles)
+        if stats == True:
+            self.print_info("Computing mesh quality statistics:angles and areas (takes a while)...")
+            self._angles, self._areas = self.compute_stats()
+            self.print_info("Mesh quality statistics computed successfully.")
+        else:
+            self._angles, self._areas = None, None
+        
+        # Print the mesh quality statistics
+        if self._angles is not None and self._areas is not None:
+            msg = f"Angles [min, mean, max] = [{self._angles.min():.2f}, {self._angles.mean():.2f}, {self._angles.max():.2f}] degrees \n"
+            msg += f"Areas  [min, mean, max] = [{self._areas.min():.2f}, {self._areas.mean():.2f}, {self._areas.max():.2f}]"
+            self.print_info(msg)
+
+        # Get warning if the mesh has bad quality (e.g. small angles)
+        if self._angles is not None and self._angles.min() < 10:
+            self.print_info(
+                f"Mesh has small angles (min angle = {self._angles.min():.2f} degrees). "
+                "This may lead to numerical instability. Consider refining the mesh or improving its quality."
+            )
+        
+
+        
         # Initialize matrices as None (will be computed)
         self._fespace = None
         self._mass = None
@@ -146,13 +175,17 @@ class FEMSolver:
         self._inner = None
 
         # Build finite element space
+        self.print_info("Building FE space and computing mass/stiffness matrices...")
         self._fespace = self._build_fespace()
 
         # Classify vertices as inner or outer (boolean array)
         self._inner = self.isinner()
-
+        
         # compute matrices now
+        self.print_info("Computing mass and stiffness matrices...")
         self._mass, self._stiff = self._compute_mass_stiff()
+        self.print_info("Computing mass and stiffness matrices... Done.")
+        self.print_info("FEMSolver initialization complete.")
 
     @property
     def mesh(self):
@@ -188,7 +221,7 @@ class FEMSolver:
 
         inner = np.logical_or.reduce(
             [
-                np.array([poly.contains(Point(p)) for p in phy_points])
+                np.array([poly.covers(Point(p)) for p in phy_points])
                 for poly in self._domain
             ]
         )
@@ -636,7 +669,7 @@ class FEMSolver:
         return 0.5 * abs(A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]))
 
 
-    def stats(self):
+    def compute_stats(self):
 
         # compute angles for all triangles
         angles = np.array([self.compute_angles(self.vertex, tri) for tri in self.elements])
@@ -646,14 +679,19 @@ class FEMSolver:
 
         return angles, areas
 
+    
+    @property
+    def angles(self):
+        return self._angles
+    
+    @property
+    def areas(self):
+        return self._areas
+    
 
-    def generate_summary(self, compute_stats=True):
+    def generate_summary(self):
         # compute the angles and areas of the triangles
-        if compute_stats:
-            angles, areas = self.stats()
-        else:
-            angles, areas = np.array([0]), np.array([0])
-        
+
         top_left = dict(
                     [
                         ("Solver. type:", lambda: [self.__class__.__name__]),
@@ -666,10 +704,17 @@ class FEMSolver:
                         ("Mesh lines:", lambda: [f"{self.nbElements}"]), 
                         ("Mesh inner vertex (rank):", lambda: [f"{self.n_inner_points}"]),
                         ("Mesh outer vertex:", lambda: [f"{self.n_outer_points}"]),   
-                        ("Mesh angle [min, mean, max]:", lambda: [f"[{angles.min():.2f}, {angles.mean():.2f}, {angles.max():.2f}]"]),
-                        ("Mesh area [min, mean, max]:", lambda: [f"[{areas.min():.2f}, {areas.mean():.2f}, {areas.max():.2f}]"])
                     ]
                 )
+        if self.angles is None or self.areas is None:
+            top_left["Mesh angle [min, mean, max]:"] = lambda: ["N/A"]
+            top_left["Mesh area [min, mean, max]:"] = lambda: ["N/A"]
+        else:
+            top_left["Mesh angle [min, mean, max]:"] = lambda: [f"[{self.angles.min():.2f}, {self.angles.mean():.2f}, {self.angles.max():.2f}]"]
+            top_left["Mesh area [min, mean, max]:"] = lambda: [f"[{self.areas.min():.2f}, {self.areas.mean():.2f}, {self.areas.max():.2f}]"]
+            
+
+
         top_right = dict(
                     [
                         ("Box:", lambda: [f"{self.box}"]),
@@ -694,11 +739,11 @@ class FEMSolver:
 
         return gen_top_left, gen_top_right
 
-    def summary(self, compute_stats=True):
+    def summary(self):
 
         
         # Add the header to the summary
-        gen_top_left, gen_top_right = self.generate_summary(compute_stats=compute_stats)
+        gen_top_left, gen_top_right = self.generate_summary()
         
         smry = Summary()
         smry.add_table_2cols(
@@ -720,6 +765,19 @@ class FEMSolver:
         # plot the mesh
         self.plot_mesh(title="FEM Mesh Visualization")
         return self.__str__()
+
+    def _is_verbose(self, verbose=None) -> bool:
+        return self.verbose if verbose is None else verbose
+
+    def _log(self, msg: str, verbose=None) -> None:
+        if self._is_verbose(verbose):
+            self.print_info(msg)
+
+    def print_info(self, msg):
+
+        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+
 
 # % Heat kernel
 
@@ -902,7 +960,7 @@ class spdeAppoxCov(Matern):
 
         return base
 
-    def setup(self, mesh_obj: meshio._mesh.Mesh):
+    def setup(self, mesh_obj: meshio._mesh.Mesh, stats=True, verbose=True):
         """
         Initialize the covariance model with a mesh.
 
@@ -913,6 +971,8 @@ class spdeAppoxCov(Matern):
         ----------
         mesh_obj : meshio.Mesh, optional
             A meshio.Mesh object (already loaded in memory)
+        stats : bool, optional
+            Whether to compute mesh quality statistics (default is True)
 
         Returns
         -------
@@ -946,7 +1006,7 @@ class spdeAppoxCov(Matern):
         # Initialize FEM solver
         try:
             self._meshIO = mesh_obj  # Store the mesh for potential reinitialization
-            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain)
+            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain, verbose=verbose, stats=stats)
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize FEM solver: {str(e)}") from e
@@ -980,7 +1040,7 @@ class spdeAppoxCov(Matern):
         k = self.rescale
         K = (k**2) * self.fem_solver.mass + self.fem_solver.stiff
 
-        # Compute the precision matrix of the process y
+        # Compute the precision matrix of the process with unit marginal variance
         Q = self.sigma2k * (K @ Cinv @ K)
 
         return Q
@@ -1020,7 +1080,7 @@ class spdeAppoxCov(Matern):
         return self._domain
 
 
-    def generate_summary(self, compute_stats=True):
+    def generate_summary(self):
         
         top_left = dict(
                     [
@@ -1049,7 +1109,7 @@ class spdeAppoxCov(Matern):
 
         
         if hasattr(self,"fem_solver"):
-            gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary(compute_stats=compute_stats)
+            gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary()
        
             gen_top_left = gen_top_left + gen_top_left_solver
             gen_top_right = gen_top_right + gen_top_right_solver
@@ -1057,9 +1117,9 @@ class spdeAppoxCov(Matern):
 
         return gen_top_left, gen_top_right
 
-    def summary(self, compute_stats=True):
+    def summary(self):
 
-        gen_top_left, gen_top_right = self.generate_summary(compute_stats=compute_stats)
+        gen_top_left, gen_top_right = self.generate_summary()
 
         
         # Add the header to the summary
@@ -1096,4 +1156,6 @@ class spdeAppoxCov(Matern):
         # Rebuild the mesh and finite element solver if meshIO is available
         if self._meshIO is not None:
             self.setup(self._meshIO)
+
+    
 
