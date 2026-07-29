@@ -22,6 +22,7 @@ dependencies:
   # JAX packages
   - jax=0.6.2
   - jaxlib=0.6.2
+  - optax=0.2.0
   # Interactive/Jupyter packages
   - ipykernel=6.29.5
   - ipympl=0.9.4
