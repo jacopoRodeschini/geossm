@@ -219,11 +219,18 @@ class LRStateSpaceResults(StateSpaceResults):
         runtime_each = [v["time_tot"] for v in self.nstats]
         runtime_estep = [v["tdelta_E"] for v in self.nstats]
         runtime_mstep = [v["tdelta_M"] for v in self.nstats]
+        runtime_filter = [v["tdelta_E_detail"][0] for v in self.nstats]
+        runtime_smoother = [v["tdelta_E_detail"][1] for v in self.nstats]
+        runtime_expectation = [v["tdelta_E_detail"][2] for v in self.nstats]
 
-        self.runtime_tot = sum(runtime_each)
         self.runtime_tot_estep = sum(runtime_estep)
         self.runtime_tot_mstep = sum(runtime_mstep)
 
+        self.time_filter = sum(runtime_filter)
+        self.time_smoother = sum(runtime_smoother)
+        self.time_expectation = sum(runtime_expectation)
+        self.time_total = sum(runtime_each)
+        
         self.llf_path = [v["logL"] for v in self.nstats]
         self.llf = self.llf_path[-1]
     
@@ -456,16 +463,18 @@ class LRStateSpaceResults(StateSpaceResults):
         # Add the EM iteration statistics table
         top_left_em = dict(
             [
-                ("EM iters :", lambda: [f"{self.iterations}"]),
-                ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
+                
+                # ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
                 ("AIC:", lambda: [f"{self.aic:.4g}"]),
+                ("BIC:", lambda: [f"{self.bic:.4g}"]),
             ]
         )
 
         top_right_em = {
             "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
             "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
-            "BIC:": lambda: [f"{self.bic:.4g}"],
+            "EM iters :", lambda: [f"{self.iterations}"], 
+            
         }
 
         # Generate the dictionaly
