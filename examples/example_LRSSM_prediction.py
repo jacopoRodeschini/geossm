@@ -146,7 +146,7 @@ print(results)  # resutls.summary()
 import pandas as pd
 
 # import the covariates dataset
-path = "/home/jacopo/Documents/Dottorato/Progetti/dataset.Agrimonia/DATA_grid/AGC_Dataset_3.0.0.csv"
+path = "Download/AGC_Dataset_3.0.0.csv"
 
 def converter(value):
     try:

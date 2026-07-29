@@ -957,7 +957,7 @@ class StateSpaceModel:
             S11=None,
             S10=None,
             S00=None,
-            time_expectation=None,
+            time_expectation=0.0,
         )
 
         return results
