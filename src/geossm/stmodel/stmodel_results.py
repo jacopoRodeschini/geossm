@@ -473,7 +473,7 @@ class LRStateSpaceResults(StateSpaceResults):
         top_right_em = {
             "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
             "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
-            "EM iters :", lambda: [f"{self.iterations}"], 
+            "EM iters :": lambda: [f"{self.iterations}"], 
             
         }
 
