@@ -474,7 +474,6 @@ class LRStateSpaceResults(StateSpaceResults):
             "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
             "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
             "EM iters :": lambda: [f"{self.iterations}"], 
-            
         }
 
         # Generate the dictionaly
