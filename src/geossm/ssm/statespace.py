@@ -1472,6 +1472,8 @@ class StateSpaceModel:
         # Ensure other attributes exist with sensible defaults
         if not hasattr(self, "dtype"):
             self.dtype = jnp.float32
+        if not hasattr(self, "_backend"):
+            self._backend = _select_device("auto")
         if not hasattr(self, "_F"):
             self._F = None
         if not hasattr(self, "_H"):
@@ -1510,6 +1512,7 @@ class StateSpaceModel:
                 ),
                 ("Dep. Variable:", lambda: [self.y_name if hasattr(self, "y_name") and self.y_name is not None else "N/A"]),
                 ("Date:", lambda: [self._today]),
+                ("Model backend:", lambda: [f"{self.backend}"]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
                 ("JAX devices:", lambda: [f"{jax.devices()}"]),
             ]
