@@ -24,6 +24,8 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
+from geossm.utils import _select_device, _to_backend
+
 
 from shapely.geometry import Polygon
 from scipy.spatial import ConvexHull
@@ -33,8 +35,8 @@ from geossm.stmodel import Param, FitOptions, ModelParams
 from .stmodel_results import LRStateSpaceResults
 from types import SimpleNamespace
 
-# % [Utils] Updating formula, JAX (M-Step)
 
+# %% [Utils] Updating formula, JAX (M-Step)
 
 @partial(jax.jit, static_argnums=(2, 3))
 def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
@@ -488,12 +490,13 @@ def _ei_jax(i, dim):
     return jax.nn.one_hot(i, dim, dtype=jnp.float32).reshape(1, dim)
 
 
-# % Low Rank State-Space Model adapter to statsmodels MLEModel API
+# %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas:list = None, domain:list = None, verbose=True):
+    def __init__(self, df, formulas:list = None, domain:list = None, 
+        verbose=True, backend="auto"):
 
         self.df = df.copy()
         self.formulas = formulas
@@ -557,11 +560,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
-        super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names)
+        super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend)
 
     @property
     def domain(self):
         return self._domain
+
 
     def setup(self, mesh_obj: list = None, cov_fun: list = None, domain_latent: list = None):
 
@@ -792,8 +796,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
         # Create a new SSM with the same parameters as the current model, but with the matrices H, R, F and Q computed above
 
-        print(xbeta_names)
-        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None)
+        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None, backend=self.backend)
 
         y_sim, x_sim, variance_stats, tdelta = sim_model.sim(
             seed, R=R, F=F, H=H, Q=Q, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose

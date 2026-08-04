@@ -11,7 +11,14 @@ import psutil
 
 # %% [Utils] Select the device for JAX computations
 
-def _select_device(backend: str):
+def _select_device(backend):
+    # `backend` may be a backend string ('auto'/'cpu'/'gpu') or an
+    # already-resolved jax.Device, in which case it is returned unchanged.
+    # This lets a device already picked by one model be passed straight
+    # through to another (e.g. LRStateSpaceModel forwarding its backend to
+    # an internal StateSpaceModel).
+    if isinstance(backend, jax.Device):
+        return backend
     backend = (backend or "auto").lower()
     if backend == "cpu":
         return jax.devices("cpu")[0]
@@ -33,9 +40,7 @@ def _select_device(backend: str):
 
 def _to_backend(backend, *xs):
     # Places the inputs on the requested JAX device before compilation.
-    # `backend` may be a backend string ('auto'/'cpu'/'gpu') or an
-    # already-resolved jax.Device (e.g. StateSpaceModel._backend).
-    device = backend if isinstance(backend, jax.Device) else _select_device(backend)
+    device = _select_device(backend)
     return [jax.device_put(x, device=device) for x in xs]
 
 
