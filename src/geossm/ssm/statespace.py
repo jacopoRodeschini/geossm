@@ -1162,6 +1162,11 @@ class StateSpaceModel:
                 raise AttributeError(f"model is missing '{attr}' attribute")
         F, Q, H, R = self.F, self.Q, self.H, self.R
 
+        if block_p is None:
+            block_p = [0, self.p]
+        if block_q is None:
+            block_q = [0, self.q]
+
         # Solve Lyapunov: P = F P F^T + Q
         P = solve_discrete_lyapunov(F, Q)
 
