@@ -16,7 +16,13 @@ def _select_device(backend: str):
     if backend == "cpu":
         return jax.devices("cpu")[0]
     if backend == "gpu":
-        gpus = jax.devices("gpu")
+        # jax.devices("gpu") raises a RuntimeError (rather than returning an
+        # empty list) when no GPU platform is registered, so this must be
+        # caught to surface the intended, clearer error message.
+        try:
+            gpus = jax.devices("gpu")
+        except RuntimeError:
+            gpus = []
         if not gpus:
             raise ValueError("backend='gpu' was requested, but no GPU device is available.")
         return gpus[0]
@@ -25,9 +31,11 @@ def _select_device(backend: str):
     raise ValueError("backend must be one of {'auto', 'cpu', 'gpu'}")
 
 
-def _to_backend(backend: str, *xs):
+def _to_backend(backend, *xs):
     # Places the inputs on the requested JAX device before compilation.
-    device = _select_device(backend)
+    # `backend` may be a backend string ('auto'/'cpu'/'gpu') or an
+    # already-resolved jax.Device (e.g. StateSpaceModel._backend).
+    device = backend if isinstance(backend, jax.Device) else _select_device(backend)
     return [jax.device_put(x, device=device) for x in xs]
 
 
