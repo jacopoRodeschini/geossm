@@ -52,9 +52,13 @@ beta = np.ones(b)
 # %% Build the model
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
 
+model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, backend="gpu") 
+
 # %% print the model summary
 print(model)
 print(model.summary())
+print(model.backend)
+
 
 # %% Save the model using pickle
 filename = "model.pkl"

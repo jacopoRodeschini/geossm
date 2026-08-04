@@ -15,7 +15,7 @@ from .statespace_results import StateSpaceResults
 from geossm.utils import _select_device, _to_backend
 
 
-# % JAX kernel functions for SSM
+# %% JAX kernel functions for SSM
 
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """
@@ -409,7 +409,7 @@ def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
 
     return y_hat, Sigma_y_hat
 
-# State Space Model Class
+# %% State Space Model Class
 class StateSpaceModel:
     """
     A class representing a State Space Model with Kalman filtering capabilities.
@@ -433,7 +433,7 @@ class StateSpaceModel:
         Initialize the State Space Model with system matrices and initial state.
         """
         self.dtype = dtype  # Data type for computations
-        self.backend = backend  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
+        self._backend = _select_device(backend)  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
         self._H = None  # Observation matrix
@@ -670,6 +670,9 @@ class StateSpaceModel:
 
         return True
 
+    @property
+    def backend(self):
+        return self._backend
 
     def _check_parameters(self):
         """
