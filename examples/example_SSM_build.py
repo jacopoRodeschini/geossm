@@ -50,15 +50,12 @@ Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
 
 # %% Build the model
+# default backend = auto ('cpu' or 'gpu')
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
-
-model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, backend="gpu") 
 
 # %% print the model summary
 print(model)
 print(model.summary())
-print(model.backend)
-
 
 # %% Save the model using pickle
 filename = "model.pkl"
@@ -81,13 +78,14 @@ print(model.p)
 print(model.q)
 print(model.q)
 print(model.T)
+print(model.R.device)
 model.shape
 
 # set model attribute
 F = 0.8 * np.eye(q)
 model.set(F=F)
 print(model.F.diagonal())
-
+print(model.F.device)
 # %% Simulate the model
 
 # Use the default Xbeta (see the ssm() for details)

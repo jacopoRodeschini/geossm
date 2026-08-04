@@ -568,33 +568,33 @@ class StateSpaceModel:
         """
 
         if H is not None:
-            self._H = jnp.asarray(H, dtype=self.dtype)
+            self._H = self._prepare_array(H)
             self._p = H.shape[0]
 
         if R is not None:
-            self._R = jnp.asarray(R, dtype=self.dtype)
+            self._R = self._prepare_array(R)
 
         if F is not None:
-            self._F = jnp.asarray(F, dtype=self.dtype)
+            self._F = self._prepare_array(F)
             self._q = F.shape[0]
 
         if Q is not None:
-            self._Q = jnp.asarray(Q, dtype=self.dtype)
+            self._Q = self._prepare_array(Q)
 
         if x0 is not None:
-            self._x0 = jnp.asarray(x0, dtype=self.dtype)
+            self._x0 = self._prepare_array(x0)
         else:
             if self.q is not None:
-                self._x0 = jnp.zeros(self.q, dtype=self.dtype)
+                self._x0 = self._prepare_array(jnp.zeros(self.q))
 
         if Sigma0 is not None:
-            self._Sigma0 = jnp.asarray(Sigma0, dtype=self.dtype)
+            self._Sigma0 = self._prepare_array(Sigma0)
         else:
             if self.q is not None:
-                self._Sigma0 = jnp.eye(self.q, dtype=self.dtype)
+                self._Sigma0 = self._prepare_array(jnp.eye(self.q))
 
         if Xbeta is not None:
-            Xbeta_arr = jnp.asarray(Xbeta, dtype=self.dtype)
+            Xbeta_arr = self._prepare_array(Xbeta)
             self._Xbeta = Xbeta_arr
 
             # infer (p, b, T) when possible
@@ -612,7 +612,7 @@ class StateSpaceModel:
 
         # --- handle beta if provided ---
         if beta is not None:
-            beta_arr = jnp.asarray(beta, dtype=self.dtype)
+            beta_arr = self._prepare_array(beta)
             self._beta = beta_arr
 
             try:
@@ -652,7 +652,7 @@ class StateSpaceModel:
                 self._xbeta_names = None
 
         if y_t is not None:
-            self._y_t = jnp.asarray(y_t, dtype=self.dtype)
+            self._y_t = self._prepare_array(y_t)
             self._p = self._y_t.shape[0]
             self._T = self._y_t.shape[1]
 
@@ -673,6 +673,10 @@ class StateSpaceModel:
     @property
     def backend(self):
         return self._backend
+
+    def _prepare_array(self, x):
+        """Cast to the model dtype and commit the array to the configured backend device."""
+        return _to_backend(self._backend, jnp.asarray(x, dtype=self.dtype))[0]
 
     def _check_parameters(self):
         """
@@ -791,7 +795,7 @@ class StateSpaceModel:
         # Xbeta: (p, b, T)
         if self.Xbeta is None:
             messages.append("Set Xbeta to a default zero array of shape (p, b, T) before checking.")
-            self._Xbeta = jnp.zeros((p, b, T), dtype=self.dtype)
+            self._Xbeta = self._prepare_array(jnp.zeros((p, b, T)))
 
         Xbeta_shape = shape_str(self.Xbeta)
         if Xbeta_shape != (p, b, T):
@@ -801,7 +805,7 @@ class StateSpaceModel:
         # beta: (b,)
         if self.beta is None:
             messages.append("Set beta to a default zero array of shape (b,) before checking.")
-            self._beta = jnp.zeros((b,), dtype=self.dtype)
+            self._beta = self._prepare_array(jnp.zeros((b,)))
 
         beta_shape = shape_str(self.beta)
         if beta_shape != (b,):
@@ -1411,6 +1415,9 @@ class StateSpaceModel:
             "b": self._b,
             # store dtype name for robust restoration
             "dtype": getattr(self.dtype, "name", str(self.dtype)),
+            # store the backend platform (e.g. 'cpu'/'gpu') so it can be
+            # re-resolved to a device on the machine that unpickles this model
+            "backend": getattr(self._backend, "platform", "auto"),
         }
         return state
 
@@ -1430,11 +1437,20 @@ class StateSpaceModel:
             except Exception:
                 self.dtype = jnp.float32
 
+        # Restore the backend device. Fall back to 'auto' if the platform
+        # requested at pickle time (e.g. 'gpu') isn't available on this
+        # machine, so a model saved on a GPU host can still be loaded on CPU.
+        backend_platform = state.get("backend", "auto")
+        try:
+            self._backend = _select_device(backend_platform)
+        except ValueError:
+            self._backend = _select_device("auto")
+
         def to_jax(x):
             if x is None:
                 return None
             try:
-                return jnp.asarray(x, dtype=self.dtype)
+                return _to_backend(self._backend, jnp.asarray(x, dtype=self.dtype))[0]
             except Exception:
                 return x
 
