@@ -12,7 +12,7 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend
+from geossm.utils import _select_device, _to_backend, _on_device
 
 
 # %% JAX kernel functions for SSM
@@ -827,6 +827,7 @@ class StateSpaceModel:
             msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."
         return flag, msg
 
+    @_on_device
     def estimate(
         self,
         y_t,
@@ -876,13 +877,15 @@ class StateSpaceModel:
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
+    @_on_device
     def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
         """
         y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
         return y_hat, Sigma_y_hat
-    
+
+    @_on_device
     def filter(
         self,
         y_t,
@@ -946,9 +949,9 @@ class StateSpaceModel:
         tDelta = time.time() - tStart
 
         # compute expected values (given the filterd values)
-        # y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-        #     x_t, P_t, P_t_1
-        # )
+        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+            x_t, P_t, P_t_1
+        )
 
         results = StateSpaceResults(
             model=self,
@@ -960,16 +963,17 @@ class StateSpaceModel:
             invP_pred=invP_t_1,
             llf=logL,
             time_filter=tDelta,
-            y_hat=None,
-            S11=None,
-            S10=None,
-            S00=None,
-            time_expectation=0.0,
+            y_hat=y_hat,
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            time_expectation=tdelta_expectation,
         )
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
+    @_on_device
     def smoother(
         self,
         y_t,
@@ -1060,6 +1064,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
+    @_on_device
     def sim(
         self,
         seed=1234,

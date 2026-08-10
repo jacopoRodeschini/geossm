@@ -24,7 +24,7 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend
+from geossm.utils import _select_device, _to_backend, _on_device
 
 
 from shapely.geometry import Polygon
@@ -667,6 +667,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
 
+    @_on_device
     def sim(self, formulas:list = None , seed=1234, params: ModelParams = None, verbose=None, stats=False):
         
         if formulas is None and self.formulas is None:
@@ -823,6 +824,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_sim, x_sim, info, tdelta    
     
+    @_on_device
     def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
         """
         Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
@@ -902,12 +904,13 @@ class LRStateSpaceModel(StateSpaceModel):
 
     
 
+    @_on_device
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
     ):
 
         # set the global options
-        self.verbose = options.verbose if options is not None else True
+        self.verbose = options.verbose if options is not None else self.verbose
         
         smr = self.summary(print_full = False)
         if self.verbose:
@@ -1834,8 +1837,9 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
                 ),
                 ("Date:", lambda: [self._today]),
-                ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
-                ("JAX devices:", lambda: [f"{jax.devices()}"]),
+                ("Model backend:", lambda: [f"{self.backend}"]),
+                ("JAX default:", lambda: [f"{jax.default_backend()}"]),
+                #("JAX devices:", lambda: [f"{jax.devices()}"]),
             ]
         )
 
