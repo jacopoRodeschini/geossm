@@ -156,7 +156,7 @@ class DesignMatrices:
             ("Sites    [N]",     lambda: [str(self.N)]),
             ("Covariates [b]",   lambda: [str(self.b)]),
             ("Timesteps  [T]",   lambda: [str(self.T)]),
-            ("CRS",             lambda: [str(self.crs)]),
+            ("CRS",             lambda: [str(self.crs.name)]),
             ("Units",           lambda: [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
             ("Geometry type",   lambda: [", ".join(self.type)]),
             ("Box",             lambda: [f"{self.box}"]),
