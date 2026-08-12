@@ -3,7 +3,8 @@ import pandas as pd
 import geopandas as geopd
 
 _AVAILABLE = {
-    "agrimonia": {"data": "agrimonia.csv", "geometry": "lombardy"}  # optional
+    "agrimonia": {"data": "agrimonia.parquet", "geometry": "lombardy"},  # optional
+    "aqclim_points": {"data": "GRINS_AQCLIM_points_Italy_2023.parquet", "geometry": "italy_boundary_wgs84"}
 }
 
 
@@ -19,7 +20,7 @@ def load_dataset(name: str, return_geometry: bool = True):
 
     # ---- Load tabular data ----
     with base_data.joinpath(dataset["data"]).open("rb") as f:
-        df = pd.read_csv(f, low_memory=False)
+        df = geopd.read_parquet(f)
 
     if "geometry" in dataset:
         shp_path = base_shape.joinpath(
