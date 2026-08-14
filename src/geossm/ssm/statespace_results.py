@@ -34,6 +34,7 @@ class StateSpaceResults:
         yname=None,
         Xbeta=None,
         backend=None,
+        dtype=None,
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
@@ -69,6 +70,17 @@ class StateSpaceResults:
             self._backend = _select_device(model.backend)
         else:
             self._backend = _select_device("auto")
+
+        # ---- dtype: default to the model's dtype, so results stay in the
+        # same precision the model was fit in (e.g. the Hessian computed in
+        # LRStateSpaceResults), unless a different dtype is explicitly
+        # requested here.
+        if dtype is not None:
+            self._dtype = np.dtype(dtype)
+        elif model is not None and getattr(model, "dtype", None) is not None:
+            self._dtype = np.dtype(model.dtype)
+        else:
+            self._dtype = np.dtype(np.float32)
 
         # get the observed data from the model if available
         if model is not None:
@@ -129,11 +141,17 @@ class StateSpaceResults:
     def backend(self):
         return self._backend
 
+    @property
+    def dtype(self):
+        return self._dtype
+
     # Utility method to convert array-like inputs to numpy arrays
 
     def to_numpy(self):
         """
-        Convert array-like attributes to numpy arrays if needed.
+        Convert array-like attributes to numpy arrays in the results' dtype
+        (the model's dtype, by default), so results stay numerically
+        consistent with the precision the model was fit in.
         """
         for attr in [
             "y_hat",
@@ -151,8 +169,8 @@ class StateSpaceResults:
             "S00",
         ]:
             value = getattr(self, attr)
-            if value is not None and not isinstance(value, np.ndarray):
-                setattr(self, attr, np.asarray(value))
+            if value is not None:
+                setattr(self, attr, np.asarray(value, dtype=self.dtype))
 
     def update(self, **kwargs) -> "StateSpaceResults":
         """
@@ -292,8 +310,8 @@ class StateSpaceResults:
                 getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0))
             )
             # std = np.zeros((p, T))
-            lower = np.zeros((p, T))
-            upper = np.zeros((p, T))
+            lower = np.zeros((p, T), dtype=self.dtype)
+            upper = np.zeros((p, T), dtype=self.dtype)
 
             for t in range(T):
                 var_y = H @ Psm[:, :, t + 1] @ H.T

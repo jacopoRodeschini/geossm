@@ -16,7 +16,7 @@ ArrayLike = Optional[Any]
 
 # %% [Utils] Define pack/unpack helpers to flatten params to a 1D array
 
-def _pack_params(params):
+def _pack_params(params, dtype=jnp.float32):
     """Flatten free parameter values into one 1D JAX array."""
     parts = []
     meta = []
@@ -37,7 +37,7 @@ def _pack_params(params):
     if parts:
         vec = jnp.concatenate(parts)
     else:
-        vec = jnp.zeros((0,), dtype=jnp.float32)
+        vec = jnp.zeros((0,), dtype=dtype)
 
     return vec, meta
 
@@ -284,7 +284,7 @@ class LRStateSpaceResults(StateSpaceResults):
         # fun(params)
 
         # Pack free params into a flat array
-        vec0, meta = _pack_params(params)
+        vec0, meta = _pack_params(params, dtype=self.dtype)
         self._free_meta = meta
 
         
@@ -387,7 +387,7 @@ class LRStateSpaceResults(StateSpaceResults):
        
     @property
     def theta_hat(self):
-        vec, _ = _pack_params(self._inference_params())
+        vec, _ = _pack_params(self._inference_params(), dtype=self.dtype)
         return np.asarray(vec)
     
     @property
