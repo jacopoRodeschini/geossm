@@ -26,7 +26,6 @@ class FitOptions:
     max_iter: int = 20
     tol_relat: float = 1e-3
     verbose: bool = True
-    dtype: any = jnp.float32
 
     def __str__(self):
         lines = ["FitOptions:"]

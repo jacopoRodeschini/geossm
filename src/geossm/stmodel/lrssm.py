@@ -97,7 +97,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     diag_vals = jnp.sqrt(var_res * 0.8)
     diag_size = min(nvar, nlat)
     # Create a zero matrix and set the diagonal elements
-    est_A = jnp.zeros((nvar, nlat))
+    est_A = jnp.zeros((nvar, nlat), dtype=y_t.dtype)
     est_A = est_A.at[jnp.arange(diag_size), jnp.arange(diag_size)].set(
         diag_vals[:diag_size]
     )
@@ -112,10 +112,10 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     est_f = jnp.repeat(0.8, nlat)  # jnp.flip(jnp.sort(rand_vals))
 
     # est_x0: Initial state
-    est_x0 = jnp.zeros((block_q[-1],))
+    est_x0 = jnp.zeros((block_q[-1],), dtype=y_t.dtype)
 
     # est_Sigma0: Initial state covariance
-    est_Sigma0 = 10 * jnp.eye(block_q[-1])
+    est_Sigma0 = 10 * jnp.eye(block_q[-1], dtype=y_t.dtype)
 
     return est_beta, est_s2, est_f, est_x0, est_Sigma0, est_A
 
@@ -151,8 +151,8 @@ def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
         return (Xs_new, ys_new), None
 
     # 2. Prepare the initial state for the carry
-    Xs_init = jnp.zeros((b, b))
-    ys_init = jnp.zeros((b,))
+    Xs_init = jnp.zeros((b, b), dtype=y_t.dtype)
+    ys_init = jnp.zeros((b,), dtype=y_t.dtype)
 
     # 3. Prepare the data to be scanned over ('xs')
     # lax.scan iterates over the *first* axis. We need to rearrange our data
@@ -423,7 +423,7 @@ def _compute_A2_jax_kernel(
                 tt = jnp.eye(max_mdim_i, dtype=y_t.dtype)
 
                 # kron_term_val_j shape: (max_mdim_i, nlat * max_mdim_i)
-                kron_term_val_j = jnp.kron(_ei_jax(j, nlat), tt)
+                kron_term_val_j = jnp.kron(_ei_jax(j, nlat, dtype=y_t.dtype), tt)
 
                 # Check for compatibility between ldim and nlat for Psi_it @ x_T
                 # This is an implicit assumption from your original code's structure.
@@ -453,7 +453,7 @@ def _compute_A2_jax_kernel(
                     tt_jk = jnp.eye(max_mdim_i, dtype=y_t.dtype)
                     # Kron term: shape (nlat * max_mdim_i, nlat * max_mdim_i)
                     kron_op_jk = jnp.kron(
-                        _ei_jax(j_idx, nlat).T @ _ei_jax(k_idx, nlat), tt_jk
+                        _ei_jax(j_idx, nlat, dtype=y_t.dtype).T @ _ei_jax(k_idx, nlat, dtype=y_t.dtype), tt_jk
                     )
 
                     # Calculate the term for trace: Psi_it.T @ kron_op_jk @ Psi_it @ (x_T @ x_T.T + P_T)
@@ -483,11 +483,11 @@ def _compute_A2_jax_kernel(
 
 
 # Helper function ei for JAX
-def _ei_jax(i, dim):
+def _ei_jax(i, dim, dtype=jnp.float32):
     """
     Creates a one-hot row vector for JAX.
     """
-    return jax.nn.one_hot(i, dim, dtype=jnp.float32).reshape(1, dim)
+    return jax.nn.one_hot(i, dim, dtype=dtype).reshape(1, dim)
 
 
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
@@ -495,8 +495,8 @@ def _ei_jax(i, dim):
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas:list = None, domain:list = None, 
-        verbose=True, backend="auto"):
+    def __init__(self, df, formulas:list = None, domain:list = None,
+        verbose=True, backend="auto", dtype=jnp.float32):
 
         self.df = df.copy()
         self.formulas = formulas
@@ -560,7 +560,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
-        super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend)
+        super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
 
     @property
     def domain(self):
@@ -631,7 +631,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 self._cov_matern.append(covi)
             
             
-            self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=jnp.int32)
+            self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=self.itype)
         
             self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
             self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
@@ -786,7 +786,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
         Q = block_diag(
             *[
-                jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32))
+                jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
                 for mt in invQ
             ]
         )
@@ -922,7 +922,6 @@ class LRStateSpaceModel(StateSpaceModel):
 
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
-        dtype = options.dtype if options is not None else jnp.float32
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -933,12 +932,12 @@ class LRStateSpaceModel(StateSpaceModel):
         nvar = self.nvar  # len(self.pdim)
         nlat = self.nlat
         # cov_function = self.cov_function
-        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
-        block_p = jnp.asarray(self.block_p, dtype=jnp.int32)
+        pdim = jnp.asarray(self.pdim, dtype=self.itype)
+        block_p = jnp.asarray(self.block_p, dtype=self.itype)
 
         # Get the observed data
-        y_obs = jnp.asarray(self.y_train, dtype=dtype)
-        Xbeta = jnp.asarray(self.Xbeta, dtype=dtype)
+        y_obs = jnp.asarray(self.y_train, dtype=self.dtype)
+        Xbeta = jnp.asarray(self.Xbeta, dtype=self.dtype)
 
         points = self.points
         p, T = y_obs.shape
@@ -946,7 +945,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
             [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=jnp.int32,
+            dtype=self.itype,
         )
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
 
@@ -962,7 +961,7 @@ class LRStateSpaceModel(StateSpaceModel):
         
         self._log("Computing the basis matrix...")
         basis = self._buildBasis_list(points, self.cov_function)
-        Phi = self._buildH_dense(jnp.ones((nvar, nlat), dtype=jnp.float32), basis)
+        Phi = self._buildH_dense(jnp.ones((nvar, nlat), dtype=self.dtype), basis)
 
         self._log("Starting the EM iterations...")
 
@@ -1031,7 +1030,7 @@ class LRStateSpaceModel(StateSpaceModel):
             # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
             Q = block_diag(
                 *[
-                    jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=jnp.float32))
+                    jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
                     for mt in invQ
                 ]
             )
@@ -1251,7 +1250,7 @@ class LRStateSpaceModel(StateSpaceModel):
         tStart = time.time()
         Omega = S11 - S10 @ F.T - F @ S10.T + F @ S00 @ F.T
         par0 = jnp.log(
-            jnp.array([fcov.rescale for fcov in est_covList], dtype=jnp.float32)
+            jnp.array([fcov.rescale for fcov in est_covList], dtype=self.dtype)
         )
 
         # 'L-BFGS-B': add options={'maxiter': 100, 'eps': 1e-8}, eps = gradiend step
@@ -1331,16 +1330,16 @@ class LRStateSpaceModel(StateSpaceModel):
         basis = self._buildBasis_list(self.points, self.cov_function)
 
         # cov_function = self.cov_function
-        pdim = jnp.asarray(self.pdim, dtype=jnp.int32)
-        
+        pdim = jnp.asarray(self.pdim, dtype=self.itype)
+
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
             [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=jnp.int32)
-        
+            dtype=self.itype)
+
         # get the stiff and the mass matrix list
-        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=jnp.float32) for cov in self.cov_function]
-        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=jnp.float32) for cov in self.cov_function]
+        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
+        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
         ninner = [jnp.array(cov.fem_solver.inner, dtype=bool) for cov in self.cov_function]
 
         observed_logL = partial(
@@ -1383,7 +1382,7 @@ class LRStateSpaceModel(StateSpaceModel):
         
 
         invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
-        Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0]))
+        Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0], dtype=invQ.dtype))
 
         _, _, _, _, _, _, logL = _filter_kernelJAX(
             y_t, H, R, F, Q,
@@ -1429,7 +1428,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Q_12 = Qperm[:n_inner, n_inner:]
             Q_22 = Qperm[n_inner:, n_inner:]
                
-            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0])) @ Q_12.T
+            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0], dtype=Q_22.dtype)) @ Q_12.T
             invQ_blocks.append(Q_mar)
 
         return jax.scipy.linalg.block_diag(*invQ_blocks)
@@ -1572,7 +1571,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 notfindInxRow.append(notfindInxij)
 
                 # conver into coo format
-                hij = jnp.asarray(hij.toarray(), dtype=jnp.float32)
+                hij = jnp.asarray(hij.toarray(), dtype=self.dtype)
 
                 # Append the sub matrices
                 hrow.append(hij)
@@ -1599,10 +1598,10 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         # 1. Create the full diagonal vector by repeating elements
         rdiag_vec = jnp.repeat(s2error, repeats=jnp.array(pdim)).astype(
-            dtype=jnp.float32
+            dtype=self.dtype
         )
         fdiag_vec = jnp.repeat(flatent, repeats=jnp.array(qdim)).astype(
-            dtype=jnp.float32
+            dtype=self.dtype
         )
 
         # 2. Create the dense diagonal matrices from the vectors
@@ -1837,7 +1836,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
                 ),
                 ("Date:", lambda: [self._today]),
-                ("Model backend:", lambda: [f"{self.backend}"]),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
                 ("JAX default:", lambda: [f"{jax.default_backend()}"]),
                 #("JAX devices:", lambda: [f"{jax.devices()}"]),
             ]

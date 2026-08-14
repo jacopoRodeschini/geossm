@@ -15,6 +15,23 @@ from .statespace_results import StateSpaceResults
 from geossm.utils import _select_device, _to_backend, _on_device
 
 
+def _itype_for(dtype):
+    """Integer dtype matching the precision of a given float dtype (32<->32, 64<->64)."""
+    return jnp.int64 if jnp.dtype(dtype).itemsize == 8 else jnp.int32
+
+
+def _ensure_x64_for_dtype(dtype):
+    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+
+    JAX silently truncates float64/int64 arrays back to 32-bit unless x64 mode
+    is enabled, so requesting a 64-bit dtype only takes effect if we flip this
+    flag on. Left untouched (and off by default) for 32-bit dtypes so that the
+    default, fast 32-bit path is unaffected.
+    """
+    if jnp.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
+        jax.config.update("jax_enable_x64", True)
+
+
 # %% JAX kernel functions for SSM
 
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
@@ -432,7 +449,9 @@ class StateSpaceModel:
         """
         Initialize the State Space Model with system matrices and initial state.
         """
-        self.dtype = dtype  # Data type for computations
+        self.dtype = jnp.dtype(dtype)  # Data type for computations
+        self.itype = _itype_for(self.dtype)  # Matching integer dtype for index/block arrays
+        _ensure_x64_for_dtype(self.dtype)
         self._backend = _select_device(backend)  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
@@ -1439,13 +1458,16 @@ class StateSpaceModel:
         # Restore dtype first
         dt_name = state.get("dtype", None)
         try:
-            self.dtype = jnp.dtype(dt_name) if dt_name is not None else jnp.float32
+            self.dtype = jnp.dtype(dt_name) if dt_name is not None else jnp.dtype(jnp.float32)
         except Exception:
             # fallback
             try:
-                self.dtype = getattr(jnp, dt_name)
+                self.dtype = jnp.dtype(getattr(jnp, dt_name))
             except Exception:
-                self.dtype = jnp.float32
+                self.dtype = jnp.dtype(jnp.float32)
+
+        self.itype = _itype_for(self.dtype)
+        _ensure_x64_for_dtype(self.dtype)
 
         # Restore the backend device. Fall back to 'auto' if the platform
         # requested at pickle time (e.g. 'gpu') isn't available on this
@@ -1481,7 +1503,9 @@ class StateSpaceModel:
 
         # Ensure other attributes exist with sensible defaults
         if not hasattr(self, "dtype"):
-            self.dtype = jnp.float32
+            self.dtype = jnp.dtype(jnp.float32)
+        if not hasattr(self, "itype"):
+            self.itype = _itype_for(self.dtype)
         if not hasattr(self, "_backend"):
             self._backend = _select_device("auto")
         if not hasattr(self, "_F"):
@@ -1522,7 +1546,7 @@ class StateSpaceModel:
                 ),
                 ("Dep. Variable:", lambda: [self.y_name if hasattr(self, "y_name") and self.y_name is not None else "N/A"]),
                 ("Date:", lambda: [self._today]),
-                ("Model backend:", lambda: [f"{self.backend}"]),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
                 ("JAX devices:", lambda: [f"{jax.devices()}"]),
             ]
