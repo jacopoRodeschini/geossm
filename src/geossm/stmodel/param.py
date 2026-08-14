@@ -10,6 +10,17 @@ from jax import tree_util
 _NONE_BSE = "__bse_is_none__"
 
 
+def _safe_asarray(value):
+    # Some jaxlib builds raise RuntimeError resolving the default device when
+    # a GPU/TPU plugin is installed but no matching hardware is present,
+    # instead of falling back to CPU on their own. Retry once on CPU.
+    try:
+        return jnp.atleast_1d(jnp.asarray(value))
+    except RuntimeError:
+        with jax.default_device(jax.devices("cpu")[0]):
+            return jnp.atleast_1d(jnp.asarray(value))
+
+
 @dataclass
 class FitOptions:
     max_iter: int = 20
@@ -43,15 +54,15 @@ class Param:
     def __post_init__(self):
         # Only convert plain Python/numpy values — never re-wrap JAX tracers.
         if self.value is not None and not isinstance(self.value, jax.core.Tracer):
-            self.value = jnp.atleast_1d(jnp.asarray(self.value))
+            self.value = _safe_asarray(self.value)
         if self.bse is not None and not isinstance(self.bse, jax.core.Tracer):
-            self.bse = jnp.atleast_1d(jnp.asarray(self.bse))
+            self.bse = _safe_asarray(self.bse)
 
     def set(self, new_value):
         """Update parameter value if not fixed."""
         if self.fixed:
             return self
-        return Param(name=self.name, value=jnp.asarray(new_value), fixed=self.fixed)
+        return Param(name=self.name, value=new_value, fixed=self.fixed)
 
     def freeze(self):
         return Param(self.name, self.value, True)
@@ -139,7 +150,7 @@ class ModelParams:
         if isinstance(value, Param):
             value.name = name
             return value
-        return Param(name=name, value=jnp.atleast_1d(jnp.asarray(value)), fixed=False)
+        return Param(name=name, value=_safe_asarray(value), fixed=False)
 
     def as_dict(self):
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}

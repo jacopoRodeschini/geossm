@@ -22,13 +22,6 @@ print(Agrimonia.columns)
 # if you do not want the shapefile associate
 # Agrimonia, _ = df.load_dataset('agrimonia')
 
-# %% From .csv to geopandas
-
-ct = np.array([Agrimonia.Longitude.to_numpy(), Agrimonia.Latitude.to_numpy()]).T
-Agrimonia["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
-Agrimonia = geodf.GeoDataFrame(Agrimonia, crs=4326)
-
 # %% Crate the regression matrix
 
 builder = grid(Agrimonia, "np.sqrt(AQ_pm10) ~ 1 + WE_temp_2m")

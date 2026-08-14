@@ -31,6 +31,8 @@ dependencies:
   - pandoc=3.4
   - markdown-it-py=3.0.0
   - black=26.1.0
+  # Support for parquet files
+  - pyarrow=24.0.0
   - pip:
     - mfem==4.8.0.1
     - gstools==1.7.0

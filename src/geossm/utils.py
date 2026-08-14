@@ -7,28 +7,72 @@ import datetime
 import jax
 import platform
 import psutil
+from functools import wraps
 
 
 # %% [Utils] Select the device for JAX computations
 
-def _select_device(backend: str):
+def _select_device(backend):
+    # `backend` may be a backend string ('auto'/'cpu'/'gpu') or an
+    # already-resolved jax.Device, in which case it is returned unchanged.
+    # This lets a device already picked by one model be passed straight
+    # through to another (e.g. LRStateSpaceModel forwarding its backend to
+    # an internal StateSpaceModel).
+    if isinstance(backend, jax.Device):
+        return backend
     backend = (backend or "auto").lower()
     if backend == "cpu":
         return jax.devices("cpu")[0]
     if backend == "gpu":
-        gpus = jax.devices("gpu")
+        # jax.devices("gpu") raises a RuntimeError (rather than returning an
+        # empty list) when no GPU platform is registered, so this must be
+        # caught to surface the intended, clearer error message.
+        try:
+            gpus = jax.devices("gpu")
+        except RuntimeError:
+            gpus = []
         if not gpus:
             raise ValueError("backend='gpu' was requested, but no GPU device is available.")
         return gpus[0]
     if backend == "auto":
-        return jax.devices()[0]
+        # jax.devices() should itself fall back to CPU when a GPU/TPU plugin
+        # is installed but no such hardware is present, but this graceful
+        # fallback is jaxlib-version dependent: some builds raise a hard
+        # RuntimeError instead. Guard against that so 'auto' never crashes.
+        try:
+            devices = jax.devices()
+        except RuntimeError:
+            devices = []
+        if not devices:
+            devices = jax.devices("cpu")
+        return devices[0]
     raise ValueError("backend must be one of {'auto', 'cpu', 'gpu'}")
 
 
-def _to_backend(backend: str, *xs):
+def _to_backend(backend, *xs):
     # Places the inputs on the requested JAX device before compilation.
     device = _select_device(backend)
     return [jax.device_put(x, device=device) for x in xs]
+
+
+def _on_device(method):
+    """
+    Decorator that pins every JAX array created while `method` runs to the
+    instance's configured backend device (`self._backend`).
+
+    Many intermediate arrays (basis matrices, precision matrices, scratch
+    zeros/ones, ...) are built without ever going through `_to_backend`, so
+    without this they silently fall back to JAX's default device - the GPU,
+    whenever one is present - even when the model was constructed with
+    backend='cpu'. Wrapping a public entry point with this decorator makes
+    `jax.default_device` cover the whole call, so uncommitted arrays created
+    anywhere in the call stack land on the right device too.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with jax.default_device(self._backend):
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 # %% [Utils] key stream

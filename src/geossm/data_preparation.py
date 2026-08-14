@@ -55,17 +55,17 @@ class DesignMatrices:
     time_col_name: str = "Time"
     geometry_id: str = field(default="geometry_id", init=False)
     dtype: np.dtype = field(default=np.float64)
-    backend: Literal["numpy", "jax"] = field(default="numpy")
+    # backend: Literal["numpy", "jax"] = field(default="numpy")
 
     def __post_init__(self):
         # Validate backend
-        if self.backend == "jax" and not JAX_AVAILABLE:
-            raise ImportError(
-                "JAX is not installed. Install it with `pip install jax` "
-                "or use backend='numpy'."
-            )
-        if self.backend not in ("numpy", "jax"):
-            raise ValueError(f"backend must be 'numpy' or 'jax', got '{self.backend}'")
+        # if self.backend == "jax" and not JAX_AVAILABLE:
+        #     raise ImportError(
+        #         "JAX is not installed. Install it with `pip install jax` "
+        #         "or use backend='numpy'."
+        #     )
+        # if self.backend not in ("numpy", "jax"):
+        #     raise ValueError(f"backend must be 'numpy' or 'jax', got '{self.backend}'")
 
         # Validate dtype
         try:
@@ -107,9 +107,9 @@ class DesignMatrices:
         self.terms = ModelDesc.from_formula(self.formula)
 
         # Convert to JAX arrays if requested
-        if self.backend == "jax":
-            self.y = jnp.array(self.y) if self.y is not None else None
-            self.X = jnp.array(self.X)
+        # if self.backend == "jax":
+        self.y = jnp.array(self.y) if self.y is not None else None
+        self.X = jnp.array(self.X)
             # Only arrays of numeric types are supported by JAX. 
             # self.timestamps = jnp.array(self.timestamps)
 
@@ -150,14 +150,13 @@ class DesignMatrices:
             ("Transformed (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
             ("Transformed (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
             ("dtype",          lambda: [str(self.dtype)]),
-            ("Backend",        lambda: [self.backend]),
         ])
 
         top_right = dict([
             ("Sites    [N]",     lambda: [str(self.N)]),
             ("Covariates [b]",   lambda: [str(self.b)]),
             ("Timesteps  [T]",   lambda: [str(self.T)]),
-            ("CRS",             lambda: [str(self.crs)]),
+            ("CRS",             lambda: [str(self.crs.name)]),
             ("Units",           lambda: [", ".join([axis.unit_name for axis in self.crs.coordinate_system.axis_list])]),
             ("Geometry type",   lambda: [", ".join(self.type)]),
             ("Box",             lambda: [f"{self.box}"]),
@@ -207,7 +206,7 @@ class DesignMatrices:
         return (
             f"DesignMatrices("
             f"N={self.N}, b={self.b}, T={self.T}, "
-            f"dtype={self.dtype}, backend='{self.backend}')"
+            f"dtype={self.dtype}')"
         )
 
 class DesignMatricesBuilder:
@@ -401,7 +400,7 @@ class DesignMatricesBuilder:
             unit = self.unit,
             time_col_name=self.time_col_name,
             dtype=self.dtype,
-            backend="jax" if JAX_AVAILABLE else "numpy", 
+            # backend="jax" if JAX_AVAILABLE else "numpy", 
         )
 
     def _computedesignMatrix_geodataframe(

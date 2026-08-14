@@ -23,7 +23,6 @@ import time
 
 # % Utility functions
 
-
 def meshio_to_mfem_mesh(meshio_mesh):
     """
     Converts a meshio.Mesh object to an mfem.Mesh object in memory
@@ -112,6 +111,8 @@ class FEMSolver:
 
         # Validate inputs
         mesh = None
+        self.verbose = verbose
+        
         try:
             if meshio_obj is not None:
                 if not isinstance(meshio_obj, meshio.Mesh):
@@ -119,9 +120,9 @@ class FEMSolver:
                         f"meshio_obj must be meshio.Mesh, got {type(meshio_obj).__name__}"
                     )
                 # Convert to MFEM if needed (or keep as meshio)
-                self.print_info("Converting meshio.Mesh to mfem.Mesh...")
+                self._log("Converting meshio.Mesh to mfem.Mesh...")
                 mesh = meshio_to_mfem_mesh(meshio_obj)
-                self.print_info("Mesh conversion successful.")
+                self._log("Mesh conversion successful.")
 
         except Exception as e:
             raise RuntimeError(f"Error loading mesh: {str(e)}") from e
@@ -147,9 +148,9 @@ class FEMSolver:
 
         # Compute the stats associate with the mesh (angles and areas of the triangles)
         if stats == True:
-            self.print_info("Computing mesh quality statistics:angles and areas (takes a while)...")
+            self._log("Computing mesh quality statistics:angles and areas (takes a while)...")
             self._angles, self._areas = self.compute_stats()
-            self.print_info("Mesh quality statistics computed successfully.")
+            self._log("Mesh quality statistics computed successfully.")
         else:
             self._angles, self._areas = None, None
         
@@ -157,11 +158,11 @@ class FEMSolver:
         if self._angles is not None and self._areas is not None:
             msg = f"Angles [min, mean, max] = [{self._angles.min():.2f}, {self._angles.mean():.2f}, {self._angles.max():.2f}] degrees \n"
             msg += f"Areas  [min, mean, max] = [{self._areas.min():.2f}, {self._areas.mean():.2f}, {self._areas.max():.2f}]"
-            self.print_info(msg)
+            self._log(msg)
 
         # Get warning if the mesh has bad quality (e.g. small angles)
         if self._angles is not None and self._angles.min() < 10:
-            self.print_info(
+            self._log(
                 f"Mesh has small angles (min angle = {self._angles.min():.2f} degrees). "
                 "This may lead to numerical instability. Consider refining the mesh or improving its quality."
             )
@@ -175,17 +176,17 @@ class FEMSolver:
         self._inner = None
 
         # Build finite element space
-        self.print_info("Building FE space and computing mass/stiffness matrices...")
+        self._log("Building FE space and computing mass/stiffness matrices...")
         self._fespace = self._build_fespace()
 
         # Classify vertices as inner or outer (boolean array)
         self._inner = self.isinner()
         
         # compute matrices now
-        self.print_info("Computing mass and stiffness matrices...")
+        self._log("Computing mass and stiffness matrices...")
         self._mass, self._stiff = self._compute_mass_stiff()
-        self.print_info("Computing mass and stiffness matrices... Done.")
-        self.print_info("FEMSolver initialization complete.")
+        self._log("Computing mass and stiffness matrices... Done.")
+        self._log("FEMSolver initialization complete.")
 
     @property
     def mesh(self):
@@ -774,7 +775,6 @@ class FEMSolver:
             self.print_info(msg)
 
     def print_info(self, msg):
-
         dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
         print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
@@ -892,7 +892,7 @@ class spdeAppoxCov(Matern):
     """
 
     def __init__(
-        self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0
+        self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
     ):
 
         # update the geo matern parameter
@@ -906,6 +906,7 @@ class spdeAppoxCov(Matern):
 
         # list of the domain
         # Validate domain
+        self.verbose = verbose
         if not isinstance(domain, (list, tuple)):
             raise TypeError("domain must be a list of Polygon objects")
         if len(domain) == 0:
@@ -913,6 +914,7 @@ class spdeAppoxCov(Matern):
 
         self._domain = domain
         self._ndomain = len(domain)
+        self._log(f"Validated domain: {self._ndomain} polygon(s).")
 
         # Mesh storage
         self._meshIO = None
@@ -921,6 +923,7 @@ class spdeAppoxCov(Matern):
         self._fem_solver = None
 
         # Initialize parent Matern class
+        self._log(f"Initializing Matern covariance model (nu={nu}, rescale={rescale})...")
         super().__init__(
             dim=2,
             var=var,
@@ -935,6 +938,7 @@ class spdeAppoxCov(Matern):
             spatial_dim=2,
             nu=nu,
         )
+        self._log("spdeAppoxCov initialization complete.")
 
     @property
     def meshIO(self):
@@ -960,7 +964,7 @@ class spdeAppoxCov(Matern):
 
         return base
 
-    def setup(self, mesh_obj: meshio._mesh.Mesh, stats=True, verbose=True):
+    def setup(self, mesh_obj: meshio._mesh.Mesh, stats=True):
         """
         Initialize the covariance model with a mesh.
 
@@ -994,6 +998,7 @@ class spdeAppoxCov(Matern):
         >>> cov.setup(mesh_obj=mesh)
         """
         # Load mesh
+        self._log("Loading mesh for SPDE FEM discretization...")
         try:
             if mesh_obj is not None:
                 if not isinstance(mesh_obj, meshio.Mesh):
@@ -1006,7 +1011,9 @@ class spdeAppoxCov(Matern):
         # Initialize FEM solver
         try:
             self._meshIO = mesh_obj  # Store the mesh for potential reinitialization
-            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain, verbose=verbose, stats=stats)
+            self._log("Initializing FEM solver...")
+            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain, verbose=self.verbose, stats=stats)
+            self._log("FEM solver initialized.")
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize FEM solver: {str(e)}") from e
@@ -1136,6 +1143,17 @@ class spdeAppoxCov(Matern):
   
         return smry
 
+
+    def _is_verbose(self, verbose=None) -> bool:
+        return self.verbose if verbose is None else verbose
+
+    def _log(self, msg: str, verbose=None) -> None:
+        if self._is_verbose(verbose):
+            self.print_info(msg)
+
+    def print_info(self, msg):
+        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
     def __getstate__(self):
         # Create a dictionary of the object's state excluding non-picklable attributes

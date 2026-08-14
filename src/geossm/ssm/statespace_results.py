@@ -37,6 +37,7 @@ class StateSpaceResults:
         time_filter: float = 0.0,
         time_smoother: float = 0.0,
         time_expectation: float = 0.0,
+        time_total: float = 0.0,
         # main arrays
         x_filtered: ArrayLike = None,
         P_filtered: ArrayLike = None,
@@ -83,7 +84,7 @@ class StateSpaceResults:
         self.time_filter = time_filter
         self.time_smoother = time_smoother
         self.time_expectation = time_expectation
-        # self.time_total = self.time_filter + self.time_smoother + self.time_expectation
+        self.time_total = self.time_filter + self.time_smoother + self.time_expectation
 
         # ---- arrays ----
         self.y_hat = y_hat

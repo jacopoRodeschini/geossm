@@ -77,6 +77,7 @@ plt.show()
 # %% Build the LRSSM model
 
 domain = [Polygon(buffer)]
+
 model = lrssm(agri, ["AQ_pm10 ~ 1 + WE_temp_2m"], verbose=True, domain=domain)
 
 print(model)
@@ -154,7 +155,7 @@ ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
-plt.show()
+# plt.show()
 
 
 # %% Set up the lrssm model (univiarte latent)
@@ -163,3 +164,5 @@ plt.show()
 # if None it is assumed to be the same of the observation
 model = model.setup(mesh_obj=[mesh_io], domain_latent=domain)
 print(model)
+print(model.backend)
+print(model.Xbeta.device)

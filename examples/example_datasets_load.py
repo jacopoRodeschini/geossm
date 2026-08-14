@@ -31,22 +31,21 @@ print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
 
-Agrimonia, _ = df.load_dataset("agrimonia")
-print(Agrimonia.columns)
-
-# %% From .csv to geopandas
-
-ct = np.array([Agrimonia.Longitude.to_numpy(), Agrimonia.Latitude.to_numpy()]).T
-Agrimonia["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
-Agrimonia = geodf.GeoDataFrame(Agrimonia, crs=4326)
+agrimonia, shape = df.load_dataset("agrimonia")
+print(type(agrimonia))
+print(agrimonia.columns)
+agrimonia.crs
 
 # %% Aggregate the monthly data to get the average yield per location
-mean_pm10_space = Agrimonia.groupby(["IDStations"]).agg(
+
+# convert to categorical
+agrimonia['IDStations'] = agrimonia['IDStations'].astype('category')
+
+mean_pm10_space = agrimonia.groupby(["IDStations"]).agg(
     {"AQ_pm10": "mean", "geometry": lambda x: x.iloc[0]}
 )
 
-mean_pm25_space = Agrimonia.groupby(["IDStations"]).agg(
+mean_pm25_space = agrimonia.groupby(["IDStations"]).agg(
     {"AQ_pm25": "mean", "geometry": lambda x: x.iloc[0]}
 )
 

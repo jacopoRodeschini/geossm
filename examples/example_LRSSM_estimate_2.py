@@ -117,7 +117,7 @@ ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
-plt.show()
+# plt.show()
 
 
 # %% Build the geopandas dataframe
@@ -173,7 +173,8 @@ plt.show()
 
 # %% Build the lrssm and set the covariance function
 
-model = lrssm(df=gdf, domain=[domain], verbose=True)
+
+model = lrssm(df=gdf, domain=[domain], verbose=True, backend="gpu")
 model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
 
 print(model)
@@ -183,10 +184,6 @@ print(model)
 
 # %% Create the model parameters for the simulation
 params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[20], f=[0.7])
-
-# %% 
-
-# print also the variance summary
 y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
 
 # %% Plot one response variable time series and state
@@ -264,3 +261,5 @@ opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
 print(results)
+
+

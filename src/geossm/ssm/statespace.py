@@ -12,10 +12,10 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend
+from geossm.utils import _select_device, _to_backend, _on_device
 
 
-# % JAX kernel functions for SSM
+# %% JAX kernel functions for SSM
 
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """
@@ -409,7 +409,7 @@ def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
 
     return y_hat, Sigma_y_hat
 
-# State Space Model Class
+# %% State Space Model Class
 class StateSpaceModel:
     """
     A class representing a State Space Model with Kalman filtering capabilities.
@@ -433,7 +433,7 @@ class StateSpaceModel:
         Initialize the State Space Model with system matrices and initial state.
         """
         self.dtype = dtype  # Data type for computations
-        self.backend = backend  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
+        self._backend = _select_device(backend)  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
         self._H = None  # Observation matrix
@@ -568,33 +568,33 @@ class StateSpaceModel:
         """
 
         if H is not None:
-            self._H = jnp.asarray(H, dtype=self.dtype)
+            self._H = self._prepare_array(H)
             self._p = H.shape[0]
 
         if R is not None:
-            self._R = jnp.asarray(R, dtype=self.dtype)
+            self._R = self._prepare_array(R)
 
         if F is not None:
-            self._F = jnp.asarray(F, dtype=self.dtype)
+            self._F = self._prepare_array(F)
             self._q = F.shape[0]
 
         if Q is not None:
-            self._Q = jnp.asarray(Q, dtype=self.dtype)
+            self._Q = self._prepare_array(Q)
 
         if x0 is not None:
-            self._x0 = jnp.asarray(x0, dtype=self.dtype)
+            self._x0 = self._prepare_array(x0)
         else:
             if self.q is not None:
-                self._x0 = jnp.zeros(self.q, dtype=self.dtype)
+                self._x0 = self._prepare_array(jnp.zeros(self.q))
 
         if Sigma0 is not None:
-            self._Sigma0 = jnp.asarray(Sigma0, dtype=self.dtype)
+            self._Sigma0 = self._prepare_array(Sigma0)
         else:
             if self.q is not None:
-                self._Sigma0 = jnp.eye(self.q, dtype=self.dtype)
+                self._Sigma0 = self._prepare_array(jnp.eye(self.q))
 
         if Xbeta is not None:
-            Xbeta_arr = jnp.asarray(Xbeta, dtype=self.dtype)
+            Xbeta_arr = self._prepare_array(Xbeta)
             self._Xbeta = Xbeta_arr
 
             # infer (p, b, T) when possible
@@ -612,7 +612,7 @@ class StateSpaceModel:
 
         # --- handle beta if provided ---
         if beta is not None:
-            beta_arr = jnp.asarray(beta, dtype=self.dtype)
+            beta_arr = self._prepare_array(beta)
             self._beta = beta_arr
 
             try:
@@ -652,7 +652,7 @@ class StateSpaceModel:
                 self._xbeta_names = None
 
         if y_t is not None:
-            self._y_t = jnp.asarray(y_t, dtype=self.dtype)
+            self._y_t = self._prepare_array(y_t)
             self._p = self._y_t.shape[0]
             self._T = self._y_t.shape[1]
 
@@ -670,6 +670,13 @@ class StateSpaceModel:
 
         return True
 
+    @property
+    def backend(self):
+        return self._backend
+
+    def _prepare_array(self, x):
+        """Cast to the model dtype and commit the array to the configured backend device."""
+        return _to_backend(self._backend, jnp.asarray(x, dtype=self.dtype))[0]
 
     def _check_parameters(self):
         """
@@ -788,7 +795,7 @@ class StateSpaceModel:
         # Xbeta: (p, b, T)
         if self.Xbeta is None:
             messages.append("Set Xbeta to a default zero array of shape (p, b, T) before checking.")
-            self._Xbeta = jnp.zeros((p, b, T), dtype=self.dtype)
+            self._Xbeta = self._prepare_array(jnp.zeros((p, b, T)))
 
         Xbeta_shape = shape_str(self.Xbeta)
         if Xbeta_shape != (p, b, T):
@@ -798,7 +805,7 @@ class StateSpaceModel:
         # beta: (b,)
         if self.beta is None:
             messages.append("Set beta to a default zero array of shape (b,) before checking.")
-            self._beta = jnp.zeros((b,), dtype=self.dtype)
+            self._beta = self._prepare_array(jnp.zeros((b,)))
 
         beta_shape = shape_str(self.beta)
         if beta_shape != (b,):
@@ -820,6 +827,7 @@ class StateSpaceModel:
             msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."
         return flag, msg
 
+    @_on_device
     def estimate(
         self,
         y_t,
@@ -869,13 +877,15 @@ class StateSpaceModel:
         return smooth_results
         # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
+    @_on_device
     def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
         """
         Compute predicted observations (y_hat) based on smoothed states and model parameters.
         """
         y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
         return y_hat, Sigma_y_hat
-    
+
+    @_on_device
     def filter(
         self,
         y_t,
@@ -939,9 +949,9 @@ class StateSpaceModel:
         tDelta = time.time() - tStart
 
         # compute expected values (given the filterd values)
-        # y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-        #     x_t, P_t, P_t_1
-        # )
+        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+            x_t, P_t, P_t_1
+        )
 
         results = StateSpaceResults(
             model=self,
@@ -953,16 +963,17 @@ class StateSpaceModel:
             invP_pred=invP_t_1,
             llf=logL,
             time_filter=tDelta,
-            y_hat=None,
-            S11=None,
-            S10=None,
-            S00=None,
-            time_expectation=0.0,
+            y_hat=y_hat,
+            S11=S11,
+            S10=S10,
+            S00=S00,
+            time_expectation=tdelta_expectation,
         )
 
         return results
         # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
 
+    @_on_device
     def smoother(
         self,
         y_t,
@@ -1053,6 +1064,7 @@ class StateSpaceModel:
 
         return (y_hat, S11, S10, S00, tDelta)
 
+    @_on_device
     def sim(
         self,
         seed=1234,
@@ -1154,6 +1166,11 @@ class StateSpaceModel:
             if not hasattr(self, attr):
                 raise AttributeError(f"model is missing '{attr}' attribute")
         F, Q, H, R = self.F, self.Q, self.H, self.R
+
+        if block_p is None:
+            block_p = [0, self.p]
+        if block_q is None:
+            block_q = [0, self.q]
 
         # Solve Lyapunov: P = F P F^T + Q
         P = solve_discrete_lyapunov(F, Q)
@@ -1408,6 +1425,9 @@ class StateSpaceModel:
             "b": self._b,
             # store dtype name for robust restoration
             "dtype": getattr(self.dtype, "name", str(self.dtype)),
+            # store the backend platform (e.g. 'cpu'/'gpu') so it can be
+            # re-resolved to a device on the machine that unpickles this model
+            "backend": getattr(self._backend, "platform", "auto"),
         }
         return state
 
@@ -1427,11 +1447,20 @@ class StateSpaceModel:
             except Exception:
                 self.dtype = jnp.float32
 
+        # Restore the backend device. Fall back to 'auto' if the platform
+        # requested at pickle time (e.g. 'gpu') isn't available on this
+        # machine, so a model saved on a GPU host can still be loaded on CPU.
+        backend_platform = state.get("backend", "auto")
+        try:
+            self._backend = _select_device(backend_platform)
+        except ValueError:
+            self._backend = _select_device("auto")
+
         def to_jax(x):
             if x is None:
                 return None
             try:
-                return jnp.asarray(x, dtype=self.dtype)
+                return _to_backend(self._backend, jnp.asarray(x, dtype=self.dtype))[0]
             except Exception:
                 return x
 
@@ -1453,6 +1482,8 @@ class StateSpaceModel:
         # Ensure other attributes exist with sensible defaults
         if not hasattr(self, "dtype"):
             self.dtype = jnp.float32
+        if not hasattr(self, "_backend"):
+            self._backend = _select_device("auto")
         if not hasattr(self, "_F"):
             self._F = None
         if not hasattr(self, "_H"):
@@ -1491,6 +1522,7 @@ class StateSpaceModel:
                 ),
                 ("Dep. Variable:", lambda: [self.y_name if hasattr(self, "y_name") and self.y_name is not None else "N/A"]),
                 ("Date:", lambda: [self._today]),
+                ("Model backend:", lambda: [f"{self.backend}"]),
                 ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
                 ("JAX devices:", lambda: [f"{jax.devices()}"]),
             ]
