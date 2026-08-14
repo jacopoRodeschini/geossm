@@ -5,7 +5,7 @@ import meshio
 import numpy as np
 import pygmsh
 import shapely
-from scipy.stats import gaussian_kde
+from scipy.spatial import cKDTree
 from shapely.geometry import MultiPoint, Polygon
 
 
@@ -40,6 +40,7 @@ def buildMesh2d(
     cutoff=None,
     min_angle=21.0,
     lowrank=None,
+    density_neighbors=8,
     tol=0.02,
     max_iter=25,
 ):
@@ -77,7 +78,14 @@ def buildMesh2d(
         Value in (0, 1]. When given, the local element size is rescaled by
         the density of `points` (finer where points are dense, coarser
         where they are sparse), so that the resulting mesh has approximately
-        ``round(lowrank * len(points))`` vertices.
+        ``round(lowrank * len(points))`` vertices. Local density is a
+        k-nearest-neighbor estimate (see `density_neighbors`) ranked by
+        percentile, rather than a single-bandwidth KDE, so that separate
+        clusters of comparable local density (e.g. several cities) are all
+        refined even if one cluster has far more points overall.
+    density_neighbors : int, default 8
+        Number of neighbors used for the local density estimate that drives
+        `lowrank`. Ignored if `lowrank` is not given.
     tol : float, default 0.02
         Relative tolerance on the vertex-count target used to stop the
         `lowrank` search.
@@ -121,21 +129,38 @@ def buildMesh2d(
         raise ValueError("boundary.buffer(offset) did not yield a single polygon.")
     coords = np.array(domain.simplify(offset * 0.25).exterior.coords[:-1])
 
-    density_fn = None
+    tree = None
     target_n = None
-    d_min = d_max = None
+    k = None
+    sorted_local_dens = None
     if lowrank is not None:
         if not (0 < lowrank <= 1):
             raise ValueError("lowrank must be in (0, 1].")
-        density_fn = gaussian_kde(points.T)
-        d = density_fn(points.T)
-        d_min, d_max = float(d.min()), float(d.max())
+        k = max(1, min(density_neighbors, len(points) - 1))
+        tree = cKDTree(points)
+        # local density at each point, from the distance to its k-th
+        # *other* point (hence k + 1 neighbors, dropping the self-match)
+        dist, _ = tree.query(points, k=k + 1)
+        dk = dist[:, k]
+        local_dens = k / (np.pi * dk**2 + 1e-12)
+        sorted_local_dens = np.sort(local_dens)
         target_n = max(3, round(lowrank * n_input))
+
+    def _percentile_weight(x, y):
+        # k-th nearest-neighbor local density at (x, y), converted to its
+        # percentile rank among the points' own local densities: a cluster
+        # that is *locally* as tight as the busiest cluster gets w close to
+        # 1 even if it has far fewer points overall (unlike a fixed-
+        # bandwidth KDE, whose single global bandwidth is dominated by
+        # whichever cluster has the most points).
+        dist, _ = tree.query([x, y], k=k)
+        dk = dist if k == 1 else dist[-1]
+        dens = k / (np.pi * dk**2 + 1e-12)
+        return np.searchsorted(sorted_local_dens, dens) / len(sorted_local_dens)
 
     def _size_callback(scale):
         def callback(dim, tag, x, y, z, lc):
-            dens = density_fn((x, y))[0]
-            w = (dens - d_min) / (d_max - d_min + 1e-300)  # 0 sparse .. 1 dense
+            w = _percentile_weight(x, y)  # 0 sparse .. 1 dense
             size = max_edge - w * (max_edge - min_edge)  # in [min_edge, max_edge]
             return float(size * scale)
 
@@ -156,7 +181,7 @@ def buildMesh2d(
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lo_bound)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", hi_bound)
 
-            if density_fn is not None:
+            if tree is not None:
                 gmsh.model.mesh.setSizeCallback(_size_callback(scale))
 
             gmsh.model.mesh.generate(2)
@@ -168,7 +193,7 @@ def buildMesh2d(
 
         return mesh
 
-    if density_fn is None:
+    if tree is None:
         return _generate()
 
     # Bisection on a global size-scale factor to hit the target vertex count:
