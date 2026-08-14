@@ -9,16 +9,13 @@ and the simulated response variable for multiple time steps.
 """
 
 # %% Import the necessary libraries
-from IPython.core.completer import __main__
 import numpy as np
-import matplotlib.pyplot as plt
 import pandas as pd
 from shapely.geometry import polygon
-import pygmsh
-import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
 import jax
+import jax.numpy as jnp
 import geossm
 
 if geossm.__file__:
@@ -27,6 +24,7 @@ if geossm.__file__:
     from geossm.stmodel import ModelParams
     from geossm.stmodel import LRStateSpaceModel as lrssm
     from geossm.stmodel import FitOptions
+    from geossm.covmodel import buildMesh2d
 
 # assert the presence of a GPU device
 try:
@@ -36,57 +34,7 @@ except RuntimeError:
 
 assert has_gpu, "No GPU device found: this example requires a GPU device to run."
 
-# %% Create a mesh
-
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(
-            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
-        )
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
-        for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        gmsh.model.mesh.embed(0, embedded_tags, 2, domain._id)
-
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
-
-        # 5. Generate
-        gmsh.model.mesh.generate(2)
-
-        gmsh.model.mesh.optimize("Laplace2D")
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
-
-        # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-
-        mesh = geom.generate_mesh()
-
-    return mesh
+# %% Utils function
 
 def build_dataframe(n, T=50):
     # %% Build the geopandas dataframe
@@ -133,7 +81,10 @@ def build_dataframe(n, T=50):
 
 # # Create the mesh 
 # domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
-# mesh_io = buildMesh(domain, 0.25, points, lc_buffer=1)
+
+# mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
+#                       lowrank=0.5, density_neighbors=5)
+
 # print(mesh_io)
 
 # params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
@@ -141,6 +92,10 @@ def build_dataframe(n, T=50):
 # # Create the covariance function used to simulate the "truth"
 # cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
 # cov_fun = cov_fun.setup(mesh_io)
+
+# # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+# # ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
+# # cov_fun.fem_solver.plot_mesh(ax=ax)
 
 # # Build a dedicated model to simulate the "truth" data and set up its covariance
 # sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
@@ -159,13 +114,18 @@ def build_dataframe(n, T=50):
 # # 2) Create the model
 # backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
 
+
+# opt = FitOptions()
+# opt.max_iter = 50
+# opt.tol_relat = 1e-3
+
 # records = []
 # for backend in backends:
 #     model = lrssm(
 #         df=gdf, 
 #         formulas=["y_sim ~ 1"], 
 #         domain=[domain], 
-#         verbose=False, backend=backend)
+#         verbose=False, backend=backend, dtype=jnp.float32)
 
 
 #     # 3) Set up the model cov. 
@@ -173,10 +133,6 @@ def build_dataframe(n, T=50):
 #     # print(model)
 
 #     # 4) fit the model
-#     opt = FitOptions()
-#     opt.max_iter = 50
-#     opt.tol_relat = 1e-5
-
 #     results = model.fit(options=opt)
 
 #     records.append(
@@ -226,6 +182,7 @@ if __name__ == "__main__":
     records = []
     for sweep_name, cfg in sweeps.items():
         for value in cfg["values"]:
+
             print("Start simulation for sweep:", sweep_name, "value:", value)
             dims = dict(cfg["fixed"])
             dims[sweep_name] = value
@@ -234,7 +191,8 @@ if __name__ == "__main__":
             gdf, points = build_dataframe(dims["n"], T=dims["T"])
 
             # Create the mesh 
-            mesh_io = buildMesh(domain, 0.25, points, lc_buffer=1)
+            mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1,
+                                    lowrank=0.75, density_neighbors=5)
             # print(mesh_io)
 
             params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
@@ -257,25 +215,27 @@ if __name__ == "__main__":
             est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
             est_cov_fun = est_cov_fun.setup(mesh_io)
 
+            # fit the estimation model
+            opt = FitOptions()
+            opt.max_iter = 50
+            opt.tol_relat = 1e-3
+            opt.verbose = True
+
+
             # 2) Create the model
             for backend in backends:
                 model = lrssm(
                     df=gdf, 
                     formulas=["y_sim ~ 1"], 
                     domain=[domain], 
-                    verbose=False, backend=backend)
+                    verbose=False, backend=backend, dtype=jnp.float32)
 
 
                 # 3) Set up the model cov. 
                 model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
                 # print(model)
 
-                # 4) fit the model
-                opt = FitOptions()
-                opt.max_iter = 50
-                opt.tol_relat = 1e-5
-                opt.verbose = True
-
+                
                 results = model.fit(options=opt)
 
 
