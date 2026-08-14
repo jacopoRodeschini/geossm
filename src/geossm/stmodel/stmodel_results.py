@@ -9,6 +9,7 @@ import time
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
+from geossm.utils import _on_device
 
 
 ArrayLike = Optional[Any]
@@ -266,6 +267,7 @@ class LRStateSpaceResults(StateSpaceResults):
             updated[f.name] = replace(p, bse=nan_bse)
         return ModelParams(**updated)
 
+    @_on_device
     def _compute_hessian(self):
         """
         Compute the Hessian matrix of the log-likelihood function at the estimated parameters.
@@ -304,6 +306,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self._hessian = hessian
         return hessian, tdelta
         
+    @_on_device
     def compute_cov_params(self):
         """
         Compute the standard errors of the estimated parameters based on the Hessian matrix.

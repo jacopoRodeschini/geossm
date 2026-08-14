@@ -124,7 +124,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 @partial(jit, static_argnames=["b"])
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
-    # 1. Define the function for a single loop iteration (the "scan body")
+    # 1. Define thLRStateSpaceResults and the parent class StateSpaceResults and the parent class e function for a single loop iteration (the "scan body")
     # This function is defined inside so it can close over the non-iterating
     # variable `H`.
     def iteration(carry, x):

@@ -12,6 +12,7 @@ from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date
 import jax
+from geossm.utils import _select_device
 
 ArrayLike = Optional[Any]
 
@@ -32,6 +33,7 @@ class StateSpaceResults:
         y_obs=None,
         yname=None,
         Xbeta=None,
+        backend=None,
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
@@ -56,6 +58,17 @@ class StateSpaceResults:
 
         # ---- Update the metadata from the model----
         self.model = model
+
+        # ---- Backend: default to the model's backend, so any JAX
+        # computation performed on the results (e.g. the Hessian in
+        # LRStateSpaceResults) runs on the same device the model was fit
+        # on, unless a different backend is explicitly requested here.
+        if backend is not None:
+            self._backend = _select_device(backend)
+        elif model is not None and getattr(model, "backend", None) is not None:
+            self._backend = _select_device(model.backend)
+        else:
+            self._backend = _select_device("auto")
 
         # get the observed data from the model if available
         if model is not None:
@@ -111,6 +124,10 @@ class StateSpaceResults:
 
         # convert arrays if needed
         self.to_numpy()
+
+    @property
+    def backend(self):
+        return self._backend
 
     # Utility method to convert array-like inputs to numpy arrays
 
