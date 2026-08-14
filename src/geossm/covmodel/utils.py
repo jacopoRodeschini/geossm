@@ -227,7 +227,7 @@ def buildMesh2d(
             "larger `lowrank`, or widen the min_edge/max_edge range."
         )
 
-    return mesh
+    return mesh, Polygon(domain.boundary.geoms[0])
 
 
 def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):
@@ -363,7 +363,7 @@ def buildMeshGrid2d(
         return meshio.Mesh(
             points=np.column_stack([vertices, np.zeros(len(vertices))]),
             cells=[("triangle", triangles)],
-        )
+        ), Polygon(domain.boundary.geoms[0])
 
     if nx is not None or ny is not None:
         if nx is None or ny is None:
