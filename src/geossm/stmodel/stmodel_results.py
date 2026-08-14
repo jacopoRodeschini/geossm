@@ -492,7 +492,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
 
         return gen_top_left, gen_top_right
-    def summary(self, hessian=True, alpha=0.05):
+    def summary(self, hessian=False, alpha=0.05):
 
         # self.results = np.array([0])
         # self.params = self.beta
