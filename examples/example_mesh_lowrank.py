@@ -27,14 +27,14 @@ points = np.clip(np.vstack([pts_cluster, pts_background]), 0, 1)
 # %% Build a "full" mesh (one vertex density everywhere, like inla.mesh.2d
 # without any thinning)
 
-mesh_full = buildMesh2d(points, max_edge=0.08)
+mesh_full, boundary_full = buildMesh2d(points, max_edge=0.08)
 print(f"full mesh: {len(mesh_full.points)} vertices")
 
 # %% Build a low-rank mesh: reduce the vertex budget to ~30% of len(points),
 # while keeping more vertices where points are dense and fewer where they
 # are sparse
 
-mesh_lr = buildMesh2d(points, max_edge=0.08, lowrank=0.3)
+mesh_lr, buffer = buildMesh2d(points, max_edge=0.08, lowrank=0.3)
 print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
       f"(target {round(0.3 * len(points))})")
 
@@ -42,7 +42,7 @@ print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
 # (buffered) convex hull of the points, with its resolution solved
 # automatically so it also lands at ~30% of len(points) vertices
 
-mesh_grid = buildMeshGrid2d(points=points, offset=0.05, lowrank=0.3)
+mesh_grid, buffer = buildMeshGrid2d(points=points, offset=0.05, lowrank=0.3)
 print(f"grid mesh: {len(mesh_grid.points)} vertices "
       f"(target {round(0.3 * len(points))})")
 

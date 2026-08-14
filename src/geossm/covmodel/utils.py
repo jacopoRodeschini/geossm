@@ -94,7 +94,10 @@ def buildMesh2d(
 
     Returns
     -------
-    meshio.Mesh
+    mesh : meshio.Mesh
+    domain : shapely.geometry.Polygon
+        The (buffered) domain the mesh was built over -- `boundary` (or its
+        default) extended by `offset`.
     """
     points = np.asarray(points, dtype=float)[:, :2]
     n_input = len(points)
@@ -194,7 +197,7 @@ def buildMesh2d(
         return mesh
 
     if tree is None:
-        return _generate()
+        return _generate(), domain
 
     # Bisection on a global size-scale factor to hit the target vertex count:
     # smaller scale -> smaller elements everywhere -> more vertices.
@@ -227,7 +230,7 @@ def buildMesh2d(
             "larger `lowrank`, or widen the min_edge/max_edge range."
         )
 
-    return mesh, Polygon(domain.boundary.geoms[0])
+    return mesh, domain
 
 
 def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):
@@ -311,7 +314,10 @@ def buildMeshGrid2d(
 
     Returns
     -------
-    meshio.Mesh
+    mesh : meshio.Mesh
+    domain : shapely.geometry.Polygon
+        The (buffered) domain the mesh was built over -- `boundary` (or its
+        default) extended by `offset`.
     """
     if boundary is None:
         if points is None:
@@ -363,12 +369,12 @@ def buildMeshGrid2d(
         return meshio.Mesh(
             points=np.column_stack([vertices, np.zeros(len(vertices))]),
             cells=[("triangle", triangles)],
-        ), Polygon(domain.boundary.geoms[0])
+        )
 
     if nx is not None or ny is not None:
         if nx is None or ny is None:
             raise ValueError("`nx` and `ny` must be given together.")
-        return _build(nx, ny)
+        return _build(nx, ny), domain
 
     if lowrank is None:
         raise ValueError("either `nx`/`ny` or `lowrank` must be given.")
@@ -421,4 +427,4 @@ def buildMeshGrid2d(
         else:
             lo = mid
 
-    return best
+    return best, domain
