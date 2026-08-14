@@ -28,10 +28,23 @@ from statsmodels.iolib.summary import Summary
 
 
 try:
+    import jax
     import jax.numpy as jnp
     JAX_AVAILABLE = True
 except ImportError:
     JAX_AVAILABLE = False
+
+
+def _ensure_x64_for_dtype(dtype):
+    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+
+    JAX silently truncates float64 arrays back to 32-bit unless x64 mode is
+    enabled. Mirrors geossm.ssm.statespace._ensure_x64_for_dtype; duplicated
+    here (rather than imported) to avoid a circular import with geossm.ssm
+    during package initialization.
+    """
+    if JAX_AVAILABLE and np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
+        jax.config.update("jax_enable_x64", True)
 
 
 @dataclass
@@ -54,7 +67,7 @@ class DesignMatrices:
     y_expr: list[str] = None
     time_col_name: str = "Time"
     geometry_id: str = field(default="geometry_id", init=False)
-    dtype: np.dtype = field(default=np.float64)
+    dtype: np.dtype = field(default=np.float32)
     # backend: Literal["numpy", "jax"] = field(default="numpy")
 
     def __post_init__(self):
@@ -72,8 +85,9 @@ class DesignMatrices:
             self.dtype = np.dtype(self.dtype)
         except TypeError:
             raise TypeError(f"Invalid dtype: {self.dtype}")
+        _ensure_x64_for_dtype(self.dtype)
 
-        # Cast arrays to dtype 
+        # Cast arrays to dtype
         self.y = np.asarray(self.y, dtype=self.dtype) if self.y is not None else None
         self.X = np.asarray(self.X, dtype=self.dtype)
         self.timestamps = np.asarray(self.timestamps)
@@ -112,6 +126,27 @@ class DesignMatrices:
         self.X = jnp.array(self.X)
             # Only arrays of numeric types are supported by JAX. 
             # self.timestamps = jnp.array(self.timestamps)
+
+    def astype(self, dtype) -> "DesignMatrices":
+        """
+        Cast X, y and points to `dtype` in place and return self.
+
+        Lets an already-built DesignMatrices be realigned with a model's
+        dtype (e.g. LRStateSpaceModel.dtype) without re-running formula
+        parsing / matrix construction, which is comparatively expensive.
+        """
+        dtype = np.dtype(dtype)
+        if dtype == self.dtype:
+            return self
+
+        _ensure_x64_for_dtype(dtype)
+
+        self.dtype = dtype
+        self.X = jnp.asarray(self.X, dtype=dtype)
+        self.y = jnp.asarray(self.y, dtype=dtype) if self.y is not None else None
+        self.points = np.asarray(self.points, dtype=dtype)
+
+        return self
 
     @property
     def isnan(self) -> np.ndarray:
@@ -211,7 +246,7 @@ class DesignMatrices:
 
 class DesignMatricesBuilder:
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float64, verbose: bool = True,
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = True,
                  tmin: datetime = None, tmax: datetime = None):
         """
         Prepare the spatial-temporal dataset for modeling.

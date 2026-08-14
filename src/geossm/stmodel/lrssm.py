@@ -8,6 +8,7 @@ import jax.numpy as jnp
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
 from geossm.ssm import _filter_kernelJAX
+from geossm.ssm import _itype_for, _ensure_x64_for_dtype
 from geossm.covmodel import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
@@ -497,6 +498,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def __init__(self, df, formulas:list = None, domain:list = None,
         verbose=True, backend="auto", dtype=jnp.float32):
+
+        # Set dtype/itype before building the observation grid below, so the
+        # design matrices are built directly in the model's precision instead
+        # of defaulting to float64 and being downcast later. super().__init__()
+        # re-derives the same values from `dtype` further down (harmless).
+        self.dtype = jnp.dtype(dtype)
+        self.itype = _itype_for(self.dtype)
+        _ensure_x64_for_dtype(self.dtype)
 
         self.df = df.copy()
         self.formulas = formulas
@@ -1678,7 +1687,7 @@ class LRStateSpaceModel(StateSpaceModel):
         nvar = len(formulas)  # numer of the response variable
 
         # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
-        dfs = [DesignMatricesBuilder(df, f, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
+        dfs = [DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
