@@ -331,7 +331,7 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
 #     return W
 
 @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
-def _compute_A2_jax_kernel(
+def _compute_A2_jax_kernel_old(
     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
 ):
     """
@@ -489,6 +489,86 @@ def _ei_jax(i, dim, dtype=jnp.float32):
     Creates a one-hot row vector for JAX.
     """
     return jax.nn.one_hot(i, dim, dtype=dtype).reshape(1, dim)
+
+
+@partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
+def _compute_A2_jax_kernel(
+    y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
+):
+    """
+    Fast-compiling replacement for `_compute_A2_jax_kernel`.
+
+    The original kernel builds, *inside a Python loop unrolled over T*, a
+    padded block-diagonal Psi_it matrix and Kronecker products to select
+    per-domain blocks. That unrolling is what makes compilation blow up as
+    T grows: XLA gets T (and T*nlat*nlat) copies of an already sparse/padded
+    computation.
+
+    This version keeps only the two loops that are genuinely small and
+    static (over variables `nvar` and over latent domains `nlat`), and
+    replaces the T-unrolled loop with a `lax.scan`, which is compiled once
+    regardless of T. It also drops jnp.kron/block_diag/pad in favor of
+    directly slicing the (static) block boundaries block_p/block_q.
+
+    Per row w_i of A (see the derivation in the module docstring):
+        g_i[j]   = sum_t resid_i,t' (Phi_i,j @ z_t,j)
+        R_i[j,k] = sum_t sum_{a,b} (Phi_i,j' diag(mask_i,t) Phi_i,k)[a,b]
+                        * (z_t,j[a] z_t,k[b] + P_t[j,k][a,b])
+        w_i = R_i^{-1} g_i
+    g_i has no dependence on the observation mask through Phi (only
+    through the residual, which is already zeroed at missing entries), so
+    it is computed directly with matmuls over all T at once. Only R_i needs
+    a per-time contribution (because of the time-varying missing-data mask)
+    and uses the scan.
+    """
+    residual = y_t - jnp.einsum("mpn,p->mn", Xbeta, beta)
+
+    z = x_T[:, 1:]  # (q_total, T)
+    P = P_T[:, :, 1:]  # (q_total, q_total, T)
+
+    W_rows = []
+    for i in range(nvar):
+        p0, p1 = block_p[i], block_p[i + 1]
+
+        y_i = y_t[p0:p1, :]  # (m_i, T)
+        mask_i = ~jnp.isnan(y_i)  # (m_i, T)
+        resid_i = jnp.where(mask_i, residual[p0:p1, :], 0.0)  # (m_i, T)
+
+        Phi_i = [Phi[p0:p1, block_q[j] : block_q[j + 1]] for j in range(nlat)]
+        Z = [z[block_q[j] : block_q[j + 1], :] for j in range(nlat)]  # (q_j, T)
+
+        # V[j][:, t] = Phi_i,j @ z_t,j -- domain j's contribution, all T at once
+        V = [Phi_i[j] @ Z[j] for j in range(nlat)]  # (m_i, T)
+
+        # --- g_i: no time loop needed, mask already applied to resid_i ---
+        g_i = jnp.stack([jnp.sum(resid_i * V[j]) for j in range(nlat)])
+
+        # --- R_i: mask is time-varying, so scan over T (compiled once) ---
+        mask_scan = jnp.moveaxis(mask_i, 1, 0)  # (T, m_i)
+        z_scan = jnp.moveaxis(z, 1, 0)  # (T, q_total)
+        P_scan = jnp.moveaxis(P, 2, 0)  # (T, q_total, q_total)
+
+        def step(R_acc, xs, Phi_i=Phi_i):
+            mask_t, z_t, P_t = xs
+            R_new = R_acc
+            for j in range(nlat):
+                Phi_ij_masked = Phi_i[j] * mask_t[:, None]
+                zj = z_t[block_q[j] : block_q[j + 1]]
+                for k in range(nlat):
+                    D_jk = Phi_ij_masked.T @ Phi_i[k]  # (q_j, q_k)
+                    zk = z_t[block_q[k] : block_q[k + 1]]
+                    P_jk = P_t[block_q[j] : block_q[j + 1], block_q[k] : block_q[k + 1]]
+                    contrib = jnp.sum(D_jk * (jnp.outer(zj, zk) + P_jk))
+                    R_new = R_new.at[j, k].add(contrib)
+            return R_new, None
+
+        R0 = jnp.zeros((nlat, nlat), dtype=y_t.dtype)
+        R_i, _ = lax.scan(step, R0, (mask_scan, z_scan, P_scan))
+
+        w_i = jnp.linalg.solve(R_i, g_i)
+        W_rows.append(w_i)
+
+    return jnp.stack(W_rows, axis=0)
 
 
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
