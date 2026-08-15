@@ -1103,7 +1103,19 @@ class LRStateSpaceModel(StateSpaceModel):
         # Set the parameter of the minimise object
 
         tStart = time.time()
-        Omega = S11 - S10 @ F.T - F @ S10.T + F @ S00 @ F.T
+        # F is diagonal (stored as its 1D diagonal, see
+        # `StateSpaceModel._prepare_diag_array`), so each F-matmul below
+        # reduces to elementwise scaling by f_diag instead of a dense (q, q)
+        # matmul: S10 @ F.T scales S10's columns, F @ S10.T scales S10.T's
+        # rows, and F @ S00 @ F.T scales S00 by outer(f_diag, f_diag) -- the
+        # same pattern already used for `FF` in `_filter_kernelJAX`.
+        f_diag = F
+        Omega = (
+            S11
+            - S10 * f_diag[None, :]
+            - f_diag[:, None] * S10.T
+            + jnp.outer(f_diag, f_diag) * S00
+        )
         par0 = jnp.log(
             jnp.array([fcov.rescale for fcov in est_covList], dtype=self.dtype)
         )
@@ -1438,9 +1450,13 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def _buildRF_dense(self, s2error, flatent, pdim, qdim):
         """
-        Builds dense diagonal matrices in JAX.
+        Builds R and F as their diagonals (1D vectors).
 
-        This is the recommended approach for a direct, easy-to-use replacement.
+        R and F are only ever used through their diagonal (see
+        `StateSpaceModel._prepare_diag_array`), so this returns the diagonal
+        vectors directly instead of building dense (p, p)/(q, q) matrices
+        from them -- avoids a wasted O(p^2)/O(q^2) allocation every EM
+        iteration (this is called once per `fit()` iteration).
 
         Args:
             s2error: 1D array of error variances.
@@ -1449,9 +1465,8 @@ class LRStateSpaceModel(StateSpaceModel):
             qdim: Tuple of block dimensions for flatent (static for JIT).
 
         Returns:
-            A tuple of two dense JAX diagonal matrices.
+            A tuple of two 1D JAX arrays: (R diagonal, F diagonal).
         """
-        # 1. Create the full diagonal vector by repeating elements
         rdiag_vec = jnp.repeat(s2error, repeats=jnp.array(pdim)).astype(
             dtype=self.dtype
         )
@@ -1459,11 +1474,7 @@ class LRStateSpaceModel(StateSpaceModel):
             dtype=self.dtype
         )
 
-        # 2. Create the dense diagonal matrices from the vectors
-        rdiag_matrix = jnp.diag(rdiag_vec)
-        fdiag_matrix = jnp.diag(fdiag_vec)
-
-        return rdiag_matrix, fdiag_matrix
+        return rdiag_vec, fdiag_vec
 
     def _buildH_dense(self, A, basis):
 
@@ -1703,7 +1714,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 (
                     "Diag. R",
                     lambda: (
-                        f"{jnp.mean(jnp.diag(self.R)):2f}"
+                        f"{jnp.mean(self.R):2f}"
                         if self.R is not None
                         else ["N/A"]
                     ),
@@ -1719,7 +1730,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 (
                     "Diag. F",
                     lambda: (
-                        f"{jnp.mean(jnp.diag(self.F)):2f}"
+                        f"{jnp.mean(self.F):2f}"
                         if self.F is not None
                         else ["N/A"]
                     ),

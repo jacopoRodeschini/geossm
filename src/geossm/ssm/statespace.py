@@ -51,8 +51,10 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     q = F.shape[0]
     T = Xbeta.shape[2]
 
-    # Pre-compute Cholesky decompositions
-    chol_R = jnp.linalg.cholesky(R)
+    # R and F are diagonal (stored as their 1D diagonal -- see
+    # `_prepare_diag_array`), so their Cholesky factor / matmul reduce to
+    # elementwise sqrt / scaling instead of dense (p, p)/(q, q) operations.
+    chol_R_diag = jnp.sqrt(R)
     chol_Q = jnp.linalg.cholesky(Q)
     chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
 
@@ -69,14 +71,14 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # Loop T times to generate T observations (y_0, ..., y_{T-1})
     for t in range(T):
         # 1. Generate the observation y_t based on the current state x_t
-        obs_noise = chol_R @ jax.random.normal(keys.next(), shape=(p,))
+        obs_noise = chol_R_diag * jax.random.normal(keys.next(), shape=(p,))
         mean_reg = Xbeta[:, :, t] @ beta
         y_t = mean_reg + H @ x_current + obs_noise
         y_history.append(y_t)
 
         # 2. Evolve the state to the next step: x_{t+1} from x_t
         process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
-        x_next = F @ x_current + process_noise
+        x_next = F * x_current + process_noise
 
         # 3. Store the new state and update the current state for the next loop iteration
         x_history.append(x_next)
@@ -137,10 +139,13 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     # Pre-compute constants
     Iq = jnp.eye(q, dtype=dtype)
-    R_diag = R.diagonal()
+    # R and F are stored as their diagonal (1D) directly -- see
+    # `_prepare_diag_array` -- since both are only ever used through their
+    # diagonal here and in the smoother/simulation kernels.
+    R_diag = R
     invR_diag = jnp.reciprocal(R_diag)
     H_dense = H.astype(dtype)
-    f_diag = jnp.diag(F)
+    f_diag = F
     FF = jnp.outer(f_diag, f_diag)
 
     # This is the function for a single loop iteration
@@ -277,7 +282,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
     dtype = x_t.dtype.type()
     q = F.shape[0]
-    f_diag = jnp.diag(F)
+    f_diag = F  # F is stored as its diagonal (1D) -- see `_prepare_diag_array`
     Iq = jnp.eye(q, dtype=dtype)
 
     def _chol_inv(P):
@@ -344,8 +349,12 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
     # This is the starting point for the backward pass.
     x_T_last = x_t[:, -1]
     P_T_last = P_t[:, :, -1]
-    # Lag-one cov at T is special
-    P_T_1_last = (jnp.eye(q, dtype=dtype) - Klast @ H) @ F @ P_t[:, :, -2]
+    # Lag-one cov at T is special. F is diagonal, so F @ P_t[:, :, -2] is an
+    # elementwise row-scale by f_diag (same pattern as `term` in the
+    # per-step body below) rather than a dense (q, q) matmul; computing that
+    # product first lets (Iq - Klast @ H) left-multiply it exactly as in the
+    # original (Iq - Klast @ H) @ F @ P_t[:, :, -2].
+    P_T_1_last = (jnp.eye(q, dtype=dtype) - Klast @ H) @ (f_diag[:, None] * P_t[:, :, -2])
     init_carry = (x_T_last, P_T_last, P_T_1_last)
 
     # 2. Prepare the arrays to be scanned over (`xs`)
@@ -625,10 +634,10 @@ class StateSpaceModel:
             self._p = H.shape[0]
 
         if R is not None:
-            self._R = self._prepare_array(R)
+            self._R = self._prepare_diag_array(R)
 
         if F is not None:
-            self._F = self._prepare_array(F)
+            self._F = self._prepare_diag_array(F)
             self._q = F.shape[0]
 
         if Q is not None:
@@ -731,6 +740,20 @@ class StateSpaceModel:
         """Cast to the model dtype and commit the array to the configured backend device."""
         return _to_backend(self._backend, jnp.asarray(x, dtype=self.dtype))[0]
 
+    def _prepare_diag_array(self, x):
+        """Prepare R/F, which are diagonal everywhere they're used (the Kalman
+        kernels only ever read their diagonal). Accepts either a dense square
+        matrix (its diagonal is extracted) or a 1D vector, and always stores
+        the 1D diagonal - this keeps the constructor/`.set()` call signature
+        backward compatible with callers passing e.g. `R = sigma2 * np.eye(p)`,
+        while avoiding a dense (p, p)/(q, q) matrix ever being built or carried
+        internally.
+        """
+        arr = self._prepare_array(x)
+        if arr.ndim == 2:
+            arr = arr.diagonal()
+        return arr
+
     def _check_parameters(self):
         """
         Checks the dimensions of the parameters.
@@ -792,29 +815,25 @@ class StateSpaceModel:
             messages.append(f"H must be shape ({p},{q}), got {H_shape}.")
             flag = False
 
-        # R: (p, p) or scalar for p==1
+        # R: (p,) -- diagonal of the measurement noise covariance. Stored as
+        # a vector (see `_prepare_diag_array`) since R is only ever used
+        # through its diagonal, so its "positive semidefinite" check reduces
+        # to each entry being non-negative (the eigenvalues of a diagonal
+        # matrix are its entries).
         R_shape = shape_str(self.R)
-        if not (R_shape == (p, p) or (p == 1 and R_shape in [(1,), (1, 1)])):
-            messages.append(
-                f"R must be shape ({p},{p}) (or scalar for p=1), got {R_shape}."
-            )
+        if R_shape != (p,):
+            messages.append(f"R must be shape ({p},) (its diagonal), got {R_shape}.")
             flag = False
         else:
-            if p > 1:
-                if not is_pos_semidef(self.R):
-                    messages.append("R must be symmetric positive semidefinite.")
-                    flag = False
-            else:
-                # scalar case
-                Rval = jnp.asarray(self.R).ravel()[0]
-                if Rval < 0:
-                    messages.append("R (variance) must be non-negative.")
-                    flag = False
+            if jnp.any(jnp.asarray(self.R) < -1e-8):
+                messages.append("R (variances) must be non-negative.")
+                flag = False
 
-        # F: (q, q)
+        # F: (q,) -- diagonal of the state transition matrix, stored as a
+        # vector for the same reason as R.
         F_shape = shape_str(self.F)
-        if F_shape != (q, q):
-            messages.append(f"F must be shape ({q},{q}), got {F_shape}.")
+        if F_shape != (q,):
+            messages.append(f"F must be shape ({q},) (its diagonal), got {F_shape}.")
             flag = False
 
         # Q: (q, q)
@@ -1261,8 +1280,6 @@ class StateSpaceModel:
         block_q is the dimension of the latent state for each process in case of multivariate processes simulation
         
         """
-        from scipy.linalg import solve_discrete_lyapunov
-
         # Basic checks
         for attr in ("F", "Q", "H", "R"):
             if not hasattr(self, attr):
@@ -1274,8 +1291,13 @@ class StateSpaceModel:
         if block_q is None:
             block_q = [0, self.q]
 
-        # Solve Lyapunov: P = F P F^T + Q
-        P = solve_discrete_lyapunov(F, Q)
+        # Solve Lyapunov: P = F P F^T + Q. F is diagonal (stored as its 1D
+        # diagonal -- see `_prepare_diag_array`), so (F P F^T)_ij = f_i f_j P_ij
+        # and the equation has the closed form P_ij = Q_ij / (1 - f_i f_j)
+        # elementwise -- exact, and avoids a scipy.linalg.solve_discrete_lyapunov
+        # call (which would otherwise need a dense (q, q) F reconstructed just
+        # for this one-off simulation-stats call).
+        P = Q / (1.0 - jnp.outer(F, F))
 
         # Theoretical latent variance
         # temp = jnp.diag(H @ P @ H.T)
@@ -1292,7 +1314,7 @@ class StateSpaceModel:
         var_latent_empirical = jnp.array([float(jnp.var(latent_effect[block_p[i]:block_p[i+1],:], axis=0).mean()) for i in range(len(block_p)-1)])
 
         # Observation noise variance (average over observation dims)
-        temp = jnp.diag(R)
+        temp = R  # R is stored as its diagonal (1D) directly
         var_noise = jnp.array([float(jnp.sum(temp[block_p[i]:block_p[i+1]]) / (block_p[i+1] - block_p[i])) for i in range(len(block_p)-1)])
 
         # Response variance (theoretical) and empirical
@@ -1454,7 +1476,7 @@ class StateSpaceModel:
 
     @property
     def R(self):
-        """Returns the measurement noise covariance R."""
+        """Returns the diagonal of the measurement noise covariance R, shape (p,)."""
         return self._R
 
     @R.setter
@@ -1464,7 +1486,7 @@ class StateSpaceModel:
 
     @property
     def F(self):
-        """Returns the state transition matrix F."""
+        """Returns the diagonal of the state transition matrix F, shape (q,)."""
         return self._F
 
     @F.setter
@@ -1640,7 +1662,7 @@ class StateSpaceModel:
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
-                    lambda: [f"{jnp.mean(jnp.diag(self.R)):2f}"
+                    lambda: [f"{jnp.mean(self.R):2f}"
                         if self.R is not None
                         else "None"]
                 ),
@@ -1653,7 +1675,7 @@ class StateSpaceModel:
                 (
                     "Diag. F",
                     lambda: [
-                        f"{jnp.mean(jnp.diag(self.F)):2f}"
+                        f"{jnp.mean(self.F):2f}"
                         if self.F is not None
                         else "None"],
                 ),

@@ -310,10 +310,15 @@ class StateSpaceResults:
             lower = np.zeros((p, T), dtype=self.dtype)
             upper = np.zeros((p, T), dtype=self.dtype)
 
+            # R is stored as its diagonal (1D) directly (see
+            # `_prepare_diag_array`), so it must be added onto var_y's
+            # diagonal only, not broadcast across every row.
+            R_diag_matrix = np.diag(R) if prediction else None
+
             for t in range(T):
                 var_y = H @ Psm[:, :, t + 1] @ H.T
                 if prediction:
-                    var_y = var_y + R
+                    var_y = var_y + R_diag_matrix
 
                 std_t = np.sqrt(np.diag(var_y))
 
