@@ -1228,8 +1228,12 @@ class LRStateSpaceModel(StateSpaceModel):
         # 2) Run the Kalman filter and smoother to get the expected values of the latent factors and the log-likelihood
 
         # Run the Kalman filter and smoother to get the expected values of the latent factors and the log-likelihood
-        # Call the parent class's estimate method to perform the Kalman filter and smoother
-        results = super().estimate(y_t)
+        # Call the parent class's estimate method to perform the Kalman filter and smoother.
+        # light=True: this EM loop never reads back the filter-stage arrays
+        # (x_filtered, P_filtered, K, x_pred, P_pred), only the smoothed
+        # states and the sufficient statistics below - so they don't need to
+        # be kept alive as numpy copies on `results`.
+        results = super().estimate(y_t, light=True)
 
         y_hat = results.y_hat
         x_T = results.x_smoothed
@@ -1473,7 +1477,7 @@ class LRStateSpaceModel(StateSpaceModel):
         invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
         Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0], dtype=invQ.dtype))
 
-        _, _, _, _, _, _, logL = _filter_kernelJAX(
+        _, _, _, _, _, logL = _filter_kernelJAX(
             y_t, H, R, F, Q,
             jnp.array(x0,     dtype=y_t.dtype),
             jnp.array(Sigma0, dtype=y_t.dtype),

@@ -46,7 +46,6 @@ class StateSpaceResults:
         P_filtered: ArrayLike = None,
         x_pred: ArrayLike = None,
         P_pred: ArrayLike = None,
-        invP_pred: ArrayLike = None,
         K: ArrayLike = None,
         x_smoothed: ArrayLike = None,
         P_smoothed: ArrayLike = None,
@@ -117,7 +116,6 @@ class StateSpaceResults:
         self.P_filtered = P_filtered
         self.x_pred = x_pred
         self.P_pred = P_pred
-        self.invP_pred = invP_pred
         self.K = K
         self.x_smoothed = x_smoothed
         self.P_smoothed = P_smoothed
@@ -159,7 +157,6 @@ class StateSpaceResults:
             "P_filtered",
             "x_pred",
             "P_pred",
-            "invP_pred",
             "K",
             "x_smoothed",
             "P_smoothed",

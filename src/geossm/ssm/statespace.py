@@ -132,6 +132,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     dtype = y_t.dtype.type()
+    p = H.shape[0]
     q = F.shape[0]
 
     # Pre-compute constants
@@ -146,7 +147,10 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # This is the function for a single loop iteration
     def kalman_step(carry, step_data):
         # 1. Unpack carry and step_data
-        x_prev, P_prev, logL_accum = carry
+        # K is only carried (not stacked into the scan history below): only
+        # the very last Kalman gain is ever used (by the smoother's boundary
+        # term), so keeping a full (T, p, q) history of it was pure waste.
+        x_prev, P_prev, logL_accum, _K_prev = carry
         yt_slice, Xbeta_slice = step_data
 
         # PREDICTION
@@ -166,6 +170,10 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         Hna_dense = H_dense * (~nan_mask)[:, None]
 
         # WOODBURY
+        # invP_pred is only needed within this step (Woodbury identity below);
+        # it used to also be stacked into the scan history for the smoother to
+        # reuse, but that duplicated a full (q, q, T) array for something the
+        # smoother can recompute inline from the (already stored) P_t_1.
         #invP_pred = solve(P_pred, Iq)
         L_P = jnp.linalg.cholesky(P_pred + 1e-6 * Iq)  # Add small jitter for numerical stability
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
@@ -204,26 +212,25 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         logL_accum += logdetSigmaE + e.T @ (invSigmaE @ e)
 
         # 2. Pack carry for next step and outputs for this step
-        next_carry = (x_upd, P_upd, logL_accum)
+        next_carry = (x_upd, P_upd, logL_accum, K)
         outputs = {
             "x_t": x_upd,
             "P_t": P_upd,
-            "K": K,
             "x_t_1": x_pred,
             "P_t_1": P_pred,
-            "invP_t_1": invP_pred,
         }
         return next_carry, outputs
 
     # Prepare initial state and inputs for scan
     # The scan will iterate over the time dimension
-    initial_carry = (x0, Sigma0, 0.0)
+    K_init = jnp.zeros((q, p), dtype=dtype)
+    initial_carry = (x0, Sigma0, 0.0, K_init)
     # We need to transpose inputs so that T is the leading dimension
     # y_t: [p, T] -> [T, p]
     # Xbeta: [p, b, T] -> [T, p, b]
     scan_inputs = (y_t.T, jnp.moveaxis(Xbeta, -1, 0))
 
-    (final_x, final_P, final_logL), history = jax.lax.scan(
+    (final_x, final_P, final_logL, final_K), history = jax.lax.scan(
         kalman_step, initial_carry, scan_inputs
     )
 
@@ -231,10 +238,9 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # The outputs will have T as the leading dimension, so we move it back
     x_t = jnp.moveaxis(history["x_t"], 0, -1)
     P_t = jnp.moveaxis(history["P_t"], 0, -1)
-    K = history["K"][-1]  # Often only the final gain is needed
+    K = final_K  # only the final gain is needed (by the smoother's boundary term)
     x_t_1 = jnp.moveaxis(history["x_t_1"], 0, -1)
     P_t_1 = jnp.moveaxis(history["P_t_1"], 0, -1)
-    invP_t_1 = jnp.moveaxis(history["invP_t_1"], 0, -1)
 
     # Add the initial state to the beginning of the time series arrays
     x_t = jnp.concatenate([x0[:, None], x_t], axis=1)
@@ -244,22 +250,29 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     P_t_1 = jnp.concatenate(
         [jnp.zeros(Sigma0.shape, dtype=dtype)[:, :, None], P_t_1], axis=2
     )
-    invP_t_1 = jnp.concatenate(
-        [jnp.diag(1 / Sigma0.diagonal())[:, :, None], invP_t_1], axis=2
-    )
     logL = -0.5 * final_logL
 
     # jax.block_until_ready(x_t)
 
-    return x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL
+    return x_t, P_t, K, x_t_1, P_t_1, logL
 
 
 @jit
-def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
+def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
     dtype = x_t.dtype.type()
     q = F.shape[0]
     f_diag = jnp.diag(F)
+    Iq = jnp.eye(q, dtype=dtype)
+
+    def _chol_inv(P):
+        # Same Cholesky-based inverse the filter uses for the Woodbury step
+        # (with the same jitter for numerical stability). Recomputed here
+        # instead of being read from a stored (q, q, T) invP_t_1 array,
+        # since P_t_1 (its input) is already available from the filter pass.
+        L = jnp.linalg.cholesky(P + 1e-6 * Iq)
+        invL = jax.scipy.linalg.solve_triangular(L, Iq, lower=True)
+        return invL.T @ invL
 
     def smoother_step(carry, inputs):
         """
@@ -270,17 +283,19 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         x_T_next, P_T_next, P_T_1_next = carry
 
         # 2. Unpack the inputs for the current iteration (i.e., time t)
-        # Note: The lag-one covariance calc needs P_t[t-2] and invP_t_1[t-1],
+        # Note: The lag-one covariance calc needs P_t[t-2] and P_t_1[t-1],
         # so we pass them in as well.
         (
             x_t_curr,
             P_t_curr,
             x_t_1_next,
             P_t_1_next,
-            invP_t_1_next,
             P_t_prev,
-            invP_t_1_curr,
+            P_t_1_curr,
         ) = inputs
+
+        invP_t_1_next = _chol_inv(P_t_1_next)
+        invP_t_1_curr = _chol_inv(P_t_1_curr)
 
         # --- Core Smoother Logic (from your original loop) ---
         #J_t_1 = P_t_curr @ F.T @ invP_t_1_next
@@ -329,20 +344,20 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
     xs_P_t_prev = P_t[:, :, :-2]  # For lag-one cov
 
     # We need inputs from t=T, T-1, ..., 1
-    # x_t_1_next, P_t_1_next, invP_t_1_next
+    # x_t_1_next, P_t_1_next (invP_t_1_next is recomputed from P_t_1_next inside the step)
     xs_x_t_1 = x_t_1[:, 1:]
     xs_P_t_1 = P_t_1[:, :, 1:]
-    xs_invP_t_1 = invP_t_1[:, :, 1:]
 
     # We need inputs from t=T-1, T-2, ..., 0 for the lag-one cov's J_t_2
-    xs_invP_t_1_curr = invP_t_1[:, :, 1:-1]
+    # (invP_t_1_curr is likewise recomputed inside the step, from P_t_1_curr)
+    xs_P_t_1_curr = P_t_1[:, :, 1:-1]
 
     # Pad the arrays that are too short to align them for stacking
     # We need T elements for the scan (from T-1 down to 0)
-    # P_t_prev needs one pad, invP_t_1_curr needs one pad
+    # P_t_prev needs one pad, P_t_1_curr needs one pad
     q_q_pad = jnp.zeros((q, q, 1), dtype=dtype)
     P_t_prev_padded = jnp.concatenate([q_q_pad, xs_P_t_prev], axis=2)
-    invP_t_1_curr_padded = jnp.concatenate([q_q_pad, xs_invP_t_1_curr], axis=2)
+    P_t_1_curr_padded = jnp.concatenate([q_q_pad, xs_P_t_1_curr], axis=2)
 
     # Now, put them into a tuple and reverse for the backward pass
     # Transposing to (T, ...) shape for scan
@@ -351,9 +366,8 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1, invP_t_1):
         jnp.moveaxis(xs_P_t, 2, 0),
         xs_x_t_1.T,
         jnp.moveaxis(xs_P_t_1, 2, 0),
-        jnp.moveaxis(xs_invP_t_1, 2, 0),
         jnp.moveaxis(P_t_prev_padded, 2, 0),
-        jnp.moveaxis(invP_t_1_curr_padded, 2, 0),
+        jnp.moveaxis(P_t_1_curr_padded, 2, 0),
     )
     # Reverse time axis for backward pass
     xs_reversed = jax.tree.map(lambda x: jnp.flip(x, axis=0), xs)
@@ -393,7 +407,12 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     # --- 1. Compute predicted observations (y_hat) ---
     # The term Xbeta @ beta can be computed efficiently using einsum.
     # y_hat_t = Xbeta_t @ beta + H @ x_t
-    y_hat, _ = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
+    # Computed inline (mean only) rather than via _compute_predict_kernel_JAX,
+    # which also builds the (p, p, T) predictive covariance Sigma_y_hat -
+    # unused here and, for a low-rank model (p >> q), far larger than any
+    # of the (q, q, T) state arrays. That covariance is only needed by the
+    # public `predict()` path, which calls _compute_predict_kernel_JAX directly.
+    y_hat = jnp.einsum("pkt,k->pt", Xbeta, beta) + H @ x_t_slice
     # --- 2. Compute sufficient statistics (S11, S10, S00) ---
     # E[sum(x x')] = sum(E[x]E[x]' + Cov(x)) = sum(x_T x_T') + sum(P_T)
     # The sum of outer products (x @ x') can be vectorized as X @ X.T
@@ -860,11 +879,20 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
+        light=False,
     ):
+        """
+        Run the Kalman filter and smoother ( = filter + backward pass) and
+        return the smoothed results, including the sufficient statistics
+        (S11, S10, S00) needed by the EM M-step.
 
-        # run the smoother ( = filter + backward pass)
-        # x_T, P_T, P_T_1, logL, tdelta_filter, tdelta_smoother = self.smoother(y_t, yname=yname, H=H, R=R, F=F, Q=Q, x0=x0, Sigma0=Sigma0, Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names)
-        smooth_results = self.smoother(
+        This is equivalent to `smoother(...)` - kept as a distinct entry
+        point for API compatibility - and no longer recomputes S11/S10/S00/
+        y_hat a second time on top of what `smoother()` already computes.
+
+        light: forwarded to `smoother()`; see its docstring.
+        """
+        return self.smoother(
             y_t,
             yname=yname,
             H=H,
@@ -876,25 +904,8 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
+            light=light,
         )
-
-        x_T = smooth_results.x_smoothed
-        P_T = smooth_results.P_smoothed
-        P_T_1 = smooth_results.P_pred_smoothed
-
-        # compute expected values
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
-            x_T, P_T, P_T_1
-        )
-
-        # Create the results object with the expected values
-        # update the results object with the smoothed values and expected values
-        smooth_results = smooth_results.update(
-            y_hat=y_hat, S11=S11, S10=S10, S00=S00, time_expectation=tdelta_expectation
-        )
-
-        return smooth_results
-        # return y_hat, x_T, P_T, P_T_1, S11, S10, S00, logL, tdelta_filter, tdelta_smoother, tdelta_expectation
 
     @_on_device
     def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
@@ -904,8 +915,7 @@ class StateSpaceModel:
         y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
         return y_hat, Sigma_y_hat
 
-    @_on_device
-    def filter(
+    def _run_filter_kernel(
         self,
         y_t,
         yname=None,
@@ -918,12 +928,16 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
-    ) -> tuple:
+    ):
         """
-        Kalman Filter using jax.lax.scan for variable-length inputs.
+        Update parameters, validate them, and run the Kalman filter kernel.
 
-        ========= References ==========
-        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.
+        Returns the raw JAX arrays produced by `_filter_kernelJAX` (no numpy
+        conversion, no StateSpaceResults wrapping). `filter()` wraps this for
+        its own (numpy) public result; `smoother()` calls this directly and
+        feeds the arrays straight into the smoother kernel, so the (q, q, T)
+        filtered-covariance arrays never make an unnecessary device -> host
+        (numpy) -> device round trip between the two stages.
         """
         # Update parameters if provided
         self.set(
@@ -953,7 +967,7 @@ class StateSpaceModel:
         # Run the scan
         tStart = time.time()
 
-        x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL = _filter_kernelJAX(
+        x_t, P_t, K, x_t_1, P_t_1, logL = _filter_kernelJAX(
             y_t,
             self.H,
             self.R,
@@ -967,6 +981,43 @@ class StateSpaceModel:
         jax.block_until_ready(x_t)
         tDelta = time.time() - tStart
 
+        return x_t, P_t, K, x_t_1, P_t_1, logL, tDelta
+
+    @_on_device
+    def filter(
+        self,
+        y_t,
+        yname=None,
+        H=None,
+        R=None,
+        F=None,
+        Q=None,
+        x0=None,
+        Sigma0=None,
+        Xbeta=None,
+        beta=None,
+        xbeta_names=None,
+    ) -> tuple:
+        """
+        Kalman Filter using jax.lax.scan for variable-length inputs.
+
+        ========= References ==========
+        | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.
+        """
+        x_t, P_t, K, x_t_1, P_t_1, logL, tDelta = self._run_filter_kernel(
+            y_t,
+            yname=yname,
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=x0,
+            Sigma0=Sigma0,
+            Xbeta=Xbeta,
+            beta=beta,
+            xbeta_names=xbeta_names,
+        )
+
         # compute expected values (given the filterd values)
         y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
             x_t, P_t, P_t_1
@@ -979,7 +1030,6 @@ class StateSpaceModel:
             K=K,
             x_pred=x_t_1,
             P_pred=P_t_1,
-            invP_pred=invP_t_1,
             llf=logL,
             time_filter=tDelta,
             y_hat=y_hat,
@@ -990,7 +1040,7 @@ class StateSpaceModel:
         )
 
         return results
-        # return (x_t, P_t, K, x_t_1, P_t_1, invP_t_1, logL, tDelta)
+        # return (x_t, P_t, K, x_t_1, P_t_1, logL, tDelta)
 
     @_on_device
     def smoother(
@@ -1006,18 +1056,31 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
+        light=False,
     ) -> tuple:
         """
         Kalman smoother using jax.lax.scan for efficient, T-independent compilation.
 
         description: filtering and smoothing algorithm for linear state space models
 
+        light: if True, the returned StateSpaceResults omits the filter-stage
+            arrays (x_filtered, P_filtered, K, x_pred, P_pred) instead of
+            keeping numpy copies of them alive for the whole lifetime of the
+            results object. They are only used internally by this method
+            (as smoother-kernel inputs); once the smoothed states are
+            computed they serve no further purpose for callers - such as the
+            EM loop - that never read them back. Default False preserves the
+            previous behaviour for callers (e.g. `model.smoother(y)` used
+            directly) that do want to inspect filtered vs. smoothed state.
+
         ========= References ==========
         | 1. Durbin, J., & Koopman, S. J. (2012). Time Series Analysis by State Space Methods. Oxford University Press.
         """
 
-        # First, run the filter to get necessary inputs for the smoother
-        res_filter = self.filter(
+        # Run the filter kernel directly (bypassing `filter()`'s numpy-
+        # converting StateSpaceResults wrapper) so the big (q, q, T) arrays
+        # stay on-device until the smoother kernel has consumed them.
+        x_t, P_t, K, x_t_1, P_t_1, logL, tDelta_filter = self._run_filter_kernel(
             y_t,
             yname=yname,
             H=H,
@@ -1028,6 +1091,7 @@ class StateSpaceModel:
             Sigma0=Sigma0,
             Xbeta=Xbeta,
             beta=beta,
+            xbeta_names=xbeta_names,
         )
 
         # Now run the smoother
@@ -1035,12 +1099,11 @@ class StateSpaceModel:
         x_T, P_T, P_T_1 = _smoother_kernelJAX(
             self.H,
             self.F,
-            res_filter.x_filtered,
-            res_filter.P_filtered,
-            res_filter.K,
-            res_filter.x_pred,
-            res_filter.P_pred,
-            res_filter.invP_pred,
+            x_t,
+            P_t,
+            K,
+            x_t_1,
+            P_t_1,
         )
 
         jax.block_until_ready(x_T)
@@ -1051,22 +1114,27 @@ class StateSpaceModel:
             x_T, P_T, P_T_1
         )
 
-        # update the results object with the smoothed values and expected values
-        res_smooth = res_filter.update(
+        results = StateSpaceResults(
+            model=self,
+            x_filtered=None if light else x_t,
+            P_filtered=None if light else P_t,
+            K=None if light else K,
+            x_pred=None if light else x_t_1,
+            P_pred=None if light else P_t_1,
             x_smoothed=x_T,
             P_smoothed=P_T,
             P_pred_smoothed=P_T_1,
+            llf=logL,
+            time_filter=tDelta_filter,
+            time_smoother=td_smoother,
             y_hat=y_hat,
             S11=S11,
             S10=S10,
             S00=S00,
-            time_smoother=td_smoother,
             time_expectation=tdelta_expectation,
         )
 
-        # return (x_T, P_T, P_T_1, res_filter.llf, res_filter.time_filter, td_smoother)
-
-        return res_smooth
+        return results
 
     def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
 
