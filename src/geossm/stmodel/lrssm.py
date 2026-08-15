@@ -619,20 +619,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
         # Compute the maginal precision matrix
-        invQ = []
-        for fcov in self.cov_function:
-            invQi = fcov.precision()
-
-            # index of the inner points (i.e. the points of the latent domain)
-            inx = fcov.fem_solver.inner
-            Q_11 = invQi[inx, :][:, inx]
-            Q_12 = invQi[inx, :][:, ~inx]
-            Q_22 = invQi[~inx, :][:, ~inx]
-
-            # Marginal precision matrix of the inner points (i.e. the points of the latent domain)
-            Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
-
-            invQ.append(Q_mar)
+        invQ = [
+            self._schur_marginal_precision(fcov.precision(), fcov.fem_solver.inner)
+            for fcov in self.cov_function
+        ]
 
         # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
         Q = block_diag(
@@ -863,20 +853,10 @@ class LRStateSpaceModel(StateSpaceModel):
                 est_params.s2e.value, est_params.f.value, pdim, qdim)
 
             # Compute the maginal precision matrix
-            invQ = []
-            for fcov in self.cov_function:
-                invQi = fcov.precision()
-
-                # index of the inner points (i.e. the points of the latent domain)
-                inx = fcov.fem_solver.inner
-                Q_11 = invQi[inx, :][:, inx]
-                Q_12 = invQi[inx, :][:, ~inx]
-                Q_22 = invQi[~inx, :][:, ~inx]
-
-                # Marginal precision matrix of the inner points (i.e. the points of the latent domain)
-                Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
-
-                invQ.append(Q_mar)
+            invQ = [
+                self._schur_marginal_precision(fcov.precision(), fcov.fem_solver.inner)
+                for fcov in self.cov_function
+            ]
 
             # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
             Q = block_diag(
@@ -1154,6 +1134,32 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return update_params, opt.success, tdelta
 
+    @staticmethod
+    def _schur_marginal_precision(invQi, inner_mask):
+        """
+        Marginal precision matrix of the "inner" (latent-domain) points,
+        Q_11 - Q_12 @ inv(Q_22) @ Q_12.T, via the Schur complement of the
+        full SPDE precision matrix `invQi` with respect to the "outer"
+        (boundary) points.
+
+        Computes the middle term as `solve(Q_22, Q_12.T)` instead of
+        `inv(Q_22) @ Q_12.T`: solving directly for the (n_outer, n_inner)
+        right-hand side `Q_12.T` avoids the wasted work of inverting all of
+        Q_22 (an (n_outer, n_outer) matrix) when only its action on Q_12.T
+        is ever used, and is the more numerically stable formulation.
+        Shared by `fit()`, `sim()`, and `_minf()`, which otherwise each
+        repeated this block with `inv()`.
+        """
+        inx = inner_mask
+        Q_11 = invQi[inx, :][:, inx]
+        Q_12 = invQi[inx, :][:, ~inx]
+        Q_22 = invQi[~inx, :][:, ~inx]
+
+        Q_22_dense = Q_22.toarray() if sp.issparse(Q_22) else Q_22
+        Q_12_dense = Q_12.toarray() if sp.issparse(Q_12) else Q_12
+
+        return Q_11 - Q_12 @ np.linalg.solve(Q_22_dense, Q_12_dense.T)
+
     # %[Utils] Argmin problem, JAX  (M-step, rescale)
     def _minf(self, params, est_covList, T, Omega):
         ks = np.exp(params)  # Stability, add small eps to avoid zeros
@@ -1162,20 +1168,10 @@ class LRStateSpaceModel(StateSpaceModel):
         # invQ = [fcov.precision(rescale=ki) ]
 
         # Compute the maginal precision matrix
-        invQ = []
-        for fcov, ki in zip(est_covList, ks):
-            invQi = fcov.precision(rescale=ki)
-
-            # index of the inner points (i.e. the points of the latent domain)
-            inx = fcov.fem_solver.inner
-            Q_11 = invQi[inx, :][:, inx]
-            Q_12 = invQi[inx, :][:, ~inx]
-            Q_22 = invQi[~inx, :][:, ~inx]
-
-            # Marginal precision matrix of the inner points (i.e. the points of the latent domain)
-            Q_mar = Q_11 - Q_12 @ np.linalg.inv(Q_22.toarray()) @ Q_12.T
-
-            invQ.append(Q_mar)
+        invQ = [
+            self._schur_marginal_precision(fcov.precision(rescale=ki), fcov.fem_solver.inner)
+            for fcov, ki in zip(est_covList, ks)
+        ]
 
         # invQ = sp.block_diag(invQ) # dense matrix, not sparse
         invQ = scyp_block_diag(*invQ)
@@ -1295,7 +1291,12 @@ class LRStateSpaceModel(StateSpaceModel):
             Q_12 = Qperm[:n_inner, n_inner:]
             Q_22 = Qperm[n_inner:, n_inner:]
                
-            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, jnp.eye(Q_22.shape[0], dtype=Q_22.dtype)) @ Q_12.T
+            # Same Schur-complement idea as `_schur_marginal_precision` (used
+            # by the non-JAX fit()/sim()/_minf() paths): solve directly for
+            # Q_22^{-1} @ Q_12.T instead of inverting all of Q_22 via a
+            # solve against the identity, which is exactly as expensive as
+            # an explicit inverse and wastes the columns never used below.
+            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
             invQ_blocks.append(Q_mar)
 
         return jax.scipy.linalg.block_diag(*invQ_blocks)
