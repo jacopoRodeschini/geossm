@@ -86,7 +86,7 @@ model.shape
 # set model attribute
 F = 0.8 * np.eye(q)
 model.set(F=F)
-print(model.F.diagonal())
+print(model.F)  # F is stored as its diagonal (1D) directly
 print(model.F.device)
 # %% Simulate the model
 
