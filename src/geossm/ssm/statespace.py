@@ -139,7 +139,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     Iq = jnp.eye(q, dtype=dtype)
     R_diag = R.diagonal()
     invR_diag = jnp.reciprocal(R_diag)
-    invR = jnp.diag(invR_diag)
     H_dense = H.astype(dtype)
     f_diag = jnp.diag(F)
     FF = jnp.outer(f_diag, f_diag)
@@ -179,16 +178,27 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
 
-        M = invP_pred + Hna_dense.T @ (invR @ Hna_dense)
-        
+        # HtinvR = H.T @ invR, computed via elementwise scaling (invR is
+        # diagonal) instead of a dense (p, p) invR matrix. This keeps every
+        # intermediate in (q, p) or (q, q) space -- important because p
+        # (observed locations) is exactly the dimension this low-rank model
+        # is meant to scale in, while q (latent rank) stays small.
+        HtinvR = Hna_dense.T * invR_diag[None, :]  # (q, p)
+        HtinvRH = HtinvR @ Hna_dense  # (q, q) == H.T @ invR @ H
+
+        M = invP_pred + HtinvRH
+
         L_M = jnp.linalg.cholesky(M + 1e-6 * Iq)  # Add small jitter for numerical stability
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
-        
-        invSigmaE = invR - invR @ Hna_dense @ invM @ Hna_dense.T @ invR
 
         # KALMAN GAIN
-        K = P_pred @ Hna_dense.T @ invSigmaE
+        # K = P_pred @ H.T @ invSigmaE, where (Woodbury identity)
+        #   invSigmaE = invR - invR @ H @ invM @ H.T @ invR
+        # Expanded and regrouped in terms of HtinvR/HtinvRH so the dense
+        # (p, p) invSigmaE is never formed:
+        #   K = P_pred @ (HtinvR - HtinvRH @ invM @ HtinvR)
+        K = P_pred @ (HtinvR - HtinvRH @ (invM @ HtinvR))
 
         # UPDATE STATE
         x_upd = x_pred + K @ e
@@ -204,12 +214,17 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         #     + jnp.linalg.slogdet(P_pred)[1]
         #     + jnp.sum(jnp.log(R_diag))
         # )
-        
+
         logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
         logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
         logdetSigmaE = logdet_M + logdet_Ppred + jnp.sum(jnp.log(R_diag))
 
-        logL_accum += logdetSigmaE + e.T @ (invSigmaE @ e)
+        # e.T @ invSigmaE @ e, expanded the same way as K above so this is
+        # O(p*q) instead of O(p^2) via an explicit invSigmaE.
+        v = HtinvR @ e
+        quad_e = jnp.sum(invR_diag * e * e) - v @ (invM @ v)
+
+        logL_accum += logdetSigmaE + quad_e
 
         # 2. Pack carry for next step and outputs for this step
         next_carry = (x_upd, P_upd, logL_accum, K)
