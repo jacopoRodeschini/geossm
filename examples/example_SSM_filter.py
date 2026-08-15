@@ -226,7 +226,6 @@ print("Filtered state covariance P_t:", results.P_filtered.shape)
 print("Kalman gain K:", results.K.shape)
 print("Predicted state x_t_1:", results.x_pred.shape)
 print("Predicted state covariance P_t_1:", results.P_pred.shape)
-print("Predicted state invP_t_1:", results.invP_pred.shape)
 print("Log-likelihood logL:", results.llf)
 print("Computation time tDelta (s):", results.time_filter)
 

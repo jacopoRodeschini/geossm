@@ -74,82 +74,82 @@ def build_dataframe(n, T=50):
 
 
 # %% one simulation comparison 
-# dims = {"n": 200, "T": 1000}
+dims = {"n": 200, "T": 1000}
 
-# # create the dataframe with the specified dimensions
-# gdf, points = build_dataframe(dims["n"], T=dims["T"])
+# create the dataframe with the specified dimensions
+gdf, points = build_dataframe(dims["n"], T=dims["T"])
 
-# # Create the mesh 
-# domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+# Create the mesh 
+domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
-# mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
-#                       lowrank=0.5, density_neighbors=5)
+mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
+                      lowrank=0.5, density_neighbors=5)
 
-# print(mesh_io)
+print(mesh_io)
 
-# params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
+params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
-# # Create the covariance function used to simulate the "truth"
-# cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-# cov_fun = cov_fun.setup(mesh_io)
+# Create the covariance function used to simulate the "truth"
+cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
+cov_fun = cov_fun.setup(mesh_io)
 
-# # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-# # ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
-# # cov_fun.fem_solver.plot_mesh(ax=ax)
+# fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+# ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
+# cov_fun.fem_solver.plot_mesh(ax=ax)
 
-# # Build a dedicated model to simulate the "truth" data and set up its covariance
-# sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
-# sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+# Build a dedicated model to simulate the "truth" data and set up its covariance
+sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
+sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
 
-# # Print the var. statistics (verbose = True)
-# y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=True, verbose=True)
+# Print the var. statistics (verbose = True)
+y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=True, verbose=True)
 
-# # 0) Create the geopandas dataframe with the simulated data
-# gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
+# 0) Create the geopandas dataframe with the simulated data
+gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-# # 1) Create the covariance matrix 
-# est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-# est_cov_fun = est_cov_fun.setup(mesh_io)
+# 1) Create the covariance matrix 
+est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+est_cov_fun = est_cov_fun.setup(mesh_io)
 
-# # 2) Create the model
-# backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
-
-
-# opt = FitOptions()
-# opt.max_iter = 50
-# opt.tol_relat = 1e-3
-
-# records = []
-# for backend in backends:
-#     model = lrssm(
-#         df=gdf, 
-#         formulas=["y_sim ~ 1"], 
-#         domain=[domain], 
-#         verbose=False, backend=backend, dtype=jnp.float32)
+# 2) Create the model
+backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
 
 
-#     # 3) Set up the model cov. 
-#     model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
-#     # print(model)
+opt = FitOptions()
+opt.max_iter = 50
+opt.tol_relat = 1e-3
 
-#     # 4) fit the model
-#     results = model.fit(options=opt)
+records = []
+for backend in backends:
+    model = lrssm(
+        df=gdf, 
+        formulas=["y_sim ~ 1"], 
+        domain=[domain], 
+        verbose=False, backend=backend, dtype=jnp.float32)
 
-#     records.append(
-#         {
-#             "backend": backend,
-#             "tsim_estep": results.runtime_tot_estep,
-#             "tsim_mstep": results.runtime_tot_mstep,
-#             "mse": results.mse(), 
-#             'llf': results.llf,
-#             'params': results.params,
-#     }
-#     )
 
-#     print(
-#         f"backend={'gpu':>3s}, mse: {results.mse():.4f} - "
-#         f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
-#     )
+    # 3) Set up the model cov. 
+    model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+    # print(model)
+
+    # 4) fit the model
+    results = model.fit(options=opt)
+
+    records.append(
+        {
+            "backend": backend,
+            "tsim_estep": results.runtime_tot_estep,
+            "tsim_mstep": results.runtime_tot_mstep,
+            "mse": results.mse(), 
+            'llf': results.llf,
+            'params': results.params,
+    }
+    )
+
+    print(
+        f"backend={'gpu':>3s}, mse: {results.mse():.4f} - "
+        f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
+    )
 
 # %% Comparison between CPU and GPU backends for the LRSSM model fitting
 
@@ -160,8 +160,8 @@ if __name__ == "__main__":
     n_base, T_base = 500, 1000
 
     sweeps = {
-        "T": {"values": [100, 200, 500, 1000, 2000], "fixed": {"n": n_base}},
-        "n": {"values": [50, 100, 200, 500, 1000, 5000], "fixed": {"T": T_base}},
+        "T": {"values": [100, 200, 500, 1000, 2000, 5000], "fixed": {"n": n_base}},
+        "n": {"values": [50, 100, 200, 500, 1000, 2000], "fixed": {"T": T_base}},
     }
 
     # Only benchmark backends that are actually available on this machine.
@@ -192,7 +192,7 @@ if __name__ == "__main__":
 
             # Create the mesh 
             mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1,
-                                    lowrank=0.75, density_neighbors=5)
+                                    lowrank=1, density_neighbors=5)
             # print(mesh_io)
 
             params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
