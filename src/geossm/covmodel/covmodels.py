@@ -13,9 +13,8 @@ import scipy as sc
 import gstools as gs
 import meshio
 from scipy.spatial.distance import cdist
-from shapely.geometry import Point, Polygon
+from shapely.geometry import MultiPoint, Point, Polygon
 from gstools.covmodel import Matern
-from scipy.spatial import ConvexHull
 from statsmodels.iolib.summary import Summary
 from datetime import datetime, timezone
 import time
@@ -105,9 +104,58 @@ def meshio_to_mfem_mesh(meshio_mesh):
     return mfem_mesh
 
 
+def _validate_domain(domain):
+    """
+    Validate the ``domain`` argument shared by :class:`FEMSolver` and
+    :class:`spdeAppoxCov`.
+
+    ``domain`` is a sequence of shapely ``Polygon`` objects, one per region
+    of scientific interest (e.g. one polygon per landmass for a
+    multi-polygon country such as Italy: Sicily, Sardinia, mainland). It is
+    used only to classify *mesh* vertices as inner/outer (see
+    ``FEMSolver.isinner``) -- a vertex is inner if it is covered by *any*
+    single polygon in ``domain``, not by their convex hull.
+
+    ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
+    :math:`\\Omega` is implicitly defined by the mesh handed to
+    ``FEMSolver``/``spdeAppoxCov.setup()`` and is typically built by the
+    caller as the convex hull of the union of the ``domain`` polygons
+    (extended by an offset to limit boundary effects). Neither class
+    computes or checks :math:`\\Omega` against ``domain`` -- the mesh is
+    trusted to already cover it.
+    """
+    if not isinstance(domain, (list, tuple)):
+        raise TypeError("domain must be a list of Polygon objects")
+    if len(domain) == 0:
+        raise ValueError("domain must contain at least one Polygon")
+    for poly in domain:
+        if not isinstance(poly, Polygon):
+            raise ValueError(
+                "Each domain element must be a shapely Polygon, "
+                f"got {type(poly).__name__}"
+            )
+    return domain
+
+
 # % FEM solver class
 class FEMSolver:
     def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
+        """
+        Parameters
+        ----------
+        meshio_obj : meshio.Mesh
+            The FEM mesh, covering the full computational domain
+            :math:`\\Omega` (e.g. the convex hull of the union of `domain`).
+        domain : list or tuple of shapely.geometry.Polygon, optional
+            Region(s) of scientific interest, used only to classify mesh
+            vertices as inner/outer (`isinner`); see `_validate_domain` for
+            the full contract. Defaults to the convex hull of the mesh
+            vertices, i.e. every vertex is treated as inner.
+        verbose : bool, optional
+            Whether to log progress messages.
+        stats : bool, optional
+            Whether to compute mesh quality statistics (angles, areas).
+        """
 
         # Validate inputs
         mesh = None
@@ -133,18 +181,14 @@ class FEMSolver:
             )
 
         if domain is not None:
-            if not isinstance(domain, (list, tuple)):
-                raise TypeError("domain must be a list of Polygon objects")
-            for poly in domain:
-                if not isinstance(poly, Polygon):
-                    raise ValueError(
-                        "Each domain element must be a shapely Polygon, "
-                        f"got {type(poly).__name__}"
-                    )
+            domain = _validate_domain(domain)
 
         # Store mesh
         self._mesh = mesh
-        self._domain = domain if domain is not None else ConvexHull(self.vertex[:, :2])
+
+        # Fall back to the convex hull of the mesh vertices so every vertex
+        # is treated as inner (no marginalisation) when no domain is given.
+        self._domain = domain if domain is not None else (MultiPoint(self.vertex[:, :2]).convex_hull,)
 
         # Compute the stats associate with the mesh (angles and areas of the triangles)
         if stats == True:
@@ -213,7 +257,16 @@ class FEMSolver:
             raise RuntimeError(f"Failed to build finite element space: {str(e)}")
 
     def isinner(self, points=None):
-        """Classify vertices as interior or boundary based on domain."""
+        """
+        Classify vertices as inner or outer with respect to `domain`.
+
+        A point is inner if it is covered by *any single* polygon in
+        `domain` -- each polygon is tested on its own (not on the convex
+        hull of their union), so for a multi-polygon domain (e.g. Sicily,
+        Sardinia, mainland Italy) a mesh vertex sitting between two
+        landmasses, inside their shared convex hull but outside every
+        individual polygon, is classified as outer.
+        """
         # Use provided domain polygons
         if points is not None:
             phy_points = np.asarray(points, dtype=np.float64)
@@ -894,25 +947,25 @@ class spdeAppoxCov(Matern):
     def __init__(
         self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
     ):
+        """
+        Parameters
+        ----------
+        domain : list or tuple of shapely.geometry.Polygon
+            Region(s) of scientific interest, e.g. one polygon per landmass
+            for a multi-polygon country (Sicily, Sardinia, mainland Italy).
+            Forwarded as-is to `FEMSolver` on `setup()`, where it is used
+            only to classify mesh vertices as inner/outer -- see
+            `_validate_domain` for the full contract, including how it
+            differs from the FEM computational domain :math:`\\Omega`
+            (implicitly given by the mesh passed to `setup()`).
+        latlon, geo_scale, nu, var, rescale : see `gstools.covmodel.Matern`.
+        verbose : bool, optional
+            Whether to log progress messages.
+        """
 
-        # update the geo matern parameter
-        # self._nu = nu         # smoothness
-        # self._s2 = s2         # Marginal vari
-        # already store inside the matern superclass class
-        # self.rescale = rescale  # Rescale paramter
-        # self.nu = nu
-        # self.s2 = s2
-        # domain = list of shapely polygon that define the inner area (or multipolygon)
-
-        # list of the domain
-        # Validate domain
+        # Validate domain (same contract as FEMSolver, see _validate_domain)
         self.verbose = verbose
-        if not isinstance(domain, (list, tuple)):
-            raise TypeError("domain must be a list of Polygon objects")
-        if len(domain) == 0:
-            raise ValueError("domain must contain at least one Polygon")
-
-        self._domain = domain
+        self._domain = _validate_domain(domain)
         self._ndomain = len(domain)
         self._log(f"Validated domain: {self._ndomain} polygon(s).")
 
@@ -1084,7 +1137,12 @@ class spdeAppoxCov(Matern):
 
     @property
     def domain(self):
-        return self._domain
+        """
+        Region(s) of scientific interest (see `_validate_domain`). Once
+        `setup()` has been called, delegates to `fem_solver.domain` so the
+        FEM solver is the single source of truth.
+        """
+        return self._fem_solver.domain if self._fem_solver is not None else self._domain
 
 
     def generate_summary(self):
