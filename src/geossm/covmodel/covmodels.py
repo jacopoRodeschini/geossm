@@ -13,7 +13,8 @@ import scipy as sc
 import gstools as gs
 import meshio
 from scipy.spatial.distance import cdist
-from shapely.geometry import MultiPoint, Point, Polygon
+from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 from gstools.covmodel import Matern
 from statsmodels.iolib.summary import Summary
 from datetime import datetime, timezone
@@ -106,35 +107,61 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
 def _validate_domain(domain):
     """
-    Validate the ``domain`` argument shared by :class:`FEMSolver` and
-    :class:`spdeAppoxCov`.
+    Validate and normalize the ``domain`` argument shared by
+    :class:`FEMSolver` and :class:`spdeAppoxCov`.
 
-    ``domain`` is a sequence of shapely ``Polygon`` objects, one per region
-    of scientific interest (e.g. one polygon per landmass for a
-    multi-polygon country such as Italy: Sicily, Sardinia, mainland). It is
-    used only to classify *mesh* vertices as inner/outer (see
+    ``domain`` describes the region(s) of scientific interest, one polygon
+    per region (e.g. one polygon per landmass for a multi-polygon country
+    such as Italy: Sicily, Sardinia, mainland). It accepts a single shapely
+    ``Polygon``, a single ``MultiPolygon``, or a list/tuple mixing either --
+    any ``MultiPolygon`` is expanded into its constituent polygons, so the
+    return value is always a flat tuple of ``Polygon`` objects.
+
+    ``domain`` is used only to classify *mesh* vertices as inner/outer (see
     ``FEMSolver.isinner``) -- a vertex is inner if it is covered by *any*
     single polygon in ``domain``, not by their convex hull.
 
     ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
     :math:`\\Omega` is implicitly defined by the mesh handed to
-    ``FEMSolver``/``spdeAppoxCov.setup()`` and is typically built by the
-    caller as the convex hull of the union of the ``domain`` polygons
-    (extended by an offset to limit boundary effects). Neither class
-    computes or checks :math:`\\Omega` against ``domain`` -- the mesh is
-    trusted to already cover it.
+    ``FEMSolver``/``spdeAppoxCov.setup()``. A reasonable default choice is
+    the convex hull of the union of the ``domain`` polygons (extended by an
+    offset to limit boundary effects), computed by ``_domain_hull(domain)``
+    and exposed as the ``domain_hull`` property on both classes. Neither
+    class enforces that the mesh matches this choice -- use
+    ``FEMSolver.covers_domain()`` to check.
     """
-    if not isinstance(domain, (list, tuple)):
-        raise TypeError("domain must be a list of Polygon objects")
-    if len(domain) == 0:
-        raise ValueError("domain must contain at least one Polygon")
+    if isinstance(domain, (Polygon, MultiPolygon)):
+        domain = [domain]
+    elif not isinstance(domain, (list, tuple)):
+        raise TypeError(
+            "domain must be a shapely Polygon/MultiPolygon, or a list/tuple of them"
+        )
+
+    polygons = []
     for poly in domain:
-        if not isinstance(poly, Polygon):
+        if isinstance(poly, MultiPolygon):
+            polygons.extend(poly.geoms)
+        elif isinstance(poly, Polygon):
+            polygons.append(poly)
+        else:
             raise ValueError(
-                "Each domain element must be a shapely Polygon, "
+                "Each domain element must be a shapely Polygon or MultiPolygon, "
                 f"got {type(poly).__name__}"
             )
-    return domain
+
+    if len(polygons) == 0:
+        raise ValueError("domain must contain at least one Polygon")
+
+    return tuple(polygons)
+
+
+def _domain_hull(domain):
+    """
+    Convex hull of the union of the ``domain`` polygons -- a reasonable
+    default choice of FEM computational domain :math:`\\Omega`, e.g. to pass
+    as ``boundary`` to ``buildMesh2d``. See ``_validate_domain``.
+    """
+    return unary_union(domain).convex_hull
 
 
 # % FEM solver class
@@ -145,8 +172,10 @@ class FEMSolver:
         ----------
         meshio_obj : meshio.Mesh
             The FEM mesh, covering the full computational domain
-            :math:`\\Omega` (e.g. the convex hull of the union of `domain`).
-        domain : list or tuple of shapely.geometry.Polygon, optional
+            :math:`\\Omega` (e.g. `domain_hull`, the convex hull of the
+            union of `domain`).
+        domain : shapely.geometry.Polygon or MultiPolygon, or a list/tuple
+            of them, optional
             Region(s) of scientific interest, used only to classify mesh
             vertices as inner/outer (`isinner`); see `_validate_domain` for
             the full contract. Defaults to the convex hull of the mesh
@@ -225,7 +254,18 @@ class FEMSolver:
 
         # Classify vertices as inner or outer (boolean array)
         self._inner = self.isinner()
-        
+
+        # Warn if the mesh's convex hull does not fully cover the domain's
+        # (see `covers_domain`); this signals outer vertices may be missing
+        # near the region of interest, biasing the Neumann boundary approx.
+        if not self.covers_domain():
+            self._log(
+                "Mesh does not fully cover convex_hull(unary_union(domain)) "
+                "(see `covers_domain()`/`domain_hull`). Outer vertices needed "
+                "to push boundary effects away from the domain of interest "
+                "may be missing; consider rebuilding the mesh over `domain_hull`."
+            )
+
         # compute matrices now
         self._log("Computing mass and stiffness matrices...")
         self._mass, self._stiff = self._compute_mass_stiff()
@@ -607,6 +647,23 @@ class FEMSolver:
     def domain(self):
         return self._domain
 
+    @property
+    def domain_hull(self):
+        """Convex hull of the union of `domain` -- see `_domain_hull`."""
+        return _domain_hull(self._domain)
+
+    def covers_domain(self):
+        """
+        Check that the mesh covers the FEM computational domain Ω.
+
+        Simple necessary (not sufficient) check: whether the convex hull of
+        the mesh vertices covers `domain_hull`, the convex hull of the union
+        of `domain`. Does not check the mesh's actual (possibly non-convex)
+        boundary shape, only its convex extent.
+        """
+        mesh_hull = MultiPoint(self.vertex[:, :2]).convex_hull
+        return mesh_hull.covers(self.domain_hull)
+
     # Property for number of boundary elements (mesh.GetNBE())
     @property
     def nbElements(self):
@@ -950,14 +1007,17 @@ class spdeAppoxCov(Matern):
         """
         Parameters
         ----------
-        domain : list or tuple of shapely.geometry.Polygon
-            Region(s) of scientific interest, e.g. one polygon per landmass
-            for a multi-polygon country (Sicily, Sardinia, mainland Italy).
-            Forwarded as-is to `FEMSolver` on `setup()`, where it is used
-            only to classify mesh vertices as inner/outer -- see
-            `_validate_domain` for the full contract, including how it
-            differs from the FEM computational domain :math:`\\Omega`
-            (implicitly given by the mesh passed to `setup()`).
+        domain : shapely.geometry.Polygon or MultiPolygon, or a list/tuple
+            of them
+            Region(s) of scientific interest, e.g. one polygon (or a single
+            MultiPolygon) per landmass for a multi-polygon country (Sicily,
+            Sardinia, mainland Italy). Any MultiPolygon is expanded into its
+            constituent polygons. Forwarded to `FEMSolver` on `setup()`,
+            where it is used only to classify mesh vertices as inner/outer
+            -- see `_validate_domain` for the full contract, including how
+            it differs from the FEM computational domain :math:`\\Omega`
+            (implicitly given by the mesh passed to `setup()`; see
+            `domain_hull` for a reasonable default choice).
         latlon, geo_scale, nu, var, rescale : see `gstools.covmodel.Matern`.
         verbose : bool, optional
             Whether to log progress messages.
@@ -966,7 +1026,7 @@ class spdeAppoxCov(Matern):
         # Validate domain (same contract as FEMSolver, see _validate_domain)
         self.verbose = verbose
         self._domain = _validate_domain(domain)
-        self._ndomain = len(domain)
+        self._ndomain = len(self._domain)
         self._log(f"Validated domain: {self._ndomain} polygon(s).")
 
         # Mesh storage
@@ -1143,6 +1203,22 @@ class spdeAppoxCov(Matern):
         FEM solver is the single source of truth.
         """
         return self._fem_solver.domain if self._fem_solver is not None else self._domain
+
+    @property
+    def domain_hull(self):
+        """
+        Convex hull of the union of `domain` -- a reasonable default choice
+        of FEM computational domain Ω, e.g. to pass as `boundary` to
+        `buildMesh2d` before calling `setup()`. See `_domain_hull`.
+        """
+        return _domain_hull(self.domain)
+
+    def covers_domain(self):
+        """
+        Check that the mesh (set via `setup()`) covers `domain_hull`. See
+        `FEMSolver.covers_domain`.
+        """
+        return self.fem_solver.covers_domain()
 
 
     def generate_summary(self):
