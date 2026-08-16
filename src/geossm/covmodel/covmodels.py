@@ -16,6 +16,7 @@ from scipy.spatial.distance import cdist
 from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon
 from shapely.ops import unary_union
 from gstools.covmodel import Matern
+from gstools.tools.geometric import latlon2pos, chordal_to_great_circle
 from statsmodels.iolib.summary import Summary
 from datetime import datetime, timezone
 import time
@@ -980,19 +981,33 @@ class FEMSolver:
 class spdeAppoxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
-     Notes
-     -----
-     This model is given by the following correlation function
+    Solves the SPDE :math:`(\kappa^2 - \Delta)^{\alpha/2} x = W` by a finite
+    element (FEM) discretisation with Neumann boundary conditions on a mesh
+    covering the domain (see `setup`), giving the sparse precision matrix
+    `precision()` -- optionally marginalised onto the "inner" vertices of
+    `domain` via `precision(marginal=True)`, which is what other models
+    (e.g. `LRStateSpaceModel`) should generally use.
 
-     Using Neumann boundary conditions
+    Notes
+    -----
+    `spdeAppoxCov` extends `gstools.covmodel.Matern`, but only `precision()`
+    (and `emp_range`, `sigma2k`, `distance()`) are re-defined in terms of the
+    FEM discretisation. The methods inherited unchanged from `Matern` --
+    `variogram`, `covariance`, `correlation`, `spectrum`, `spectral_density`,
+    and the `*_yadrenko` variants -- describe the *nominal*, stationary,
+    infinite-domain Matérn process that this SPDE approximates, using
+    `rescale` as :math:`\kappa`. They are exact only in the far interior of
+    the mesh, away from the boundary; they do **not** reflect the finite
+    mesh's boundary effects, nor the Schur-complement marginalisation used
+    by `precision(marginal=True)`. Use them for diagnostics/plotting
+    against the nominal target kernel, not as the exact model -- for that,
+    use `precision()`/`precision(marginal=True)`.
 
-     References
+    References
     ----------
     .. [Rasmussen2003] Rasmussen, C. E.,
            "Gaussian processes in machine learning." Summer school on
            machine learning. Springer, Berlin, Heidelberg, (2003)
-
-
     """
 
     def __init__(
@@ -1159,19 +1174,93 @@ class spdeAppoxCov(Matern):
 
         return Q
 
-    def precision(self, rescale=None):
+    def precision(self, rescale=None, marginal=False):
         """
-        Compute the precision matrix (Q, sparse) for spatial process z with marginal variance
-        sigma2_process
+        Compute the precision matrix (Q) for the spatial process z with
+        marginal variance sigma2_process.
 
+        Parameters
+        ----------
+        rescale : float, optional
+            If given, updates `self.rescale` (the SPDE kappa) before
+            computing the precision matrix.
+        marginal : bool, optional
+            If True, return the precision matrix marginalised (via the
+            Schur complement, see `_schur_marginal_precision`) onto the
+            `domain` inner vertices only, integrating out the outer
+            (boundary) vertices -- i.e. the actual precision of the latent
+            field once the mesh's boundary effects have been removed, as
+            used e.g. by `LRStateSpaceModel`. Default: False, i.e. the full
+            FEM precision matrix over every mesh vertex (inner and outer).
+
+        Returns
+        -------
+        scipy.sparse matrix if `marginal=False`, else a dense numpy array
+            (the Schur complement is generally dense even though `Q` is
+            sparse).
         """
+        Q = self._compute_precision_spde(rescale)
+        if not marginal:
+            return Q
+        return self._schur_marginal_precision(Q, self.fem_solver.inner)
 
-        return self._compute_precision_spde(rescale)
+    @staticmethod
+    def _schur_marginal_precision(Q, inner_mask):
+        """
+        Marginal precision matrix of the "inner" (domain-of-interest)
+        vertices, `Q_11 - Q_12 @ inv(Q_22) @ Q_12.T`, via the Schur
+        complement of the full SPDE precision matrix `Q` with respect to
+        the "outer" (boundary) vertices.
+
+        Computes the middle term as `solve(Q_22, Q_12.T)` instead of
+        `inv(Q_22) @ Q_12.T`: solving directly for the (n_outer, n_inner)
+        right-hand side `Q_12.T` avoids the wasted work of inverting all of
+        Q_22 (an (n_outer, n_outer) matrix) when only its action on Q_12.T
+        is ever used, and is the more numerically stable formulation.
+        """
+        inx = np.asarray(inner_mask, dtype=bool)
+        Q_11 = Q[inx, :][:, inx]
+        Q_12 = Q[inx, :][:, ~inx]
+        Q_22 = Q[~inx, :][:, ~inx]
+
+        Q_22_dense = Q_22.toarray() if sp.issparse(Q_22) else Q_22
+        Q_12_dense = Q_12.toarray() if sp.issparse(Q_12) else Q_12
+
+        return Q_11 - Q_12 @ np.linalg.solve(Q_22_dense, Q_12_dense.T)
 
     def distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """
+        Pairwise distance between mesh vertices (or `points` and mesh
+        vertices).
 
-        return self._fem_solver.distance(points=points)
+        Honors `latlon`/`geo_scale` the same way the parent `Matern` model
+        does: great-circle distance (in `geo_scale` units) when
+        `latlon=True`, flat Euclidean distance on the raw mesh/point
+        coordinates otherwise.
+
+        Note this only affects distance-based diagnostics (e.g. comparing
+        against `variogram`/`covariance`, see the class Notes) -- the FEM
+        stiffness/mass matrices behind `precision()` are always assembled
+        directly on the raw mesh coordinates with a flat metric, regardless
+        of `latlon`. A raw lon/lat mesh under `latlon=True` therefore still
+        carries anisotropic distortion (up to ~cos(latitude)) in the FEM
+        operator that this distance correction does not fix; for a
+        geodesically accurate SPDE solve, build the mesh in a projected
+        (e.g. UTM/km) CRS instead.
+        """
+        if not self.latlon:
+            return self._fem_solver.distance(points=points)
+
+        vertex = self._fem_solver.vertex[:, :2]
+        query = vertex if points is None else np.asarray(points, dtype=np.float64)[:, :2]
+
+        # lon/lat (degrees) -> chordal 3D positions on a `geo_scale`-radius
+        # sphere -> honest great-circle distance, matching how the parent
+        # Matern's vario_yadrenko/cov_yadrenko/cor_yadrenko interpret `r`.
+        pos_vertex = latlon2pos([vertex[:, 1], vertex[:, 0]], radius=self.geo_scale)
+        pos_query = latlon2pos([query[:, 1], query[:, 0]], radius=self.geo_scale)
+        chordal = cdist(pos_query.T, pos_vertex.T)
+        return chordal_to_great_circle(chordal, radius=self.geo_scale)
 
     # property:: spatial process
     @property
