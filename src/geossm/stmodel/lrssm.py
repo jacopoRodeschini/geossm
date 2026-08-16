@@ -804,6 +804,14 @@ class LRStateSpaceModel(StateSpaceModel):
         basis = self._buildBasis_list(points, self.cov_function)
         Phi = self._buildH_dense(jnp.ones((nvar, nlat), dtype=self.dtype), basis)
 
+        # Build the M-step's ks (Matern rescale) objective once - JIT
+        # compilation happens on its first call inside the EM loop below,
+        # then every subsequent EM iteration (and every one of L-BFGS-B's
+        # internal evaluations within each of them) reuses the compiled
+        # function instead of rebuilding/recompiling it.
+        self._log("Building the ks (rescale) M-step objective...")
+        ks_value_and_grad = self._build_ks_value_and_grad()
+
         self._log("Starting the EM iterations...")
 
         # Flag of the EM convergence
@@ -899,6 +907,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 S10,
                 S00,
                 Phi,
+                ks_value_and_grad,
             )
 
             # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
@@ -1011,6 +1020,7 @@ class LRStateSpaceModel(StateSpaceModel):
         S10,
         S00,
         Phi,
+        ks_value_and_grad,
     ):
 
         # convert all input to save memory
@@ -1100,19 +1110,36 @@ class LRStateSpaceModel(StateSpaceModel):
             jnp.array([fcov.rescale for fcov in est_covList], dtype=self.dtype)
         )
 
-        # 'L-BFGS-B': add options={'maxiter': 100, 'eps': 1e-8}, eps = gradiend step
-        # opt = minimize(minf, par0, args=(est_covList, T, Omega), method='L-BFGS-B',
-        #                tol=1e-3, jac=False, options={'maxiter': 100, 'eps': 1e-8})
+        # 'Nelder-Mead' (previous approach): derivative-free, ~O(n) simplex
+        # evaluations per iteration, each one rebuilding the FEM precision
+        # matrix from scratch in plain NumPy/SciPy-sparse via `_minf`.
+        # opt = minimize(
+        #     self._minf,
+        #     par0,
+        #     args=(est_covList, T, Omega),
+        #     method="Nelder-Mead",
+        #     tol=1e-3,
+        #     jac=False,
+        #     options={"maxiter": 50},
+        # )
 
-        # 'Nelder-Mead': doesn't use gradients at all. It is much more robust for functions
-        # that are "jumpy" or have extreme slopes.
+        # 'L-BFGS-B' with exact JAX gradients from `ks_value_and_grad`
+        # (built once per `fit()` call in `_build_ks_value_and_grad`, JIT
+        # compiled on its first call and reused for every EM iteration and
+        # every evaluation within each L-BFGS-B call): converges in far
+        # fewer objective evaluations than derivative-free Nelder-Mead,
+        # since it exploits the analytic gradient instead of building a
+        # discrete simplex around the current point.
+        def _fun_and_grad(params_np):
+            val, grad = ks_value_and_grad(jnp.asarray(params_np, dtype=self.dtype), T, Omega)
+            return float(val), np.asarray(grad, dtype=np.float64)
+
         opt = minimize(
-            self._minf,
-            par0,
-            args=(est_covList, T, Omega),
-            method="Nelder-Mead",
+            _fun_and_grad,
+            np.asarray(par0, dtype=np.float64),
+            method="L-BFGS-B",
+            jac=True,
             tol=1e-3,
-            jac=False,
             options={"maxiter": 50},
         )
 
@@ -1185,7 +1212,84 @@ class LRStateSpaceModel(StateSpaceModel):
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
-    
+    def _build_ks_value_and_grad(self):
+        """
+        Build a JIT-compiled value-and-gradient function for the M-step's
+        `ks` (Matern rescale) optimisation objective -- the same objective
+        `_minf` computes in plain NumPy/SciPy-sparse, but computing the
+        precision matrix with JAX (same math as `_compute_invQ_jax`, which
+        is used, via `jax.hessian` with no surrounding `jit`, for the
+        standard-error computation in `stmodel_results._compute_hessian`)
+        so `ks` can be optimised with exact gradients (L-BFGS-B) instead of
+        the derivative-free Nelder-Mead simplex `_minf` was used with.
+
+        Returns `value_and_grad_fn(params, T, Omega) -> (value, grad)`, as
+        plain JAX arrays (still on the model's `self.dtype` / `self.backend`).
+
+        stiff_list/mass_list/perm_list/n_inner_list depend only on the FEM
+        mesh -- fixed for the whole `fit()` call -- so the intent is to
+        build this once per `fit()` call (like `basis`/`Phi`) and reuse the
+        compiled function across every EM iteration and every one of
+        L-BFGS's internal evaluations, rather than rebuilding it (and
+        re-paying the one-off JIT compilation) every M-step.
+
+        This does NOT reuse `_compute_invQ_jax` directly: that function
+        derives the inner/outer permutation from a boolean mask via
+        `jnp.where(mask, size=n_inner)`, where `size` must be a concrete
+        (non-traced) Python int. That holds under `jax.grad` alone (as in
+        `_compute_hessian`, which never wraps it in `jit`) because only the
+        differentiated argument is abstracted there -- but under `jax.jit`,
+        *every* array-valued expression built during tracing becomes an
+        abstract tracer, including ones derived from closed-over "constant"
+        arrays, so `n_inner` would itself become a tracer and
+        `jnp.where(..., size=n_inner)` would raise a ConcretizationTypeError.
+        Precomputing the permutation as plain NumPy (Python ints and NumPy
+        index arrays, never touched by any JAX op) below keeps it a genuine
+        static constant that `jit` can bake in as a fixed output shape,
+        sidestepping the issue entirely.
+        """
+        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
+        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
+
+        perm_list = []
+        n_inner_list = []
+        for cov in self.cov_function:
+            inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
+            ii = np.where(inner_mask)[0]
+            oi = np.where(~inner_mask)[0]
+            perm_list.append(np.concatenate([ii, oi]))
+            n_inner_list.append(int(inner_mask.sum()))
+
+        def objective(params, T, Omega):
+            ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
+
+            invQ_blocks = []
+            for ki, C, G, perm, n_inner in zip(ks, mass_list, stiff_list, perm_list, n_inner_list):
+                Ci = jnp.diag(1.0 / C.diagonal())
+                K = ki**2 * C + G
+                sigma2k = (jax.scipy.special.gamma(1.0) /
+                           (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
+                Qi = sigma2k * (K @ Ci @ K)
+
+                Qperm = Qi[perm][:, perm]
+                Q_11 = Qperm[:n_inner, :n_inner]
+                Q_12 = Qperm[:n_inner, n_inner:]
+                Q_22 = Qperm[n_inner:, n_inner:]
+                # Same Schur-complement idea as `_schur_marginal_precision`:
+                # solve directly for Q_22^{-1} @ Q_12.T instead of inverting
+                # all of Q_22.
+                Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
+                invQ_blocks.append(Q_mar)
+
+            invQ = jax.scipy.linalg.block_diag(*invQ_blocks)
+            logdet_invQ = jnp.linalg.slogdet(invQ)[1]
+            fun = -T * logdet_invQ + jnp.trace(invQ @ Omega)
+            # Same 1e4 rescaling as `_minf`, to keep the two objectives
+            # (and their optimum) directly comparable.
+            return fun / 1e4
+
+        return jax.jit(jax.value_and_grad(objective))
+
     def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
 
         
