@@ -409,84 +409,90 @@ class LRStateSpaceModel(StateSpaceModel):
         super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
 
     def setup(self, mesh_obj: list = None, cov_fun: list = None, domain_latent: list = None):
+        """
+        Build the model's latent covariance functions, one per latent
+        factor. Provide exactly one of `mesh_obj` or `cov_fun`.
 
-        # domain_latent is the domain each mesh/covariance function is
-        # defined on -- one entry per latent factor, matching mesh_obj/
-        # cov_fun below. Validated as-is (may be a fine-grained, multi-
-        # region MultiPolygon per factor), unlike the default below, which
-        # falls back to self.domain -- the coarser, always-convex
-        # measurement-equation domain (see _setDomain/domain_hull).
-        if domain_latent is not None:
-            self._log(f"Checking {len(domain_latent)} domains (start)...")
-            flag, msg = self._checkDomain(domain_latent)
-            if flag:
-                raise ValueError(msg)
-        else:
-            domain_latent = self._domain
-            self._log(f"{len(self._domain)} valid domains found and set.")
-        self._log("Checking domains (done)")
+        Parameters
+        ----------
+        mesh_obj : list of meshio.Mesh, optional
+            One mesh per latent factor. A fresh `spdeAppoxCov` is built for
+            each entry, using the matching entry of `domain_latent` (see
+            below) as its domain.
+        cov_fun : list of spdeAppoxCov, optional
+            Already-built (and already `setup()`-ed) covariance functions,
+            one per latent factor, used as-is. `domain_latent` is not
+            needed in this case: each factor's latent domain is already
+            fixed as `covi.domain` (validated by `spdeAppoxCov` itself, via
+            `_validate_domain`, when it was constructed).
+        domain_latent : list of shapely Polygon/MultiPolygon, optional
+            Only used together with `mesh_obj`: one entry per latent
+            factor, matching `mesh_obj` index-for-index, passed to that
+            factor's `spdeAppoxCov` to classify its mesh's vertices as
+            inner/outer. If omitted, each `spdeAppoxCov` is built with no
+            explicit domain -- `FEMSolver`'s own default then applies:
+            the convex hull of that mesh's own vertices, i.e. every vertex
+            is treated as inner. Note this is a *different*, generally
+            smaller list than `self.domain` (the measurement-equation
+            domain, one entry per formula) -- it is not defaulted from
+            `self.domain`.
+        """
+        if mesh_obj is None and cov_fun is None:
+            raise ValueError("Either mesh_obj or cov_fun must be provided")
+        if mesh_obj is not None and cov_fun is not None:
+            raise ValueError("Provide only one of mesh_obj or cov_fun, not both")
 
-        # mehs_obj = list of the latent domain
         self._cov_matern = []
 
-        # Check the consistency of the inputs
-        if mesh_obj is None and cov_fun is None:
-            raise ValueError("Or mesh_obj or cov_fun must be provided")
-
         if mesh_obj is not None:
-            # If mesh_obj is provided, we create the covariance model of the matern for each domain,
-            # and we store it in the list _cov_matern
+            # spdeAppoxCov constructed fresh per mesh; domain_latent (or its
+            # per-mesh None default) is only meaningful here.
+            if domain_latent is not None:
+                self._log(f"Checking {len(domain_latent)} latent domain(s)...")
+                flag, msg = self._checkDomain(domain_latent)
+                if flag:
+                    raise ValueError(msg)
+                if len(mesh_obj) != len(domain_latent):
+                    raise ValueError(
+                        f"Number of mesh objects ({len(mesh_obj)}) must match number of latent domains ({len(domain_latent)})"
+                    )
+            else:
+                # No explicit latent domain: let each spdeAppoxCov/FEMSolver
+                # fall back to the convex hull of its own mesh's vertices.
+                domain_latent = [None] * len(mesh_obj)
+
             self._log(f"Checking {len(mesh_obj)} mesh objects...")
-            
-            if len(mesh_obj) != len(domain_latent):
-                raise ValueError(
-                    f"Number of mesh objects ({len(mesh_obj)}) must match number of domains ({len(domain_latent)})"
-                )
 
             for i, (meshi, domi) in enumerate(zip(mesh_obj, domain_latent)):
 
                 line = len(meshi.cells_dict["line"])
                 vertex = len(meshi.cells_dict["vertex"])
                 triangle = len(meshi.cells_dict["triangle"])
-                
+
                 self._log(f"Create the GMRF {i} object, with (line: {line},triangle: {triangle},vertex: {vertex})")
                 # create the covariance model of the matern
-                temp = spdeAppoxCov([domi], latlon=False, nu=1.0, var=1.0, rescale=1.0)
+                temp = spdeAppoxCov([domi] if domi is not None else None, latlon=False, nu=1.0, var=1.0, rescale=1.0)
                 self._cov_matern.append(temp.setup(meshi))
 
-        elif cov_fun is not None:
-            # If cov_fun is provided, we check that it is a list of covariance functions of the same length
-            # as the number of domains, and we store it in the list _cov_matern
-            self._log(f"Checking {len(cov_fun)} covariance functions (start)...")
+        else:
+            # cov_fun: already-built spdeAppoxCov instances, one per latent
+            # factor. Each one's own `.domain` (post-setup) already is its
+            # latent domain -- domain_latent plays no role here.
+            self._log(f"Checking {len(cov_fun)} covariance functions...")
 
-            if len(cov_fun) != len(domain_latent):
-                raise ValueError(
-                    f"Number of covariance functions ({len(cov_fun)}) must match number of domains ({len(domain_latent)})"
-                )
-
-            for i, (covi, domi) in enumerate(zip(cov_fun, domain_latent)):
-                # self._log(f"Cov_fun-{i} covariance function...")
-
-                # check if the covariance function is an instance of spdeAppoxCov
+            for i, covi in enumerate(cov_fun):
                 if not isinstance(covi, spdeAppoxCov):
                     raise ValueError(
                         "Covariance function must be an instance of spdeAppoxCov"
                     )
                 self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
                 self._cov_matern.append(covi)
-            
-            
-            self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern],dtype=self.itype)
-        
-            self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
-            self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
-            self._log("Checking covariance functions (done)")
 
-
-
-
-        else:
-            raise ValueError("Invalid input: either mesh_obj or cov_fun must be provided")
+        # Latent dimension (rank), one block per latent factor -- needed by
+        # sim()/fit() regardless of how _cov_matern was built.
+        self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern], dtype=self.itype)
+        self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
+        self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
 
         # set the number of latent factors (i.e. the number of covariance functions)
         self.nlat = len(self._cov_matern)
@@ -1588,47 +1594,41 @@ class LRStateSpaceModel(StateSpaceModel):
     # fix H row functions
     def _setDomain(self, polygon):
         """
-        Build `self.domain`: a list with one simple, convex Polygon per
-        latent factor (one entry per group in `self.points`).
-
-        This is deliberately always a plain convex hull, never the raw
-        (possibly multi-region) input -- it is used as (a) the building
-        block for `domain_hull`, and (b) `setup()`'s default `domain_latent`
-        when the caller doesn't pass one explicitly. A caller who needs the
-        exact, possibly multi-region domain for the latent SPDE (e.g.
-        Sicily + Sardinia + mainland, each classified separately for
-        inner/outer by `spdeAppoxCov`) must pass it explicitly via
-        `setup(domain_latent=...)` -- that path validates via
-        `_checkDomain` but does *not* go through `_setDomain`, so it keeps
-        the exact geometry.
+        Build `self.domain`: a list with one entry per *measurement
+        equation* (`len(self.points) == len(formulas)`), each entry a
+        single shapely Polygon or MultiPolygon describing that equation's
+        observation domain. This is generally a different count from the
+        number of *latent* factors (`self.nlat`, set in `setup()`) -- there
+        can be fewer latent factors than measurement equations, e.g. when
+        several equations share one latent field via `A`.
 
         Parameters
         ----------
         polygon : list/tuple of shapely Polygon/MultiPolygon, or None
-            Already validated by `_checkDomain` (via the `domain` setter).
-            If None, defaults to the convex hull of each group's observed
-            points (`self.points`).
+            Already validated by `_checkDomain` (via the `domain` setter)
+            -- stored as-is. If None, defaults to the convex hull of each
+            equation's own observed points (`self.points`).
         """
         if polygon is None:
             return [MultiPoint(pts).convex_hull for pts in self.points]
 
-        # Convex hull of the union of each factor's own domain (see
-        # `_domain_hull`), applied per-entry so the per-factor list
-        # structure -- one entry per latent factor -- is preserved.
-        return [_domain_hull([poly]) for poly in polygon]
+        return list(polygon)
 
     def _checkDomain(self, domain):
         """
-        Validate `domain`: a list/tuple with one entry per latent factor,
-        each entry a single shapely Polygon or MultiPolygon.
+        Validate `domain`: a list/tuple where each entry is a single
+        shapely Polygon or MultiPolygon. Used both for `self.domain` (one
+        entry per measurement equation) and, in `setup()`, for
+        `domain_latent` (one entry per latent factor/mesh) -- the length is
+        the caller's responsibility to match to the right count.
 
         Builds on `spdeAppoxCov`/`FEMSolver`'s own contract (see
         `geossm.covmodel.covmodels._validate_domain`), applied per-entry --
         wrapping each entry the same way `setup()` will (`spdeAppoxCov([domi], ...)`)
         -- rather than to the whole list at once: validating the whole list
         in one call would flatten a MultiPolygon entry into several
-        separate entries and break the 1:1 correspondence with
-        `mesh_obj`/`cov_fun` that `setup()` relies on.
+        separate entries and break the 1:1 correspondence with the list
+        it's meant to match (`self.points` or `mesh_obj`/`cov_fun`).
 
         `domain=None` is treated as valid here -- `_setDomain` fills in a
         default in that case.
@@ -1654,13 +1654,14 @@ class LRStateSpaceModel(StateSpaceModel):
     @property
     def domain(self):
         """
-        The model's own (measurement-equation) domain: a list with one
-        simple, convex Polygon per latent factor -- see `_setDomain`. This
-        is a coarser, always-convex summary, distinct from each factor's
-        actual latent SPDE domain (which may be a finer, multi-region
-        MultiPolygon); once `setup()` has run, the latter is available per
-        factor via `cov_function[i].domain`. See `domain_hull` for a single
-        Polygon summarising all factors combined.
+        The measurement-equation domain: a list with one shapely Polygon or
+        MultiPolygon per *measurement equation* (`len(formulas)`) -- see
+        `_setDomain`. Distinct from the *latent* domain (one entry per
+        latent factor, generally a different, usually smaller count, see
+        `setup(domain_latent=...)`); once `setup()` has run, each factor's
+        actual domain is available via `cov_function[i].domain`. See
+        `domain_hull` for a single Polygon summarising every measurement
+        equation's domain combined.
         """
         return self._domain
 
@@ -1678,10 +1679,10 @@ class LRStateSpaceModel(StateSpaceModel):
     @property
     def domain_hull(self):
         """
-        Convex hull of the union of `domain`, i.e. of *all* latent factors
-        combined -- a single Polygon summarising the model's overall
-        geographic footprint, e.g. to pass as `boundary` to `buildMesh2d`.
-        See `_domain_hull`.
+        Convex hull of the union of `domain`, i.e. of *all* measurement
+        equations combined -- a single Polygon summarising the model's
+        overall geographic footprint, e.g. to pass as `boundary` to
+        `buildMesh2d`. See `_domain_hull`.
         """
         return _domain_hull(self._domain)
 

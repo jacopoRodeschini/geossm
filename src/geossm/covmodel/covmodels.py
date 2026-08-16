@@ -1011,13 +1011,13 @@ class spdeAppoxCov(Matern):
     """
 
     def __init__(
-        self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
+        self, domain=None, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
     ):
         """
         Parameters
         ----------
         domain : shapely.geometry.Polygon or MultiPolygon, or a list/tuple
-            of them
+            of them, optional
             Region(s) of scientific interest, e.g. one polygon (or a single
             MultiPolygon) per landmass for a multi-polygon country (Sicily,
             Sardinia, mainland Italy). Any MultiPolygon is expanded into its
@@ -1026,17 +1026,24 @@ class spdeAppoxCov(Matern):
             -- see `_validate_domain` for the full contract, including how
             it differs from the FEM computational domain :math:`\\Omega`
             (implicitly given by the mesh passed to `setup()`; see
-            `domain_hull` for a reasonable default choice).
+            `domain_hull` for a reasonable default choice). If omitted,
+            `FEMSolver` falls back on `setup()` to the convex hull of the
+            mesh's own vertices, i.e. every vertex is treated as inner --
+            see `domain`/`domain_hull`, only available after `setup()` in
+            that case.
         latlon, geo_scale, nu, var, rescale : see `gstools.covmodel.Matern`.
         verbose : bool, optional
             Whether to log progress messages.
         """
 
-        # Validate domain (same contract as FEMSolver, see _validate_domain)
+        # Validate domain (same contract as FEMSolver, see _validate_domain);
+        # left unvalidated (None) until setup(), where FEMSolver applies its
+        # own convex-hull-of-vertices default.
         self.verbose = verbose
-        self._domain = _validate_domain(domain)
-        self._ndomain = len(self._domain)
-        self._log(f"Validated domain: {self._ndomain} polygon(s).")
+        self._domain = _validate_domain(domain) if domain is not None else None
+        self._ndomain = len(self._domain) if self._domain is not None else None
+        self._log(f"Validated domain: {self._ndomain} polygon(s)." if self._domain is not None
+                   else "No domain provided; will default to the mesh's own convex hull on setup().")
 
         # Mesh storage
         self._meshIO = None
@@ -1293,7 +1300,18 @@ class spdeAppoxCov(Matern):
         Convex hull of the union of `domain` -- a reasonable default choice
         of FEM computational domain Ω, e.g. to pass as `boundary` to
         `buildMesh2d` before calling `setup()`. See `_domain_hull`.
+
+        Raises
+        ------
+        RuntimeError
+            If no `domain` was given at construction and `setup()` hasn't
+            been called yet -- `domain` is unknown until either happens.
         """
+        if self.domain is None:
+            raise RuntimeError(
+                "Domain not set. Provide `domain` at construction, or call "
+                "setup() first to get FEMSolver's mesh-vertices default."
+            )
         return _domain_hull(self.domain)
 
     def covers_domain(self):
