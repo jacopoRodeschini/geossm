@@ -36,6 +36,33 @@ assert has_gpu, "No GPU device found: this example requires a GPU device to run.
 
 # %% Utils function
 
+
+def _fit_safely(model, opt, label):
+    """
+    Run model.fit(), skipping the current sweep point instead of crashing
+    when the config doesn't fit in memory.
+
+    Only helps for a GPU RESOURCE_EXHAUSTED: XLA raises that as a normal
+    Python exception, so it can be caught and the process survives. A CPU
+    (host RAM) OOM is a different beast - the Linux OOM-killer sends SIGKILL
+    from outside the process, which nothing in Python can catch, so a config
+    that's too large for the CPU backend still takes the whole run down.
+
+    jax.clear_caches() is called after a hit to reduce (not guarantee) the
+    chance that a fragmented/dirty allocator state causes a smaller, later
+    config to spuriously fail too. If OOMs keep bleeding into later configs
+    despite this, the robust fix is to isolate each config in its own
+    subprocess so a blown-out run can't poison the ones after it.
+    """
+    try:
+        return model.fit(options=opt)
+    except jax.errors.JaxRuntimeError as e:
+        if "RESOURCE_EXHAUSTED" in str(e):
+            print(f"[SKIP] {label}: out of memory, skipping this configuration.")
+            jax.clear_caches()
+            return None
+        raise
+
 def build_dataframe(n, T=50):
     # %% Build the geopandas dataframe
     points = np.random.uniform(0, 1, (n, 2))
@@ -74,82 +101,84 @@ def build_dataframe(n, T=50):
 
 
 # %% one simulation comparison 
-dims = {"n": 200, "T": 1000}
+# dims = {"n": 200, "T": 1000}
 
-# create the dataframe with the specified dimensions
-gdf, points = build_dataframe(dims["n"], T=dims["T"])
+# # create the dataframe with the specified dimensions
+# gdf, points = build_dataframe(dims["n"], T=dims["T"])
 
-# Create the mesh 
-domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
+# # Create the mesh 
+# domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
-mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
-                      lowrank=0.5, density_neighbors=5)
+# mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
+#                       lowrank=0.5, density_neighbors=5)
 
-print(mesh_io)
+# print(mesh_io)
 
-params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
+# params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
-# Create the covariance function used to simulate the "truth"
-cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-cov_fun = cov_fun.setup(mesh_io)
+# # Create the covariance function used to simulate the "truth"
+# cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
+# cov_fun = cov_fun.setup(mesh_io)
 
-# fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-# ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
-# cov_fun.fem_solver.plot_mesh(ax=ax)
+# # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
+# # ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
+# # cov_fun.fem_solver.plot_mesh(ax=ax)
 
-# Build a dedicated model to simulate the "truth" data and set up its covariance
-sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
-sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+# # Build a dedicated model to simulate the "truth" data and set up its covariance
+# sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
+# sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
 
-# Print the var. statistics (verbose = True)
-y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=True, verbose=True)
+# # Print the var. statistics (verbose = True)
+# y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=True, verbose=True)
 
-# 0) Create the geopandas dataframe with the simulated data
-gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
+# # 0) Create the geopandas dataframe with the simulated data
+# gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-# 1) Create the covariance matrix 
-est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-est_cov_fun = est_cov_fun.setup(mesh_io)
+# # 1) Create the covariance matrix 
+# est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+# est_cov_fun = est_cov_fun.setup(mesh_io)
 
-# 2) Create the model
-backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
-
-
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-3
-
-records = []
-for backend in backends:
-    model = lrssm(
-        df=gdf, 
-        formulas=["y_sim ~ 1"], 
-        domain=[domain], 
-        verbose=False, backend=backend, dtype=jnp.float32)
+# # 2) Create the model
+# backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
 
 
-    # 3) Set up the model cov. 
-    model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
-    # print(model)
+# opt = FitOptions()
+# opt.max_iter = 50
+# opt.tol_relat = 1e-3
 
-    # 4) fit the model
-    results = model.fit(options=opt)
+# records = []
+# for backend in backends:
+#     model = lrssm(
+#         df=gdf, 
+#         formulas=["y_sim ~ 1"], 
+#         domain=[domain], 
+#         verbose=False, backend=backend, dtype=jnp.float32)
 
-    records.append(
-        {
-            "backend": backend,
-            "tsim_estep": results.runtime_tot_estep,
-            "tsim_mstep": results.runtime_tot_mstep,
-            "mse": results.mse(), 
-            'llf': results.llf,
-            'params': results.params,
-    }
-    )
 
-    print(
-        f"backend={'gpu':>3s}, mse: {results.mse():.4f} - "
-        f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
-    )
+#     # 3) Set up the model cov. 
+#     model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+#     # print(model)
+
+#     # 4) fit the model
+#     results = _fit_safely(model, opt, label=f"backend={backend}")
+#     if results is None:
+#         continue
+
+#     records.append(
+#         {
+#             "backend": backend,
+#             "tsim_estep": results.runtime_tot_estep,
+#             "tsim_mstep": results.runtime_tot_mstep,
+#             "mse": results.mse(), 
+#             'llf': results.llf,
+#             'params': results.params,
+#     }
+#     )
+
+#     print(
+#         f"backend={'gpu':>3s}, mse: {results.mse():.4f} - "
+#         f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
+#     )
 
 # %% Comparison between CPU and GPU backends for the LRSSM model fitting
 
@@ -161,7 +190,7 @@ if __name__ == "__main__":
 
     sweeps = {
         "T": {"values": [100, 200, 500, 1000, 2000, 5000], "fixed": {"n": n_base}},
-        "n": {"values": [50, 100, 200, 500, 1000, 2000], "fixed": {"T": T_base}},
+        "n": {"values": [50, 100, 200, 500, 1000], "fixed": {"T": T_base}},
     }
 
     # Only benchmark backends that are actually available on this machine.
@@ -176,6 +205,7 @@ if __name__ == "__main__":
     if not has_gpu:
         print("No GPU device found: skipping the GPU backend in the timing comparison.")
 
+    print(sweeps)
     # set the domain as a square [0, 1] x [0, 1]
     domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
 
@@ -212,14 +242,14 @@ if __name__ == "__main__":
             gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
             # 1) Create the covariance matrix 
-            est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
+            est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2, verbose=False)
             est_cov_fun = est_cov_fun.setup(mesh_io)
 
             # fit the estimation model
             opt = FitOptions()
             opt.max_iter = 50
             opt.tol_relat = 1e-3
-            opt.verbose = True
+            opt.verbose = False
 
 
             # 2) Create the model
@@ -235,9 +265,13 @@ if __name__ == "__main__":
                 model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
                 # print(model)
 
-                
-                results = model.fit(options=opt)
 
+                results = _fit_safely(
+                    model, opt,
+                    label=f"sweep={sweep_name} {sweep_name}={value} backend={backend}",
+                )
+                if results is None:
+                    continue
 
                 records.append(
                     {
@@ -253,17 +287,27 @@ if __name__ == "__main__":
                     f"{sweep_name}={value:<5d} tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
                 )
 
+    # print the timing results as a dataframe
+    print(records)
+
     timing_df = pd.DataFrame.from_records(records)
     timing_df['tot'] = timing_df['tsim_estep'] + timing_df['tsim_mstep']
+    print(timing_df)
 
-    # save the timing results as a pkl file
     timing_df.to_pickle("timing_results.pkl")
 
 
 # %% Plot the results 
+# from matplotlib import pyplot as plt
+
+
+# # read the pickle file with the timing results
+# timing_df = pd.read_pickle("timing_results.pkl")
+
 
 # fig, axes = plt.subplots(1, 2, figsize=(18, 5))
 
+# backends = timing_df["backend"].unique()
 # for ax, sweep_name in zip(axes, ["T", "n"]):
 #     sub = timing_df[timing_df["sweep"] == sweep_name]
 #     for backend in backends:
@@ -285,5 +329,5 @@ if __name__ == "__main__":
 
 # fig.suptitle(f"CPU vs GPU estimation time")
 # fig.tight_layout()
-# plt.show()
+# # plt.show()
 
