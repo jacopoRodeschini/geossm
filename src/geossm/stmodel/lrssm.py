@@ -10,6 +10,7 @@ from geossm.ssm import StateSpaceModel
 from geossm.ssm import _filter_kernelJAX
 from geossm.ssm import _itype_for, _ensure_x64_for_dtype
 from geossm.covmodel import spdeAppoxCov
+from geossm.covmodel.covmodels import _validate_domain, _domain_hull
 from statsmodels.iolib.summary import Summary
 
 from jax import jit, lax
@@ -28,8 +29,7 @@ from geossm import block_diag_3D
 from geossm.utils import _select_device, _to_backend, _on_device
 
 
-from shapely.geometry import Polygon
-from scipy.spatial import ConvexHull
+from shapely.geometry import MultiPoint
 from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
@@ -396,16 +396,11 @@ class LRStateSpaceModel(StateSpaceModel):
             xbeta_names = None
 
 
-        # Check the domain
-        self._log(f"Checking {len(domain)} domains (start)...")
-
-        flag, msg = self._checkDomain(domain)
-        if flag:
-            raise ValueError(msg)
-        else:
-            self._domain = self._setDomain(domain)
-            self._log(f"{len(self._domain)} valid domains found and set.")
-        self._log(f"Checking {len(domain)} domains (done)")
+        # Check and set the domain (see `_checkDomain`/`_setDomain`); a
+        # domain=None defaults to the convex hull of each group's observed
+        # points.
+        self.domain = domain
+        self._log(f"{len(self._domain)} valid domain(s) set.")
 
         self._cov_matern = None
 
@@ -413,15 +408,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # y_train will be used later for estimation and for the results
         super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
 
-    @property
-    def domain(self):
-        return self._domain
-
-
     def setup(self, mesh_obj: list = None, cov_fun: list = None, domain_latent: list = None):
 
-        # this domain is the domain on which the mesh is defined, and where the
-        # covariance function has a meaning
+        # domain_latent is the domain each mesh/covariance function is
+        # defined on -- one entry per latent factor, matching mesh_obj/
+        # cov_fun below. Validated as-is (may be a fine-grained, multi-
+        # region MultiPolygon per factor), unlike the default below, which
+        # falls back to self.domain -- the coarser, always-convex
+        # measurement-equation domain (see _setDomain/domain_hull).
         if domain_latent is not None:
             self._log(f"Checking {len(domain_latent)} domains (start)...")
             flag, msg = self._checkDomain(domain_latent)
@@ -1593,28 +1587,103 @@ class LRStateSpaceModel(StateSpaceModel):
 
     # fix H row functions
     def _setDomain(self, polygon):
-        if polygon is None:
-            polygon = [ConvexHull(pts) for pts in self.points]
+        """
+        Build `self.domain`: a list with one simple, convex Polygon per
+        latent factor (one entry per group in `self.points`).
 
-        return polygon
+        This is deliberately always a plain convex hull, never the raw
+        (possibly multi-region) input -- it is used as (a) the building
+        block for `domain_hull`, and (b) `setup()`'s default `domain_latent`
+        when the caller doesn't pass one explicitly. A caller who needs the
+        exact, possibly multi-region domain for the latent SPDE (e.g.
+        Sicily + Sardinia + mainland, each classified separately for
+        inner/outer by `spdeAppoxCov`) must pass it explicitly via
+        `setup(domain_latent=...)` -- that path validates via
+        `_checkDomain` but does *not* go through `_setDomain`, so it keeps
+        the exact geometry.
+
+        Parameters
+        ----------
+        polygon : list/tuple of shapely Polygon/MultiPolygon, or None
+            Already validated by `_checkDomain` (via the `domain` setter).
+            If None, defaults to the convex hull of each group's observed
+            points (`self.points`).
+        """
+        if polygon is None:
+            return [MultiPoint(pts).convex_hull for pts in self.points]
+
+        # Convex hull of the union of each factor's own domain (see
+        # `_domain_hull`), applied per-entry so the per-factor list
+        # structure -- one entry per latent factor -- is preserved.
+        return [_domain_hull([poly]) for poly in polygon]
 
     def _checkDomain(self, domain):
+        """
+        Validate `domain`: a list/tuple with one entry per latent factor,
+        each entry a single shapely Polygon or MultiPolygon.
 
+        Builds on `spdeAppoxCov`/`FEMSolver`'s own contract (see
+        `geossm.covmodel.covmodels._validate_domain`), applied per-entry --
+        wrapping each entry the same way `setup()` will (`spdeAppoxCov([domi], ...)`)
+        -- rather than to the whole list at once: validating the whole list
+        in one call would flatten a MultiPolygon entry into several
+        separate entries and break the 1:1 correspondence with
+        `mesh_obj`/`cov_fun` that `setup()` relies on.
+
+        `domain=None` is treated as valid here -- `_setDomain` fills in a
+        default in that case.
+        """
         flag = False
         msg = ""
 
         if domain is not None:
             if not isinstance(domain, (list, tuple)):
-                raise TypeError("domain must be a list of Polygon objects")
+                return True, "domain must be a list of Polygon/MultiPolygon objects, one per latent factor"
+
             for i, poly in enumerate(domain):
-                if not isinstance(poly, Polygon):
-                    flag = True
-                    msg = f"Each domain element must be a shapely Polygon, got {type(poly).__name__}"
-                else:
-                    bounds_str = ", ".join(f"{b:.2f}" for b in poly.bounds)
-                    self._log("Domain-{}: area = {:2f}, box = ({})".format(i+1, poly.area, bounds_str))
+                try:
+                    _validate_domain([poly])
+                except (TypeError, ValueError) as e:
+                    return True, f"Domain {i}: {e}"
+
+                bounds_str = ", ".join(f"{b:.2f}" for b in poly.bounds)
+                self._log("Domain-{}: area = {:2f}, box = ({})".format(i+1, poly.area, bounds_str))
 
         return flag, msg
+
+    @property
+    def domain(self):
+        """
+        The model's own (measurement-equation) domain: a list with one
+        simple, convex Polygon per latent factor -- see `_setDomain`. This
+        is a coarser, always-convex summary, distinct from each factor's
+        actual latent SPDE domain (which may be a finer, multi-region
+        MultiPolygon); once `setup()` has run, the latter is available per
+        factor via `cov_function[i].domain`. See `domain_hull` for a single
+        Polygon summarising all factors combined.
+        """
+        return self._domain
+
+    @domain.setter
+    def domain(self, value):
+        """
+        Validate `value` (see `_checkDomain`) and set `self.domain` (see
+        `_setDomain`).
+        """
+        flag, msg = self._checkDomain(value)
+        if flag:
+            raise ValueError(msg)
+        self._domain = self._setDomain(value)
+
+    @property
+    def domain_hull(self):
+        """
+        Convex hull of the union of `domain`, i.e. of *all* latent factors
+        combined -- a single Polygon summarising the model's overall
+        geographic footprint, e.g. to pass as `boundary` to `buildMesh2d`.
+        See `_domain_hull`.
+        """
+        return _domain_hull(self._domain)
 
     def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None):
 
