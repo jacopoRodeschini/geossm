@@ -6,10 +6,8 @@
 
 # %% [Imports]
 import matplotlib.pyplot as plt
-from shapely.geometry import Point, Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon
 import numpy as np
-import pygmsh
-import gmsh
 import geopandas as geodf
 import geossm.datasets as df
 from geossm.covmodel import FEMSolver
@@ -77,10 +75,22 @@ for i, (mesh_lr, buffer) in enumerate(meshes):
 # %% Build the covaraince function 
 from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
 
+fig, ax = plt.subplots(1, len(meshes), figsize=(8, 8))
+
 for i, (mesh_lr, buffer) in enumerate(meshes):
-    cov_fun = MaternCov(list(italy_union.geoms), latlon=True, nu=1, var=1, rescale=4)
+    cov_fun = MaternCov(italy_union, latlon=True, nu=1, var=1, rescale=4)
     cov_fun = cov_fun.setup(mesh_lr)
 
     print(f"Covariance function for low-rank mesh (r={lr[i]}):")
     print(cov_fun.summary())
+
+    cov_fun.fem_solver.plot_mesh(ax=ax[i])
+    # export the figure in pdf
+    ax[i].set_xlabel("Longitude")
+    ax[i].set_ylabel("Latitude")
+    ax[i].set_title(f"Low-rank mesh (r={lr[i]})")
+    ax[i].set_aspect('equal', adjustable='box')
+
+
+
  

@@ -869,14 +869,8 @@ class FEMSolver:
         return smry
 
     def __str__(self):
-        
         return self.summary().as_text()
-
-    def __repr__(self):
-        # plot the mesh
-        self.plot_mesh(title="FEM Mesh Visualization")
-        return self.__str__()
-
+    
     def _is_verbose(self, verbose=None) -> bool:
         return self.verbose if verbose is None else verbose
 
