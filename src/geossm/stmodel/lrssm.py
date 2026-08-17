@@ -941,7 +941,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 print(msg)
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
-            if niter == max_iter or relat_lik <= tol_relat:
+            if niter == max_iter or abs(relat_lik) <= tol_relat:
                 flag = False
 
 

@@ -9,6 +9,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
+import shapely
+from shapely.geometry import MultiPoint
+
 from geossm.covmodel.utils import buildMesh2d, buildMeshGrid2d
 
 # %% Create a set of observed locations with an inhomogeneous density:
@@ -34,8 +37,16 @@ print(f"full mesh: {len(mesh_full.points)} vertices")
 # while keeping more vertices where points are dense and fewer where they
 # are sparse
 
-mesh_lr, buffer = buildMesh2d(points, max_edge=0.08, lowrank=0.3)
-print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
+mesh_lr, boundary_lr = buildMesh2d(points, max_edge=0.08, lowrank=0.3)
+# `lowrank` only targets vertices inside the interest domain (here, since no
+# explicit `boundary` was given, the convex hull of `points` itself) -- the
+# returned `boundary_lr` is the *buffered* outer meshing domain instead.
+interest_domain = MultiPoint(points).convex_hull
+n_inside = shapely.contains_xy(
+    interest_domain, mesh_lr.points[:, 0], mesh_lr.points[:, 1]
+).sum()
+print(f"low-rank mesh: {len(mesh_lr.points)} vertices total, "
+      f"{n_inside} inside the interest domain "
       f"(target {round(0.3 * len(points))})")
 
 # %% Build a regular grid mesh: a structured lattice, cropped to the
