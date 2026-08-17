@@ -338,7 +338,7 @@ def _compute_A2_jax_kernel(
 
 class LRStateSpaceModel(StateSpaceModel):
 
-    def __init__(self, df, formulas:list = None, domain:list = None,
+    def __init__(self, df, formulas:list, domain:list,
         verbose=True, backend="auto", dtype=jnp.float32):
 
         # Set dtype/itype before building the observation grid below, so the
@@ -364,6 +364,11 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log(f"Initializing {self.model_name}...")
         self._log(f"Model type: {self.type}")
         self._log(f"Model order: {self.order}")
+
+        if formulas is not None and domain is not None and len(formulas) != len(domain):
+            raise ValueError(
+                f"Number of formulas ({len(formulas)}) must match number of domains ({len(domain)})"
+            )
 
         if formulas is not None:
 
