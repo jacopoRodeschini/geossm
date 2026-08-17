@@ -11,7 +11,7 @@ import numpy as np
 import geopandas as geodf
 import geossm.datasets as df
 from geossm.covmodel import FEMSolver
-from geossm.covmodel.utils import buildMesh2d
+from geossm.covmodel.utils import buildMesh2d, buildMesh2d_pen
 from shapely import ops
 
 # %% Import the grins dataset
@@ -50,7 +50,9 @@ italy_union = ops.unary_union(ct_italy.geometry)
 # are sparse
 lr = [0.5, 0.75]
 
-meshes = [buildMesh2d(points, max_edge=0.4, min_edge=0.1, lowrank=r, density_neighbors=8) for r in  lr]
+# meshes = [buildMesh2d(points, max_edge=0.4, min_edge=0.1, lowrank=r, density_neighbors=8) for r in  lr]
+
+meshes = [buildMesh2d_pen(points, lowrank=r, snap_to_points=False, cutoff=0.01) for r in  lr]
 
 for i, (mesh_lr, buffer) in enumerate(meshes):
     print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
@@ -66,6 +68,8 @@ for i, (mesh_lr, buffer) in enumerate(meshes):
 
     # plot the mesh using the utilities
     fem_solver.plot_mesh(ax=ax[i])
+    ax[i].plot(points[:, 0], points[:, 1], "x", markersize=2, alpha=0.5)
+
     # export the figure in pdf
     ax[i].set_xlabel("Longitude")
     ax[i].set_ylabel("Latitude")
@@ -81,10 +85,11 @@ for i, (mesh_lr, buffer) in enumerate(meshes):
     cov_fun = MaternCov(italy_union, latlon=True, nu=1, var=1, rescale=4)
     cov_fun = cov_fun.setup(mesh_lr)
 
-    print(f"Covariance function for low-rank mesh (r={lr[i]}):")
-    print(cov_fun.summary())
+    # print(f"Covariance function for low-rank mesh (r={lr[i]}):")
+    # print(cov_fun.summary())
 
     cov_fun.fem_solver.plot_mesh(ax=ax[i])
+    ax[i].plot(points[:, 0], points[:, 1], "x", markersize=2, alpha=0.5)
     # export the figure in pdf
     ax[i].set_xlabel("Longitude")
     ax[i].set_ylabel("Latitude")

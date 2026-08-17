@@ -10,9 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 import shapely
+from scipy.spatial import cKDTree
 from shapely.geometry import MultiPoint
 
-from geossm.covmodel.utils import buildMesh2d, buildMeshGrid2d
+from geossm.covmodel.utils import buildMesh2d, buildMesh2d_pen, buildMeshGrid2d
 
 # %% Create a set of observed locations with an inhomogeneous density:
 # a dense cluster around (0.3, 0.3) plus a sparse background over [0, 1]^2
@@ -57,9 +58,27 @@ mesh_grid, buffer = buildMeshGrid2d(points=points, offset=0.05, lowrank=0.3)
 print(f"grid mesh: {len(mesh_grid.points)} vertices "
       f"(target {round(0.3 * len(points))})")
 
-# %% Plot: observed points, full mesh, low-rank mesh, and grid mesh
+# %% Build a "penalized" low-rank mesh: interior vertices are landmark
+# points selected (via k-means) to match the density of `points`, then
+# snapped onto the nearest actual point so they coincide with real
+# observations instead of merely being near them
 
-fig, axs = plt.subplots(1, 4, figsize=(20, 5), sharex=True, sharey=True)
+mesh_pen, boundary_pen = buildMesh2d_pen(points, lowrank=0.3, max_edge=0.08, seed=0)
+n_inside_pen = shapely.contains_xy(
+    interest_domain, mesh_pen.points[:, 0], mesh_pen.points[:, 1]
+).sum()
+n_overlap = (
+    cKDTree(points).query(mesh_pen.points[:, :2])[0] < 1e-9
+).sum()
+print(f"penalized mesh: {len(mesh_pen.points)} vertices total, "
+      f"{n_inside_pen} inside the interest domain "
+      f"(target {round(0.3 * len(points))}), {n_overlap} coincide exactly "
+      "with an observed point")
+
+# %% Plot: observed points, full mesh, low-rank mesh, grid mesh, and the
+# penalized (data-overlapping) mesh
+
+fig, axs = plt.subplots(1, 5, figsize=(24, 5), sharex=True, sharey=True)
 
 axs[0].plot(points[:, 0], points[:, 1], "x", markersize=3)
 axs[0].set_title(f"Observed points (n={len(points)})")
@@ -81,6 +100,13 @@ axs[3].triplot(
     mesh_grid.cells_dict["triangle"], linewidth=0.5,
 )
 axs[3].set_title(f"Grid mesh, lowrank=0.3 ({len(mesh_grid.points)} vertices)")
+
+axs[4].triplot(
+    mesh_pen.points[:, 0], mesh_pen.points[:, 1],
+    mesh_pen.cells_dict["triangle"], linewidth=0.5,
+)
+axs[4].plot(points[:, 0], points[:, 1], "r.", markersize=2, alpha=0.4)
+axs[4].set_title(f"Penalized mesh, lowrank=0.3 ({len(mesh_pen.points)} vertices)")
 
 for ax in axs:
     ax.set_aspect("equal")
