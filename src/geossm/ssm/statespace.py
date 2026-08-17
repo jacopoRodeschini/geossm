@@ -2,6 +2,7 @@
 State Space Models Module
 """
 
+import functools
 import jax
 import jax.numpy as jnp
 from jax.scipy.linalg import solve
@@ -32,8 +33,49 @@ def _ensure_x64_for_dtype(dtype):
         jax.config.update("jax_enable_x64", True)
 
 
+def _highest_matmul_precision(f):
+    """Trace `f` under full (non-tensor-core-reduced) matmul precision.
+
+    On GPU, JAX's default (unset) matmul precision can route float32 `@`/dot
+    ops through reduced-precision tensor-core kernels (e.g. TensorFloat32,
+    ~10-bit mantissa vs float32's 23-bit). That's usually an acceptable
+    tradeoff, but the Kalman covariance update here (P_upd = P_pred - K @ H @
+    P_pred) subtracts two similar-magnitude matrices, and reduced-precision
+    matmul error gets amplified by that cancellation into an outright
+    indefinite P_pred at the next step (eigenvalues off by ~1e-1, not
+    ~1e-7) -- far too large for any reasonable Cholesky jitter to absorb.
+    Forcing "highest" precision here matches CPU's (always full-precision)
+    behavior and is what actually fixes it, not a bigger jitter.
+
+    Applied as the innermost decorator (below @jit) so the precision is baked
+    into the compiled kernel at trace time, regardless of whatever ambient
+    `jax.default_matmul_precision` the caller has set.
+    """
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        with jax.default_matmul_precision("highest"):
+            return f(*args, **kwargs)
+    return wrapper
+
+
+def _chol_jitter(mat):
+    """Scale-aware jitter added before a stabilizing Cholesky decomposition.
+
+    A fixed 1e-6 (the historical constant here) is only meaningful relative
+    to an O(1)-magnitude matrix; scaling it by the matrix's own mean diagonal
+    keeps it proportionate for differently-scaled covariances. This is a
+    defense-in-depth measure for genuine float32 rounding on borderline
+    (near-singular) matrices -- it is NOT a fix for reduced-precision-matmul
+    errors, which can be orders of magnitude larger than any jitter should
+    reasonably be; see `_highest_matmul_precision` for that.
+    """
+    scale = jnp.maximum(jnp.mean(jnp.abs(jnp.diag(mat))), 1.0)
+    return 1e-6 * scale
+
+
 # %% JAX kernel functions for SSM
 
+@_highest_matmul_precision
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """
     JIT-compiled kernel for simulating a time series from the state-space model using JAX.
@@ -131,6 +173,7 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 """
 
 @jit
+@_highest_matmul_precision
 def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     dtype = y_t.dtype.type()
@@ -179,7 +222,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # reuse, but that duplicated a full (q, q, T) array for something the
         # smoother can recompute inline from the (already stored) P_t_1.
         #invP_pred = solve(P_pred, Iq)
-        L_P = jnp.linalg.cholesky(P_pred + 1e-6 * Iq)  # Add small jitter for numerical stability
+        L_P = jnp.linalg.cholesky(P_pred + _chol_jitter(P_pred) * Iq)  # jitter for numerical stability
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
 
@@ -193,7 +236,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         M = invP_pred + HtinvRH
 
-        L_M = jnp.linalg.cholesky(M + 1e-6 * Iq)  # Add small jitter for numerical stability
+        L_M = jnp.linalg.cholesky(M + _chol_jitter(M) * Iq)  # jitter for numerical stability
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
 
@@ -278,6 +321,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
 
 @jit
+@_highest_matmul_precision
 def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
     dtype = x_t.dtype.type()
@@ -290,7 +334,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
         # (with the same jitter for numerical stability). Recomputed here
         # instead of being read from a stored (q, q, T) invP_t_1 array,
         # since P_t_1 (its input) is already available from the filter pass.
-        L = jnp.linalg.cholesky(P + 1e-6 * Iq)
+        L = jnp.linalg.cholesky(P + _chol_jitter(P) * Iq)
         invL = jax.scipy.linalg.solve_triangular(L, Iq, lower=True)
         return invL.T @ invL
 
@@ -419,6 +463,7 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
 
 @jit
+@_highest_matmul_precision
 def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     """JIT-compiled kernel for computing expected values needed for M-step in EM. This is a straightforward implementation that can be optimized further if needed."""
 
@@ -456,6 +501,7 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
     return y_hat, S11, S10, S00
 
 @jit
+@_highest_matmul_precision
 def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
     """Compute the predicted observations (y_hat) based on the smoothed states and the model parameters."""
     
