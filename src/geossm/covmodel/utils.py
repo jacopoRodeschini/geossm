@@ -6,10 +6,29 @@ import numpy as np
 import pygmsh
 import shapely
 from scipy.spatial import cKDTree
-from shapely.geometry import MultiPoint, Polygon
+from shapely.geometry import MultiPoint, MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 
 # % Utility functions
+
+def _flatten_polygons(geom):
+    """Flatten a Polygon / MultiPolygon / (possibly nested) list of these
+    into a plain list of Polygons."""
+    if isinstance(geom, (list, tuple)):
+        polys = []
+        for g in geom:
+            polys.extend(_flatten_polygons(g))
+        return polys
+    if isinstance(geom, MultiPolygon):
+        return list(geom.geoms)
+    if isinstance(geom, Polygon):
+        return [geom]
+    raise TypeError(
+        "boundary must be a Polygon, a MultiPolygon, or a (possibly "
+        f"nested) list of these; got {type(geom)}."
+    )
+
 
 def _mesh_min_angle(mesh):
     """Smallest interior angle (degrees) over all triangles of a meshio mesh."""
@@ -48,17 +67,22 @@ def buildMesh2d(
     Build a 2D triangular (gmsh/pygmsh) mesh around a set of observed
     locations, in the spirit of R-INLA's ``inla.mesh.2d()``.
 
-    The mesh covers ``boundary`` (or the convex hull of ``points`` if not
-    given), extended outward by ``offset`` to limit boundary effects, with
-    triangle edges bounded by ``max_edge``/``min_edge``.
+    The mesh covers the convex hull of ``boundary`` (or of ``points`` if
+    `boundary` is not given), extended outward by ``offset`` to limit
+    boundary effects, with triangle edges bounded by ``max_edge``/``min_edge``.
 
     Parameters
     ----------
     points : (n, 2) array_like
         Observed locations. Drive the default domain and, when `lowrank`
         is set, the local mesh density. Analogous to INLA's `loc`.
-    boundary : shapely.geometry.Polygon, optional
-        Domain the mesh must cover. Defaults to the convex hull of `points`.
+    boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The scientific-interest domain, e.g. the same composition of
+        polygons passed to `spdeAppoxCov`/`FEMSolver`. It does not need to
+        be convex or a single piece (it can be a disconnected set of
+        regions, as for a country plus its islands): all parts are unioned
+        together, and the mesh is built over the convex hull of that union,
+        extended by `offset`. Defaults to the convex hull of `points`.
     max_edge : float, optional
         Largest allowed triangle edge length. Defaults to 1/15 of the
         domain's bounding-box diagonal.
@@ -77,12 +101,17 @@ def buildMesh2d(
     lowrank : float, optional
         Value in (0, 1]. When given, the local element size is rescaled by
         the density of `points` (finer where points are dense, coarser
-        where they are sparse), so that the resulting mesh has approximately
-        ``round(lowrank * len(points))`` vertices. Local density is a
-        k-nearest-neighbor estimate (see `density_neighbors`) ranked by
-        percentile, rather than a single-bandwidth KDE, so that separate
-        clusters of comparable local density (e.g. several cities) are all
-        refined even if one cluster has far more points overall.
+        where they are sparse), so that the mesh has approximately
+        ``round(lowrank * len(points))`` vertices *inside the scientific-
+        interest domain* -- i.e. inside the union of `boundary` before it is
+        widened to its convex hull and `offset` (or inside the convex hull
+        of `points`, if `boundary` is not given). Vertices in the outer
+        buffer region are not counted and are free to be as sparse as the
+        size field makes them. Local density is a k-nearest-neighbor
+        estimate (see `density_neighbors`) ranked by percentile, rather than
+        a single-bandwidth KDE, so that separate clusters of comparable
+        local density (e.g. several cities) are all refined even if one
+        cluster has far more points overall.
     density_neighbors : int, default 8
         Number of neighbors used for the local density estimate that drives
         `lowrank`. Ignored if `lowrank` is not given.
@@ -103,7 +132,11 @@ def buildMesh2d(
     n_input = len(points)
 
     if boundary is None:
-        boundary = MultiPoint(points).convex_hull
+        interest_domain = MultiPoint(points).convex_hull
+        boundary = interest_domain
+    else:
+        interest_domain = unary_union(_flatten_polygons(boundary))
+        boundary = interest_domain.convex_hull
 
     bbox = boundary.bounds
     diag = float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
@@ -199,18 +232,24 @@ def buildMesh2d(
     if tree is None:
         return _generate(), domain
 
-    # Bisection on a global size-scale factor to hit the target vertex count:
-    # smaller scale -> smaller elements everywhere -> more vertices.
+    def _n_inside(mesh):
+        pts = mesh.points
+        return int(shapely.contains_xy(interest_domain, pts[:, 0], pts[:, 1]).sum())
+
+    # Bisection on a global size-scale factor to hit the target vertex count
+    # *inside the interest domain* (vertices in the outer offset buffer
+    # don't count): smaller scale -> smaller elements everywhere -> more
+    # vertices.
     lo, hi = 0.1, 10.0
     scale = lo
     mesh = _generate(scale=lo, opt_rounds=1)
-    n_lo = len(mesh.points)
+    n_lo = _n_inside(mesh)
 
     if n_lo > target_n:
         for _ in range(max_iter):
             scale = 0.5 * (lo + hi)
             mesh = _generate(scale=scale, opt_rounds=1)
-            n = len(mesh.points)
+            n = _n_inside(mesh)
             if abs(n - target_n) <= max(1, tol * target_n):
                 break
             if n > target_n:
@@ -224,8 +263,9 @@ def buildMesh2d(
     angle = _mesh_min_angle(mesh)
     if angle < min_angle:
         warnings.warn(
-            f"buildMesh2d: reached {len(mesh.points)} vertices "
-            f"(target {target_n}) but the minimum interior angle is "
+            f"buildMesh2d: reached {_n_inside(mesh)} vertices inside the "
+            f"interest domain (target {target_n}; {len(mesh.points)} total "
+            "including the outer buffer) but the minimum interior angle is "
             f"{angle:.1f} deg < min_angle={min_angle} deg. Consider a "
             "larger `lowrank`, or widen the min_edge/max_edge range."
         )
