@@ -680,11 +680,17 @@ class LRStateSpaceModel(StateSpaceModel):
         tmax = self.gridList[0].timestamps.max()
 
          
-        # Compute the design matrices
+        # Compute the design matrices, reusing each formula's training
+        # X_design_info (via self.gridList) so stateful transforms (e.g.
+        # standardize()) are evaluated with the training mean/std rather
+        # than recomputed on `df`.
         self._log("Building observation grid...")
 
         nvar, points, gridList, ndim, pdim, block_p, T = (
-            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose, tmin=tmin, tmax=tmax)
+            self._buildObservationGrid(
+                df, self.formulas, predict=True, verbose=verbose, tmin=tmin, tmax=tmax,
+                train_grids=self.gridList,
+            )
         )
         
         if nvar != self.nvar:
@@ -1691,12 +1697,25 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None):
+    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None, train_grids=None):
 
         nvar = len(formulas)  # numer of the response variable
 
-        # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
-        dfs = [DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
+        # train_grids, when given, is the DesignMatrices list built during
+        # training (self.gridList) -- its per-formula X_design_info is
+        # reused so predict=True evaluates stateful transforms (e.g. the
+        # mean/std of standardize()) with training statistics instead of
+        # recomputing them on `df`.
+        design_info_list = (
+            [grid.X_design_info for grid in train_grids] if train_grids is not None else [None] * nvar
+        )
+
+        dfs = [
+            DesignMatricesBuilder(
+                df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax, design_info=di,
+            ).build(predict=predict)
+            for f, di in zip(formulas, design_info_list)
+        ]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
