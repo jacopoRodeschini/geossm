@@ -53,7 +53,7 @@ def _mesh_min_angle(mesh):
 
 
 def _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff):
-    """Shared setup for buildMesh2d/buildMesh2d_pen: normalizes `boundary`
+    """Shared setup for buildMesh2d/buildMesh2d_density: normalizes `boundary`
     (Polygon, MultiPolygon, or a possibly nested list of these) into the
     scientific-interest domain and the convex hull used to build the mesh,
     fills in max_edge/min_edge/offset/cutoff defaults, merges near-
@@ -306,7 +306,7 @@ def buildMesh2d(
     return mesh, domain
 
 
-def buildMesh2d_pen(
+def buildMesh2d_density(
     points,
     lowrank,
     boundary=None,
@@ -340,14 +340,27 @@ def buildMesh2d_pen(
     domain, gmsh fills in the rest from the landmarks' own local spacing
     (`Mesh.MeshSizeFromPoints`) alone -- not a flat `max_edge` cap, which
     would force even the sparsest landmark-free pockets down to `max_edge`
-    and badly overshoot the vertex budget for a small `lowrank`. `max_edge`
-    is instead only imposed as a hard cap *outside* the interest domain,
-    chiefly the outer offset buffer, which has no landmarks at all to size
-    itself from. Either way, `max_edge` (and the landmarks' own local
-    spacing) is what keeps interior angles away from zero: an abrupt jump
+    and badly overshoot the vertex budget for a small `lowrank`. Outside
+    the interest domain -- the outer offset buffer, and, for a concave or
+    multi-part `boundary` (e.g. a country plus its islands), any bay or
+    strait that falls inside the convex hull but outside the true shape --
+    there are no landmarks to size from, so a lattice of extra "filler"
+    vertices at `max_edge` spacing is embedded there too, exactly like the
+    landmarks (a runtime "outside the interest domain -> cap at max_edge"
+    size field was tried instead of this lattice, but its discontinuity
+    made gmsh's mesher visibly struggle on a finely-detailed real
+    coastline, silently leaving that whole region under-meshed). The
+    lattice is pulled back about half a cell from both the interest
+    domain's edge and the outer boundary, rather than filling all the way
+    up to them: a raw grid clipped flush against a slanted or jagged edge
+    produces its own near-zero-angle slivers, so that margin is instead
+    left to gmsh's ordinary boundary-conforming triangulation, which
+    bridges it cleanly from the landmarks/boundary vertices already on
+    either side. Either way, `max_edge` (via the filler lattice) and the landmarks' own local
+    spacing are what keep interior angles away from zero: an abrupt jump
     from a tight cluster of landmarks straight to a coarse neighboring
     region would force sliver triangles, so gmsh grades a few extra
-    (non-landmark) vertices in between as needed.
+    vertices in between as needed.
 
     Because that grading adds a few vertices beyond the landmarks
     themselves, asking k-means for exactly ``round(lowrank * len(points))``
@@ -377,11 +390,11 @@ def buildMesh2d_pen(
         The scientific-interest domain; see `buildMesh2d`. Defaults to the
         convex hull of `points`.
     max_edge : float, optional
-        Largest allowed triangle edge length, enforced as a hard cap in the
-        outer buffer (outside the interest domain) and as an upper bound on
-        each landmark's own local-spacing size; not otherwise enforced
-        inside the interest domain, so it does not fight `lowrank` -- see
-        above. Defaults to 1/15 of the domain's bounding-box diagonal.
+        Largest allowed triangle edge length, enforced by the filler
+        lattice outside the interest domain and as an upper bound on each
+        landmark's own local-spacing size; not otherwise enforced inside
+        the interest domain, so it does not fight `lowrank` -- see above.
+        Defaults to 1/15 of the domain's bounding-box diagonal.
     min_edge : float, optional
         Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
     offset : float, optional
@@ -389,7 +402,18 @@ def buildMesh2d_pen(
         Defaults to `max_edge`.
     cutoff : float, optional
         Minimum allowed separation between points, and independently
-        between landmarks (see above). Defaults to `max_edge / 5`.
+        between landmarks, and independently between a landmark and any
+        filler vertex (see above). Left at its default, this is derived
+        from `target_n` and the interest domain's area instead of
+        `max_edge` (unlike `buildMesh2d`): a large `max_edge`, appropriate
+        for a sparse, data-free outer buffer, has nothing to do with how
+        tightly `target_n` landmarks need to pack, and a `max_edge/5`
+        default would otherwise silently cap the achievable landmark count
+        well below `target_n`. That default is also shrunk automatically
+        (up to a few times) if it still leaves too few landmarks to reach
+        `target_n`. Passing `cutoff` explicitly disables both and is
+        honored exactly, even if that undershoots `target_n` (reported via
+        a warning).
     min_angle : float, default 21.0
         Target minimum interior angle (degrees). This is a soft target
         graded around the fixed landmarks; it is not enforced on the
@@ -422,18 +446,84 @@ def buildMesh2d_pen(
         The (buffered) domain the mesh was built over -- `boundary` (or its
         default) extended by `offset`.
     """
-    points, n_input, interest_domain, domain, coords, max_edge, min_edge, offset, cutoff = (
-        _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff)
+    cutoff_is_default = cutoff is None
+    # `cutoff` doubles as the *landmark* minimum spacing here -- a far more
+    # binding constraint than in buildMesh2d, where it only merges near-
+    # duplicate input points to protect a KNN density estimate this
+    # function doesn't use. _prepare_domain's own max_edge/5 default is
+    # tuned for buildMesh2d's smooth size field (anchored to max_edge
+    # throughout); in this function max_edge only describes the outer/gap
+    # resolution (see above), unrelated to real point spacing -- applying
+    # that default to _prepare_domain's *point*-level dedup can silently
+    # discard a large fraction of real, distinct observations before
+    # landmark selection ever sees them. So when `cutoff` is left at its
+    # default, only literal duplicate points are merged at this stage
+    # (dedup_cutoff=0); the actual landmark-spacing default is computed
+    # below instead, once target_n is known. An explicit user `cutoff` is
+    # instead applied at both stages, exactly as in buildMesh2d.
+    dedup_cutoff = 0.0 if cutoff_is_default else cutoff
+    points, n_input, interest_domain, domain, coords, max_edge, min_edge, offset, _ = (
+        _prepare_domain(points, boundary, max_edge, min_edge, offset, dedup_cutoff)
     )
 
     if not (0 < lowrank <= 1):
         raise ValueError("lowrank must be in (0, 1].")
     target_n = min(len(points), max(3, round(lowrank * n_input)))
 
+    if cutoff_is_default:
+        # Rebase the landmark-spacing default on the spacing target_n
+        # landmarks would have if evenly spread over the interest domain
+        # (a further adaptive fallback below shrinks it more if even this
+        # undershoots the achievable landmark count).
+        even_spacing = np.sqrt(interest_domain.area / target_n)
+        cutoff = 0.3 * even_spacing
+    else:
+        cutoff = dedup_cutoff
+
     # fixed for the duration of this call, so repeated k-means calls below
     # are directly comparable (see `seed` docs above)
     if seed is None:
         seed = int(np.random.default_rng().integers(0, 2**31 - 1))
+
+    # Candidate "filler" vertices for the gap between the interest domain
+    # and the full meshed extent -- everywhere in `domain` that isn't in
+    # `interest_domain`: the outer offset buffer, but also, for a concave
+    # or multi-part `boundary` (e.g. a country plus its islands), any bay
+    # or strait that falls inside the convex hull but outside the true
+    # shape. A lattice at `max_edge` spacing, later embedded exactly like
+    # landmarks so that region's resolution is *guaranteed* by an explicit
+    # vertex, not left to chance. (A first version instead relied on a
+    # runtime "outside interest_domain -> cap at max_edge" size callback;
+    # for a finely-detailed real coastline that discontinuous field made
+    # gmsh's mesher visibly struggle -- silently near-empty triangles
+    # spanning the whole gap -- so it's replaced by this explicit lattice,
+    # which uses gmsh's native per-point sizing instead of a callback.)
+    #
+    # A raw square lattice clipped straight against a slanted or jagged
+    # polygon edge produces exactly the near-zero-angle slivers this is
+    # meant to avoid: a lattice point can land just barely inside the
+    # boundary, forcing a triangle that connects it to a much farther
+    # neighbor across the cut cell. So candidates are pulled back by
+    # roughly half a lattice cell from *both* boundaries -- `domain`'s own
+    # outer edge, and `interest_domain`'s edge (widened outward, since
+    # filler sits outside it) -- leaving those margins for gmsh's ordinary
+    # boundary-conforming triangulation (well-behaved for this) to bridge
+    # using the landmarks/boundary-ring vertices already on either side,
+    # instead of a misaligned lattice point.
+    minx, miny, maxx, maxy = domain.bounds
+    nx = max(2, int(np.ceil((maxx - minx) / max_edge)) + 1)
+    ny = max(2, int(np.ceil((maxy - miny) / max_edge)) + 1)
+    xx, yy = np.meshgrid(np.linspace(minx, maxx, nx), np.linspace(miny, maxy, ny))
+    grid = np.column_stack([xx.ravel(), yy.ravel()])
+    domain_core = domain.buffer(-max_edge * 0.5)
+    if domain_core.is_empty:
+        domain_core = domain
+    interest_expanded = interest_domain.buffer(max_edge * 0.5)
+    inside_domain_core = shapely.contains_xy(domain_core, grid[:, 0], grid[:, 1])
+    outside_interest_expanded = ~shapely.contains_xy(
+        interest_expanded, grid[:, 0], grid[:, 1]
+    )
+    filler_candidates = grid[inside_domain_core & outside_interest_expanded]
 
     def _place_landmarks(n_landmarks):
         n_landmarks = max(1, min(n_landmarks, len(points)))
@@ -489,12 +579,27 @@ def buildMesh2d_pen(
         # element size from each point's *own* local spacing, so a sparse
         # region isn't padded with extra fill just because `max_edge` is
         # tuned for a denser region elsewhere.
+        ltree = cKDTree(landmarks)
         if len(landmarks) > 1:
-            ltree = cKDTree(landmarks)
             nn_dist, _ = ltree.query(landmarks, k=2)
             landmark_lc = np.clip(nn_dist[:, 1], min_edge, max_edge)
         else:
-            landmark_lc = np.array([max_edge])
+            landmark_lc = np.full(len(landmarks), max_edge)
+
+        # keep only filler candidates that don't crowd a landmark (mirrors
+        # the landmark-landmark `cutoff` filter just above)
+        if cutoff > 0 and len(filler_candidates) > 0:
+            d, _ = ltree.query(filler_candidates)
+            filler = filler_candidates[d >= cutoff]
+        else:
+            filler = filler_candidates
+
+        all_points = np.vstack([landmarks, filler]) if len(filler) else landmarks
+        all_lc = (
+            np.concatenate([landmark_lc, np.full(len(filler), max_edge)])
+            if len(filler)
+            else landmark_lc
+        )
 
         with pygmsh.occ.Geometry() as geom:
             surf = geom.add_polygon(coords, mesh_size=max_edge)
@@ -502,33 +607,22 @@ def buildMesh2d_pen(
 
             embedded_tags = [
                 gmsh.model.occ.addPoint(x, y, 0, lc)
-                for (x, y), lc in zip(landmarks, landmark_lc)
+                for (x, y), lc in zip(all_points, all_lc)
             ]
             gmsh.model.occ.synchronize()
             gmsh.model.mesh.embed(0, embedded_tags, 2, surf.dim_tag[1])
 
             gmsh.option.setNumber("Mesh.Algorithm", 6)
-            # let element size follow the (embedded) landmarks' own
-            # spacing, rather than a hand-built field as in buildMesh2d
+            # let element size follow every embedded point's own local
+            # spacing/assignment (landmarks *and* filler), rather than a
+            # hand-built field as in buildMesh2d or a runtime callback
             gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 1)
             gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_edge)
+            # a loose safety cap only -- per-point sizes above do the real
+            # work, both inside the interest domain (landmark_lc) and in
+            # the gap/buffer (filler, at a flat max_edge)
             gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 1.0e22)
-            # `max_edge` is a hard cap only *outside* the interest domain
-            # (chiefly the outer offset buffer, which has no landmarks at
-            # all to size itself from). A flat cap applied everywhere would
-            # also force the interest domain's sparser areas down to
-            # `max_edge`, which for a small `lowrank` is typically much
-            # finer than the landmarks alone need -- exactly what
-            # overshoots the vertex-count target. Inside the interest
-            # domain, sizing is left to `landmark_lc`/MeshSizeFromPoints
-            # above (the large sentinel here is a no-op, combined via min).
-            def _outer_cap(dim, tag, x, y, z, lc):
-                if shapely.contains_xy(interest_domain, x, y):
-                    return 1.0e22
-                return max_edge
-
-            gmsh.model.mesh.setSizeCallback(_outer_cap)
 
             gmsh.model.mesh.generate(2)
             for _ in range(opt_rounds):
@@ -553,6 +647,26 @@ def buildMesh2d_pen(
     landmarks = _place_landmarks(hi)
     mesh = _generate(landmarks, opt_rounds=1)
     n_hi = _n_inside(mesh)
+
+    # If even asking for target_n landmarks (the most this search ever
+    # requests) undershoots, `cutoff` -- not `lowrank` -- is the binding
+    # constraint: no amount of bisecting the requested count downward can
+    # help, since that count is already capped by cutoff-merging. When
+    # `cutoff` was left at its default, shrink it and retry a few times
+    # before falling back to the ordinary search; an explicit user
+    # `cutoff` is instead honored as-is (the tol warning below still
+    # reports the shortfall).
+    shrink_tries = 0
+    while (
+        cutoff_is_default
+        and n_hi < target_n - max(1, tol * target_n)
+        and shrink_tries < 6
+    ):
+        cutoff /= 2
+        landmarks = _place_landmarks(hi)
+        mesh = _generate(landmarks, opt_rounds=1)
+        n_hi = _n_inside(mesh)
+        shrink_tries += 1
 
     best_landmarks, best_diff = landmarks, abs(n_hi - target_n)
 
@@ -582,7 +696,7 @@ def buildMesh2d_pen(
     angle = _mesh_min_angle(mesh)
     if angle < min_angle:
         warnings.warn(
-            f"buildMesh2d_pen: {len(landmarks)} landmark vertices placed "
+            f"buildMesh2d_density: {len(landmarks)} landmark vertices placed "
             f"(requested from a {target_n}-vertex target), {n_inside} mesh "
             "vertices inside the interest domain, but the minimum interior "
             f"angle is {angle:.1f} deg < min_angle={min_angle} deg. "
@@ -592,7 +706,7 @@ def buildMesh2d_pen(
         )
     if best_diff > max(1, tol * target_n):
         warnings.warn(
-            f"buildMesh2d_pen: reached {n_inside} vertices inside the "
+            f"buildMesh2d_density: reached {n_inside} vertices inside the "
             f"interest domain, outside the requested tolerance of target "
             f"{target_n} (tol={tol}). Consider a larger `max_iter`, or a "
             "coarser `max_edge` relative to the typical spacing between "
