@@ -784,6 +784,103 @@ def buildMesh2d_density(
     return mesh, domain
 
 
+# Maps buildMesh2d_new's simplified `method` onto buildMesh2d_density's
+# underlying (snap_to_points, relax_iters) knobs -- see buildMesh2d_new.
+_DENSITY_METHODS = {
+    "exact": {"snap_to_points": True, "relax_iters": 0},
+    "centroid": {"snap_to_points": False, "relax_iters": 0},
+    "relaxed": {"snap_to_points": False, "relax_iters": 2},
+}
+
+
+def buildMesh2d_new(
+    points,
+    lowrank,
+    boundary=None,
+    method="exact",
+    max_edge=None,
+    min_angle=21.0,
+    seed=None,
+):
+    """
+    Simplified front door to `buildMesh2d_density`'s density-matched mesh:
+    picks a landmark-placement `method` instead of juggling
+    `snap_to_points`/`relax_iters` directly, and leaves every other knob
+    (`min_edge`, `offset`, `cutoff`, `tol`, `max_iter`) at
+    `buildMesh2d_density`'s own defaults, which are self-tuning (derived
+    from `lowrank`, the interest domain, and `max_edge`) and rarely need
+    hand-adjustment. This wrapper adds no logic of its own -- it exists to
+    cut down the parameter surface, not to reimplement the mesher; call
+    `buildMesh2d_density` directly for full control (a different
+    `cutoff`/`tol`/`max_iter`, or a `relax_iters` count other than the
+    "relaxed" method's default of 2).
+
+    Parameters
+    ----------
+    points : (n, 2) array_like
+        Observed locations.
+    lowrank : float
+        Value in [0, 1]. Target vertex count inside the interest domain,
+        as a fraction of `len(points)`; see `buildMesh2d_density`.
+    boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The scientific-interest domain. Defaults to the convex hull of
+        `points`.
+    method : {"exact", "centroid", "relaxed"}, default "exact"
+        How landmark vertices relate to `points` (all are placed via
+        k-means, so their density still tracks the density of `points`;
+        this only changes where *within* that density each landmark
+        actually sits):
+
+        - ``"exact"``: landmarks coincide exactly with observed points
+          (nearest-point snapping). Choose this when downstream model
+          fitting needs the latent field's degrees of freedom to sit
+          directly on observations.
+        - ``"centroid"``: landmarks are left at raw k-means centroids --
+          close to the data, generally not exactly on it, no further
+          smoothing.
+        - ``"relaxed"``: k-means centroids, then a few rounds of Delaunay-
+          neighbor smoothing. Usually the best triangle quality (interior
+          angles), at the cost of landmarks no longer sitting at specific
+          observations. Recommended over `"centroid"` whenever `lowrank`
+          is close to 1: k-means with that many clusters places a
+          centroid on every point regardless of method, so smoothing is
+          what actually gives room to move landmarks off the raw data.
+    max_edge : float, optional
+        Largest triangle edge length outside the interest domain (and an
+        upper bound on landmark spacing inside it). Defaults to 1/15 of
+        the domain's bounding-box diagonal.
+    min_angle : float, default 21.0
+        Soft target for the minimum interior angle (degrees); see
+        `buildMesh2d_density`.
+    seed : int, optional
+        Seed for the landmark search, for reproducibility.
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    domain : shapely.geometry.Polygon
+        The (buffered) domain the mesh was built over.
+
+    Examples
+    --------
+    >>> mesh, domain = buildMesh2d_new(points, lowrank=0.3)
+    >>> mesh, domain = buildMesh2d_new(points, lowrank=1.0, method="relaxed")
+    """
+    if method not in _DENSITY_METHODS:
+        raise ValueError(
+            f"method must be one of {sorted(_DENSITY_METHODS)}, got {method!r}."
+        )
+    return buildMesh2d_density(
+        points,
+        lowrank,
+        boundary=boundary,
+        max_edge=max_edge,
+        min_angle=min_angle,
+        seed=seed,
+        **_DENSITY_METHODS[method],
+    )
+
+
 def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):
     """Drop triangles touching any vertex with fewer than `min_degree`
     distinct mesh edges, iterating since removal can lower a neighbor's
