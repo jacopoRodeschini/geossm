@@ -183,7 +183,7 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 points, y_hat, Sigma_y_hat, tdelta = model.predict(grid, results)
 # points, y_hat_v1, Sigma_y_hat, tdelta = results.predict(grid, verbose=True)
 
-# %% PLot the results using imshow (for each time step)
+# %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
 
 # Define month boundaries (assuming daily data for a year)

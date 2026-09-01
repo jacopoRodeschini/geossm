@@ -376,7 +376,7 @@ class LRStateSpaceModel(StateSpaceModel):
             self._log("Building observation grid...")
 
 
-            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
                 self._buildObservationGrid(df, formulas, verbose=verbose)
             )
 
@@ -544,7 +544,7 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             self._log("Building observation grid...")
             
-            nvar, points, gridList, ndim, pdim, block_p, T = (
+            nvar, points, gridList, ndim, pdim, block_p, T, _ = (
                 self._buildObservationGrid(self.df, formulas, verbose=verbose)
             )
             self._log("Building observation grid... Done.")
@@ -674,28 +674,15 @@ class LRStateSpaceModel(StateSpaceModel):
         """ 
         self._log("Predicting response variable...")
 
-        # Cut the dataframe time to the time range of the model results
-        self._log("Cutting the dataframe to the time range of the model results...")
-        tmin = self.gridList[0].timestamps.min()
-        tmax = self.gridList[0].timestamps.max()
-
-         
-        # Compute the design matrices, reusing each formula's training
-        # X_design_info (via self.gridList) so stateful transforms (e.g.
+        # Compute the design matrices via each formula's fitted builder
+        # (self.builders), which cuts `df` to its own training time range
+        # and reuses its X_design_info so stateful transforms (e.g.
         # standardize()) are evaluated with the training mean/std rather
         # than recomputed on `df`.
         self._log("Building observation grid...")
 
-        nvar, points, gridList, ndim, pdim, block_p, T = (
-            self._buildObservationGrid(
-                df, self.formulas, predict=True, verbose=verbose, tmin=tmin, tmax=tmax,
-                train_grids=self.gridList,
-            )
-        )
-        
-        if nvar != self.nvar:
-            raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
-    
+        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(df, verbose=verbose)
+
         self._log("Building Prediction grid... Done.")
 
         self._log("Building the design matrix...")
@@ -1697,25 +1684,15 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None, train_grids=None):
+    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None):
 
         nvar = len(formulas)  # numer of the response variable
 
-        # train_grids, when given, is the DesignMatrices list built during
-        # training (self.gridList) -- its per-formula X_design_info is
-        # reused so predict=True evaluates stateful transforms (e.g. the
-        # mean/std of standardize()) with training statistics instead of
-        # recomputing them on `df`.
-        design_info_list = (
-            [grid.X_design_info for grid in train_grids] if train_grids is not None else [None] * nvar
-        )
-
-        dfs = [
-            DesignMatricesBuilder(
-                df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax, design_info=di,
-            ).build(predict=predict)
-            for f, di in zip(formulas, design_info_list)
+        builders = [
+            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax)
+            for f in formulas
         ]
+        dfs = [b.build() for b in builders]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
@@ -1725,7 +1702,26 @@ class LRStateSpaceModel(StateSpaceModel):
         block_p = np.hstack((0, np.cumsum(pdim)))
         ndim = block_p[-1]
 
-        return nvar, points, dfs, ndim, pdim, block_p, T
+        return nvar, points, dfs, ndim, pdim, block_p, T, builders
+
+    def _buildPredictionGrid(self, df, verbose=True):
+        """
+        Build the design matrices for new (prediction) locations/times, one
+        per formula, reusing each formula's fitted `DesignMatricesBuilder`
+        (`self.builders`, set in `__init__`) so stateful transforms (e.g.
+        standardize()) reuse training statistics instead of being recomputed
+        on `df`.
+        """
+        dfs = [b.build_predict(df, verbose=verbose) for b in self.builders]
+
+        T = [gr.T for gr in dfs]
+        points = [gr.points for gr in dfs]
+
+        pdim = [grid.N for grid in dfs]
+        block_p = np.hstack((0, np.cumsum(pdim)))
+        ndim = block_p[-1]
+
+        return points, dfs, ndim, pdim, block_p, T
     
     def _buildDesignMatrix(self, gridList):
 
