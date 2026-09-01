@@ -6,7 +6,7 @@ import numpy as np
 import pygmsh
 import shapely
 from scipy.cluster.vq import kmeans2
-from scipy.spatial import cKDTree
+from scipy.spatial import cKDTree, Delaunay, QhullError
 from scipy.spatial.distance import cdist
 from shapely.geometry import MultiPoint, MultiPolygon, Polygon
 from shapely.ops import unary_union
@@ -306,6 +306,49 @@ def buildMesh2d(
     return mesh, domain
 
 
+def _relax_landmarks(landmarks, n_iter, containing_domain, damping=0.5):
+    """A few rounds of Delaunay-neighbor averaging, pulling landmarks that
+    sit unusually close to a neighbor (colinear or tightly clustered raw
+    points -- the case k-means's own placement cannot fix, see below)
+    toward locally more even spacing, without erasing the overall density
+    signal of `points` (each step is a local, damped nudge, not a full
+    Lloyd-relaxation to convergence). Landmarks that would leave
+    `containing_domain` are reverted to their pre-step position instead of
+    being clipped, since clipping onto its boundary can itself create new
+    close pairs there."""
+    if n_iter <= 0 or len(landmarks) < 4:
+        return landmarks
+
+    pts = landmarks.copy()
+    for _ in range(n_iter):
+        try:
+            tri = Delaunay(pts)
+        except QhullError:
+            break
+
+        neighbor_sum = np.zeros_like(pts)
+        neighbor_count = np.zeros(len(pts))
+        for simplex in tri.simplices:
+            for i in simplex:
+                for j in simplex:
+                    if i != j:
+                        neighbor_sum[i] += pts[j]
+                        neighbor_count[i] += 1
+
+        has_neighbors = neighbor_count > 0
+        target = pts.copy()
+        target[has_neighbors] = (
+            neighbor_sum[has_neighbors] / neighbor_count[has_neighbors, None]
+        )
+        new_pts = pts + damping * (target - pts)
+
+        inside = shapely.contains_xy(containing_domain, new_pts[:, 0], new_pts[:, 1])
+        new_pts[~inside] = pts[~inside]
+        pts = new_pts
+
+    return pts
+
+
 def buildMesh2d_density(
     points,
     lowrank,
@@ -316,6 +359,7 @@ def buildMesh2d_density(
     cutoff=None,
     min_angle=21.0,
     snap_to_points=True,
+    relax_iters=2,
     tol=0.05,
     max_iter=20,
     seed=None,
@@ -384,8 +428,10 @@ def buildMesh2d_density(
     points : (n, 2) array_like
         Observed locations.
     lowrank : float
-        Value in (0, 1]. Target number of vertices inside the interest
-        domain, as a fraction of `len(points)` -- see above.
+        Value in [0, 1]. Target number of vertices inside the interest
+        domain, as a fraction of `len(points)` -- see above. Values that
+        would ask for fewer than 3 landmarks, including 0, are floored to
+        3 (a single triangle), the smallest possible triangulation.
     boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
         The scientific-interest domain; see `buildMesh2d`. Defaults to the
         convex hull of `points`.
@@ -423,8 +469,20 @@ def buildMesh2d_density(
         If True (recommended), landmarks coincide exactly with observed
         points (greedy nearest-pair matching from k-means centroids to
         `points`). If False, landmarks are left at the k-means centroids
-        themselves -- close to the data but generally not exactly on it,
-        which can give a smoother, better-quality triangulation.
+        (relaxed by `relax_iters`) -- close to the data but generally not
+        exactly on it, which can give a smoother, better-quality
+        triangulation.
+    relax_iters : int, default 2
+        Only used when `snap_to_points=False`. Number of Delaunay-neighbor
+        averaging passes applied to the k-means centroids before they are
+        embedded, nudging landmarks that ended up too close to a neighbor
+        toward more even local spacing. Centroids alone are not enough:
+        when `target_n` (via `lowrank`) approaches `len(points)`, k-means
+        with that many clusters degenerates to one point per cluster, so
+        every centroid lands exactly on its point regardless of
+        `snap_to_points` -- this is what actually gives `snap_to_points`
+        room to move landmarks off the raw data in that regime. Set to 0
+        to disable and use the raw (possibly point-coincident) centroids.
     tol : float, default 0.05
         Relative tolerance on the vertex-count target used to stop the
         landmark-count search. Landmark placement (via k-means) and mesh
@@ -468,6 +526,9 @@ def buildMesh2d_density(
 
     if not (0 < lowrank <= 1):
         raise ValueError("lowrank must be in (0, 1].")
+    # 3 is the smallest possible triangulation (a single triangle); lowrank
+    # values that would ask for fewer landmarks than that (including 0)
+    # are floored to it rather than rejected.
     target_n = min(len(points), max(3, round(lowrank * n_input)))
 
     if cutoff_is_default:
@@ -556,7 +617,14 @@ def buildMesh2d_density(
                         break
             landmarks = points[centroid_to_point]
         else:
-            landmarks = centroids
+            # Raw centroids alone don't reliably move landmarks off the
+            # data: as target_n -> len(points), k-means with that many
+            # clusters degenerates to one point per cluster, so every
+            # centroid lands exactly on its point regardless of
+            # snap_to_points (verified: distance 0 to the nearest point).
+            # Relaxation is what actually gives snap_to_points=False room
+            # to improve on that.
+            landmarks = _relax_landmarks(centroids, relax_iters, interest_domain)
 
         # enforce a minimum landmark separation: two landmarks closer than
         # `cutoff` would force a sliver triangle that fixed (embedded)
