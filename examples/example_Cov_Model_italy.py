@@ -11,7 +11,7 @@ import numpy as np
 import geopandas as geodf
 import geossm.datasets as df
 from geossm.covmodel import FEMSolver
-from geossm.covmodel.utils import buildMesh2d, buildMesh2d_pen
+from geossm.covmodel.utils import buildMesh2d, buildMesh2d_density
 from shapely import ops
 
 # %% Import the grins dataset
@@ -52,7 +52,7 @@ lr = [0.5, 0.75]
 
 # meshes = [buildMesh2d(points, max_edge=0.4, min_edge=0.1, lowrank=r, density_neighbors=8) for r in  lr]
 
-meshes = [buildMesh2d_pen(points, lowrank=r, snap_to_points=False, cutoff=0.01) for r in  lr]
+meshes = [buildMesh2d_density(points, lowrank=r, snap_to_points=False, cutoff=0.01) for r in  lr]
 
 for i, (mesh_lr, buffer) in enumerate(meshes):
     print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
