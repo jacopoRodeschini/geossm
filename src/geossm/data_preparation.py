@@ -509,32 +509,17 @@ class DesignMatrices:
 class DesignMatricesBuilder:
 
     def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = True,
-                 tmin: datetime = None, tmax: datetime = None, design_info: object = None):
+                 tmin: datetime = None, tmax: datetime = None):
         """
         Prepare the spatial-temporal dataset for modeling.
-
-        Parameters
-        ----------
-        design_info : patsy.DesignInfo, optional
-            The `X_design_info` of a `DesignMatrices` already built on the
-            *training* data. When given, `build(predict=True)` reuses it
-            (via `patsy.build_design_matrices`) instead of re-parsing the
-            formula, so stateful transforms such as `standardize(...)` are
-            evaluated with the training mean/std rather than being
-            recomputed on the prediction data.
         """
         self.verbose = verbose
         self.dtype = np.dtype(dtype)
-        self.design_info = design_info
         self._log("Initializing DesignMatricesBuilder")
 
-        if not isinstance(geodf, geopd.GeoDataFrame):
-            raise ValueError("Input dataset must be a GeoDataFrame")
-
-        self.geodf = geodf.copy()
         self.formula = formula
-        self.crs = self.geodf.crs
-        self.box = np.round(self.geodf.total_bounds, 3).tolist()  # [minx, miny, maxx, maxy]
+        self.tmin = tmin
+        self.tmax = tmax
 
         self.formula_info = self._check_formula(formula)
         if self.formula_info.response_name:
@@ -542,24 +527,45 @@ class DesignMatricesBuilder:
         else:
             self._log("Formula parsed successfully. No response variable found")
 
-        self.geometry_id = self._check_spatial_dataset(self.geodf)
-        self.geometry = pd.unique(self.geodf.geom_type)
+        (
+            self.geodf, self.geometry_id, self.time_col_name,
+            self.crs, self.box, self.geometry, self.delta, self.unit,
+        ) = self._prepare_geodf(geodf, tmin, tmax)
         self._log(f"Spatial check passed using geometry id column '{self.geometry_id}'")
-
-        self.time_col_name = self._check_time_dataset(self.geodf)
         self._log(f"Time column detected: '{self.time_col_name}'")
-        self._coerce_time_column(self.geodf, self.time_col_name)
-
-        self._check_formula_columns_exist(self.geodf)
-
-        self.delta, self.unit = self._check_time_regularity(self.geodf, self.time_col_name)
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
 
-        self._cast_numeric_columns(self.geodf)
+    def _prepare_geodf(self, geodf, tmin, tmax):
+        """
+        Run every check/coercion a GeoDataFrame needs before it can be
+        turned into design matrices. Shared by `__init__` (on the training
+        data) and `build_predict` (on new data), so both paths validate
+        identically and can't drift apart.
+        """
+        if not isinstance(geodf, geopd.GeoDataFrame):
+            raise ValueError("Input dataset must be a GeoDataFrame")
+
+        geodf = geodf.copy()
+        crs = geodf.crs
+        box = np.round(geodf.total_bounds, 3).tolist()  # [minx, miny, maxx, maxy]
+
+        geometry_id = self._check_spatial_dataset(geodf)
+        geometry = pd.unique(geodf.geom_type)
+
+        time_col_name = self._check_time_dataset(geodf)
+        self._coerce_time_column(geodf, time_col_name)
+
+        self._check_formula_columns_exist(geodf)
+
+        delta, unit = self._check_time_regularity(geodf, time_col_name)
+
+        self._cast_numeric_columns(geodf, geometry_id)
 
         # Cut the dataset to the specified time range if tmin and tmax are provided
         if tmin is not None or tmax is not None:
-            self._filter_time_range(tmin, tmax)
+            geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax)
+
+        return geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit
 
     def _log(self, msg: str) -> None:
         if self.verbose:
@@ -578,13 +584,49 @@ class DesignMatricesBuilder:
         finally:
             self.verbose = previous
 
-    def build(self, predict=False, verbose=None):
+    def build(self, verbose=None) -> "DesignMatrices":
         with self._verbosity(verbose):
             self._log("Building design matrices from GeoDataFrame")
-            lhs_termlist = [] if predict else self.formula_info.lhs_termlist
-            self.design_matrices = self._build_geodataframe(lhs_termlist, self.formula_info.rhs_termlist)
+            self.design_matrices = self._build_geodataframe(
+                self.formula_info.lhs_termlist, self.formula_info.rhs_termlist
+            )
             self._log("Design matrices built successfully")
+        # self.geodf is no longer needed once the matrices are built -- free
+        # it so a builder kept around (e.g. for build_predict) only holds
+        # the small formula/design_info state, not a copy of the training data.
+        del self.geodf
         return self.design_matrices
+
+    def build_predict(self, df: geopd.GeoDataFrame, verbose=None) -> "DesignMatrices":
+        """
+        Build the design matrix for new (prediction) locations/times, reusing
+        this builder's fitted `X_design_info` so stateful transforms (e.g.
+        `standardize(...)`) are evaluated with the training mean/std instead
+        of being recomputed on `df`. `build()` must be called first.
+        """
+        if not hasattr(self, "design_matrices"):
+            raise ValueError("build() must be called before build_predict()")
+
+        with self._verbosity(verbose):
+            self._log("Building prediction design matrices from GeoDataFrame")
+            # Cut `df` to the time range actually observed in the training
+            # build, not the raw tmin/tmax passed to the constructor: the
+            # observed range already accounts for any such filtering plus
+            # whatever timestamps the training data actually had.
+            train_tmin = self.design_matrices.timestamps.min()
+            train_tmax = self.design_matrices.timestamps.max()
+            geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
+                self._prepare_geodf(df, train_tmin, train_tmax)
+            )
+            self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
+            self._log(f"Time column detected: '{time_col_name}'")
+            self._log(f"Time consistency check passed: delta {delta}, unit {unit}")
+
+            self.predict_design_matrices = self._compute_predict_design_matrix(
+                geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
+            )
+            self._log("Prediction design matrices built successfully")
+        return self.predict_design_matrices
 
     def __call__(self, verbose=None):
         if not hasattr(self, "design_matrices"):
@@ -715,10 +757,10 @@ class DesignMatricesBuilder:
             raise ValueError(f"Timestamps in column '{time_col_name}' are not regularly spaced")
         return delta, unit
 
-    def _cast_numeric_columns(self, geodf) -> None:
+    def _cast_numeric_columns(self, geodf, geometry_id) -> None:
         numeric_cols = [
             col for col in geodf.columns
-            if pd.api.types.is_numeric_dtype(geodf[col]) and col != self.geometry_id
+            if pd.api.types.is_numeric_dtype(geodf[col]) and col != geometry_id
         ]
         geodf[numeric_cols] = (
             geodf[numeric_cols]
@@ -727,18 +769,19 @@ class DesignMatricesBuilder:
         )
         self._log(f"Converted numeric columns to dtype={self.dtype}")
 
-    def _filter_time_range(self, tmin, tmax) -> None:
+    def _filter_time_range(self, geodf, time_col_name, tmin, tmax):
         self._log("Filtering dataset by time range")
         if tmin is not None:
-            self.geodf = self.geodf[self.geodf[self.time_col_name] >= pd.to_datetime(tmin)]
+            geodf = geodf[geodf[time_col_name] >= pd.to_datetime(tmin)]
             self._log(f"Filtered dataset to tmin={pd.to_datetime(tmin).strftime('%Y-%m-%d')}")
         if tmax is not None:
-            self.geodf = self.geodf[self.geodf[self.time_col_name] <= pd.to_datetime(tmax)]
+            geodf = geodf[geodf[time_col_name] <= pd.to_datetime(tmax)]
             self._log(f"Filtered dataset to tmax={pd.to_datetime(tmax).strftime('%Y-%m-%d')}")
 
-        if self.geodf.empty:
+        if geodf.empty:
             raise ValueError(f"No rows remain after filtering to tmin={tmin}, tmax={tmax}")
-        self._log(f"Dataset filtered to {len(self.geodf)} rows")
+        self._log(f"Dataset filtered to {len(geodf)} rows")
+        return geodf
 
     def _check_balanced_panel(self, geodf, N, T) -> None:
         """
@@ -802,7 +845,7 @@ class DesignMatricesBuilder:
         geodf = geodf.drop_duplicates(subset=[self.geometry_id, self.time_col_name])
         self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
 
-        # len(lhs_termlist) > 0 -> estimation, == 0 -> prediction
+        # len(lhs_termlist) > 0 -> response required, == 0 -> covariates-only formula
         if len(lhs_termlist) > 0:
             observed_sites = geodf.loc[
                 geodf[self.formula_info.response_column].notna(), self.geometry_id
@@ -832,28 +875,11 @@ class DesignMatricesBuilder:
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
             self._log(f"y name: {y_design_info.column_names[0]}, shape={y.shape}")
-
-            # Cache the fitted design_info so a later build(predict=True) call
-            # on *this* instance reuses these stateful-transform statistics
-            # (e.g. standardize()'s mean/std) instead of recomputing them.
-            # Only set on an estimation build -- a predict build must never
-            # overwrite it with statistics computed on prediction data.
-            self.design_info = x_matrix.design_info
         else:
-            if self.design_info is not None:
-                self._log(
-                    "Reusing training design_info to build the prediction design "
-                    "matrix, so stateful transforms (e.g. standardize()) reuse the "
-                    "training statistics instead of being recomputed on this data"
-                )
-                (x_matrix,) = build_design_matrices(
-                    [self.design_info], data=geodf, NA_action=na_action, return_type="matrix",
-                )
-            else:
-                x_matrix = dmatrix(
-                    ModelDesc(lhs_termlist, rhs_termlist),
-                    data=geodf, NA_action=na_action, return_type="matrix",
-                )
+            x_matrix = dmatrix(
+                ModelDesc(lhs_termlist, rhs_termlist),
+                data=geodf, NA_action=na_action, return_type="matrix",
+            )
             y = None
             y_design_info = None
 
@@ -866,6 +892,74 @@ class DesignMatricesBuilder:
         self._log(f"Reshaped X to {Xbeta.shape}")
 
         return points, y, y_design_info, Xbeta, x_design_info, N, T, timestamps
+
+    def _compute_predict_design_matrix(
+        self, geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
+    ) -> DesignMatrices:
+        """
+        Counterpart to `_build_geodataframe`/`_compute_design_matrix` for new
+        (prediction) data: never evaluates a response, and always reuses
+        this builder's fitted `X_design_info` (via `build_design_matrices`)
+        instead of re-parsing the formula, so stateful transforms (e.g.
+        `standardize(...)`) are evaluated with the training mean/std rather
+        than being recomputed on `geodf`.
+        """
+        self._log("Computing prediction design matrix from GeoDataFrame")
+
+        geodf = geodf.sort_values([time_col_name, geometry_id])
+        geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
+        self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
+
+        timestamps = np.sort(np.unique(geodf[time_col_name]))
+        T = timestamps.shape[0]
+
+        points = geodf.geometry.unique()
+        N = points.shape[0]
+        self._log(f"Found {N} spatial locations and {T} unique timestamps")
+
+        self._check_balanced_panel(geodf, N, T)
+
+        na_action = _NAPassthrough()
+        design_info = self.design_matrices.X_design_info
+        self._log(
+            "Reusing training design_info to build the prediction design "
+            "matrix, so stateful transforms (e.g. standardize()) reuse the "
+            "training statistics instead of being recomputed on this data"
+        )
+        (x_matrix,) = build_design_matrices(
+            [design_info], data=geodf, NA_action=na_action, return_type="matrix",
+        )
+
+        x_design_info = x_matrix.design_info
+        self._log(f"X names: {', '.join(x_design_info.column_names)}, shape={x_matrix.shape}")
+
+        Xbeta = np.zeros((N, x_matrix.shape[1], T), dtype=self.dtype)
+        for i in range(x_matrix.shape[1]):
+            Xbeta[:, i, :] = x_matrix[:, i].reshape(T, 1, N).T.squeeze(axis=1)
+        self._log(f"Reshaped X to {Xbeta.shape}")
+
+        self._log(f"Computed prediction design matrices with N={N}, P={Xbeta.shape[1]}, T={T}")
+
+        return DesignMatrices(
+            y=None,
+            y_design_info=None,
+            y_name=None,
+            y_expr=self.formula_info.response_expr,
+            X=Xbeta,
+            X_design_info=x_design_info,
+            x_names=x_design_info.column_names,
+            x_exprs=self.formula_info.covariate_exprs,
+            points=points,
+            formula=self.formula,
+            crs=crs,
+            box=box,
+            geometry=geometry,
+            timestamps=timestamps,
+            delta=delta,
+            unit=unit,
+            time_col_name=time_col_name,
+            dtype=self.dtype,
+        )
 
     # ------------------------------------------------------------------
     # Misc helpers (not currently wired into build(), kept for reuse)
