@@ -622,11 +622,11 @@ class DesignMatricesBuilder:
             self._log(f"Time column detected: '{time_col_name}'")
             self._log(f"Time consistency check passed: delta {delta}, unit {unit}")
 
-            self.predict_design_matrices = self._compute_predict_design_matrix(
+            predict_design_matrices = self._compute_predict_design_matrix(
                 geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
             )
             self._log("Prediction design matrices built successfully")
-        return self.predict_design_matrices
+        return predict_design_matrices
 
     def __call__(self, verbose=None):
         if not hasattr(self, "design_matrices"):
