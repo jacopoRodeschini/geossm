@@ -535,7 +535,7 @@ class DesignMatricesBuilder:
         self._log(f"Time column detected: '{self.time_col_name}'")
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
 
-    def _prepare_geodf(self, geodf, tmin, tmax):
+    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False):
         """
         Run every check/coercion a GeoDataFrame needs before it can be
         turned into design matrices. Shared by `__init__` (on the training
@@ -555,7 +555,7 @@ class DesignMatricesBuilder:
         time_col_name = self._check_time_dataset(geodf)
         self._coerce_time_column(geodf, time_col_name)
 
-        self._check_formula_columns_exist(geodf)
+        self._check_formula_columns_exist(geodf, prediction=prediction)
 
         delta, unit = self._check_time_regularity(geodf, time_col_name)
 
@@ -616,7 +616,7 @@ class DesignMatricesBuilder:
             train_tmin = self.design_matrices.timestamps.min()
             train_tmax = self.design_matrices.timestamps.max()
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
-                self._prepare_geodf(df, train_tmin, train_tmax)
+                self._prepare_geodf(df, train_tmin, train_tmax, prediction=True)
             )
             self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
             self._log(f"Time column detected: '{time_col_name}'")
@@ -734,9 +734,9 @@ class DesignMatricesBuilder:
                 "converted to datetime"
             )
 
-    def _check_formula_columns_exist(self, geodf) -> None:
+    def _check_formula_columns_exist(self, geodf, prediction=False) -> None:
         referenced = set(self.formula_info.covariate_columns)
-        if self.formula_info.response_column:
+        if self.formula_info.response_column and prediction == False:
             referenced.add(self.formula_info.response_column)
 
         # Interaction terms are stored as "colA:colB"; flatten before checking.
