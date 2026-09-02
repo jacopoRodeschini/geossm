@@ -19,10 +19,12 @@ from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
 from geossm.covmodel import FEMSolver
+from pathlib import Path
 
 # %% Download the the Full agrimonia dataset from zenodo repository
 
-agri_path = 'Download/Agrimonia_Dataset_v_3_0_0.csv'
+
+agri_path = Path('~').expanduser() / Path('Downloads/Agrimonia_Dataset_v_3_0_0.csv')
 
 # %% Load the agrimonia dataset
 
@@ -146,7 +148,7 @@ print(results)  # resutls.summary()
 import pandas as pd
 
 # import the covariates dataset
-path = "Download/AGC_Dataset_3.0.0.csv"
+path = agri_path = Path('~').expanduser() / Path("Downloads/AGC_Dataset_v_3_0_0.csv")
 
 def converter(value):
     try:

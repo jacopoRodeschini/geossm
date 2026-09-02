@@ -439,12 +439,12 @@ class DesignMatrices:
         top_left = dict([
             ("Formula",        lambda: [get_print_string(self.formula)]),
             ("Response (y)",   lambda: [self.y_design_info.column_names[0] if self.y_design_info else self.y_name] if self.y is not None else ["N/A"]),
-            ("Covariates (X)", lambda: [", ".join(self.x_names)]),
+            ("Covariates (X)", lambda: [get_print_string(", ".join(self.x_names))] if self.x_names else ["N/A"]),
             ("[min, max, mean]", lambda: [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),
             ("Observed",         lambda: [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
             ("Missing",          lambda: [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
-            ("Transformed (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
-            ("Transformed (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
+            ("Transfor (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
+            ("Transfor (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
             ("dtype",          lambda: [str(self.dtype)]),
         ])
 
