@@ -1712,7 +1712,7 @@ class LRStateSpaceModel(StateSpaceModel):
         standardize()) reuse training statistics instead of being recomputed
         on `df`.
         """
-        dfs = [b.build_predict(df, verbose=verbose) for b in self.builders]
+        dfs = [b.build_predict(df, verbose=verbose, domain=d) for b, d in zip(self.builders, self.domain)]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
