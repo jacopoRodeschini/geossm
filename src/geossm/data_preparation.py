@@ -597,12 +597,23 @@ class DesignMatricesBuilder:
         del self.geodf
         return self.design_matrices
 
-    def build_predict(self, df: geopd.GeoDataFrame, verbose=None) -> "DesignMatrices":
+    def build_predict(self, df: geopd.GeoDataFrame, verbose=None, domain=None) -> "DesignMatrices":
         """
         Build the design matrix for new (prediction) locations/times, reusing
         this builder's fitted `X_design_info` so stateful transforms (e.g.
         `standardize(...)`) are evaluated with the training mean/std instead
         of being recomputed on `df`. `build()` must be called first.
+
+        Parameters
+        ----------
+        domain : shapely Polygon/MultiPolygon, optional
+            The scientific interest domain, in the same CRS as `df`. When
+            given, every prediction point is checked against it and the
+            result is stored as the boolean array `self.mask` (True where
+            the point falls inside `domain`), aligned with `points`/the N
+            axis of the returned `DesignMatrices`. Points outside `domain`
+            are *not* dropped, only flagged -- filtering is left to the
+            caller. `self.mask` is left `None` when `domain` is not given.
         """
         if not hasattr(self, "design_matrices"):
             raise ValueError("build() must be called before build_predict()")
@@ -618,6 +629,7 @@ class DesignMatricesBuilder:
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
                 self._prepare_geodf(df, train_tmin, train_tmax, prediction=True)
             )
+            self._check_consistent_with_training(crs, delta, unit)
             self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
             self._log(f"Time column detected: '{time_col_name}'")
             self._log(f"Time consistency check passed: delta {delta}, unit {unit}")
@@ -625,8 +637,45 @@ class DesignMatricesBuilder:
             predict_design_matrices = self._compute_predict_design_matrix(
                 geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
             )
+            self._check_domain(predict_design_matrices, domain)
             self._log("Prediction design matrices built successfully")
         return predict_design_matrices
+
+    def _check_consistent_with_training(self, crs, delta, unit) -> None:
+        """
+        `build()` must have run first, so `self.crs`/`self.delta`/`self.unit`
+        already hold the training values -- a mismatch here means the
+        prediction covariates would silently be sampled on a different grid
+        or in different units than the model was fit on.
+        """
+        problems = []
+        if crs != self.crs:
+            problems.append(f"CRS ({crs}) does not match the training CRS ({self.crs})")
+        if (delta, unit) != (self.delta, self.unit):
+            problems.append(
+                f"time step (delta={delta}, unit={unit}) does not match the "
+                f"training time step (delta={self.delta}, unit={self.unit})"
+            )
+        if problems:
+            raise ValueError(
+                "Prediction dataset is not consistent with the training dataset: "
+                + "; ".join(problems)
+            )
+
+    def _check_domain(self, design_matrices, domain) -> None:
+        if domain is None:
+            self.mask = None
+            return
+
+        points = [Point(xy) for xy in design_matrices.points]
+        self.mask = np.array([domain.covers(pt) for pt in points], dtype=bool)
+
+        n_in = int(self.mask.sum())
+        n_out = int(self.mask.size - n_in)
+        self._log(
+            f"Scientific interest domain check: {n_in} point(s) inside, "
+            f"{n_out} point(s) outside the domain ({self.mask.size} total)"
+        )
 
     def __call__(self, verbose=None):
         if not hasattr(self, "design_matrices"):
@@ -736,7 +785,7 @@ class DesignMatricesBuilder:
 
     def _check_formula_columns_exist(self, geodf, prediction=False) -> None:
         referenced = set(self.formula_info.covariate_columns)
-        if self.formula_info.response_column and prediction == False:
+        if self.formula_info.response_column and not prediction:
             referenced.add(self.formula_info.response_column)
 
         # Interaction terms are stored as "colA:colB"; flatten before checking.
