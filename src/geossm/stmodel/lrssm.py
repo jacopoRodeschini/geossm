@@ -740,6 +740,11 @@ class LRStateSpaceModel(StateSpaceModel):
         modelresults.y_pred = y_hat
         modelresults.Sigma_y_pred = Sigma_y_hat
         modelresults.tdelta_pred = tdelta
+        # one timestamps array per variable (mirrors points_pred/y_pred);
+        # CRS is assumed identical across variables (build_predict already
+        # enforces it matches the training CRS for each formula)
+        modelresults.timestamps_pred = [grid.timestamps for grid in gridList]
+        modelresults.crs_pred = gridList[0].crs
 
         return modelresults
 

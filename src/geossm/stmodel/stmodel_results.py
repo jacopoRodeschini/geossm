@@ -150,6 +150,8 @@ class LRStateSpaceResults(StateSpaceResults):
         self.y_pred = None
         self.Sigma_y_pred = None
         self.tdelta_pred = None
+        self.timestamps_pred = None
+        self.crs_pred = None
 
         self.llf_path = None  # log-likelihood across EM iterations
 
@@ -450,18 +452,13 @@ class LRStateSpaceResults(StateSpaceResults):
     def predict(self, df, verbose=True):
         """
         Compute out-of-sample predictions based on smoothed states and model
-        parameters, storing them on this results object (`points_pred`,
-        `y_pred`, `Sigma_y_pred`, `tdelta_pred`) and returning `self` so
+        parameters. `self.model.predict` stores them directly on this
+        results object (`points_pred`, `y_pred`, `Sigma_y_pred`,
+        `tdelta_pred`, `timestamps_pred`, `crs_pred`) and returns `self`, so
         predictions travel with the fitted model and can be reused by other
-        methods (e.g. plotting, summaries) without re-running prediction.
+        methods (e.g. `.to_geo()`, plotting, summaries) without re-running
+        prediction.
         """
-        # points_pred, y_pred, Sigma_y_pred, tdelta_pred = self.model.predict(df, modelresults=self, verbose=verbose)
-
-        # self.points_pred = points_pred
-        # self.y_pred = y_pred
-        # self.Sigma_y_pred = Sigma_y_pred
-        # self.tdelta_pred = tdelta_pred
-
         return self.model.predict(df, modelresults=self, verbose=verbose)
 
     def _pred_summary_stats(self):
@@ -489,6 +486,69 @@ class LRStateSpaceResults(StateSpaceResults):
             "y_max": np.nanmax(y_all),
             "y_mean_std": np.nanmean(std_all),
         }
+
+    def to_geo(self):
+        """
+        Package the last computed prediction (`.predict()`) into a single
+        GeoDataFrame, one row per (point, timestamp), ready to be exported
+        (e.g. `.to_file("out.shp")`).
+
+        Columns: `point_id`, `timestamp`, then `y_pred_<var>`/`std_pred_<var>`
+        for every response variable (predicted mean, and predictive standard
+        deviation from the diagonal of `Sigma_y_pred`). Geometry is the
+        prediction point, repeated once per timestamp; CRS is `self.crs_pred`.
+
+        All response variables must share the same prediction grid (same
+        points and timestamps) -- true whenever they were all predicted from
+        the same input dataframe, as `.predict()` guarantees.
+
+        results = results.predict(grid, verbose=True)
+        gdf = results.to_geo()
+        gdf.to_file("predictions.shp")
+
+        """
+        if self.y_pred is None:
+            raise ValueError(
+                "No prediction available: call `.predict(df)` before `.to_geo()`."
+            )
+
+        import geopandas as geopd
+        from shapely.geometry import Point
+
+        y_names = self.model.y_name
+        points = np.asarray(self.points_pred[0])
+        ts = self.timestamps_pred[0]
+        n, T = points.shape[0], ts.shape[0]
+
+        for name, p, t in zip(y_names, self.points_pred, self.timestamps_pred):
+            if np.asarray(p).shape[0] != n or np.asarray(t).shape[0] != T:
+                raise ValueError(
+                    f"to_geo() requires every response variable to share the same "
+                    f"prediction grid, but '{name}' has {np.asarray(p).shape[0]} points "
+                    f"and {np.asarray(t).shape[0]} timestamps, versus {n} points and "
+                    f"{T} timestamps for '{y_names[0]}'."
+                )
+
+        data = {
+            "point_id": np.tile(np.arange(n), T),
+            "timestamp": np.repeat(ts, n),
+        }
+
+        for name, y, sigma in zip(y_names, self.y_pred, self.Sigma_y_pred):
+            y = np.asarray(y)
+            var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
+            std = np.sqrt(var)
+
+            data[f"y_pred_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
+            data[f"std_pred_{name}"] = std.ravel()
+
+        geoms = [Point(xy) for xy in points]
+
+        return geopd.GeoDataFrame(
+            data,
+            geometry=np.tile(geoms, T),
+            crs=self.crs_pred,
+        )
 
     def generate_summary(self):
 
