@@ -735,7 +735,14 @@ class LRStateSpaceModel(StateSpaceModel):
             y_hat.append(y_hat_full[block_p[i]:block_p[i+1], :])
             Sigma_y_hat.append(Sigma_y_hat_full[block_p[i]:block_p[i+1], block_p[i]:block_p[i+1],:])
 
-        return points, y_hat, Sigma_y_hat, tdelta
+        # return points, y_hat, Sigma_y_hat, tdelta
+        modelresults.points_pred = points
+        modelresults.y_pred = y_hat
+        modelresults.Sigma_y_pred = Sigma_y_hat
+        modelresults.tdelta_pred = tdelta
+
+        return modelresults
+
             
 
     
