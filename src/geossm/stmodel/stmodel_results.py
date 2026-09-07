@@ -455,15 +455,40 @@ class LRStateSpaceResults(StateSpaceResults):
         predictions travel with the fitted model and can be reused by other
         methods (e.g. plotting, summaries) without re-running prediction.
         """
-        points_pred, y_pred, Sigma_y_pred, tdelta_pred = self.model.predict(df, modelresults=self, verbose=verbose)
+        # points_pred, y_pred, Sigma_y_pred, tdelta_pred = self.model.predict(df, modelresults=self, verbose=verbose)
 
-        self.points_pred = points_pred
-        self.y_pred = y_pred
-        self.Sigma_y_pred = Sigma_y_pred
-        self.tdelta_pred = tdelta_pred
+        # self.points_pred = points_pred
+        # self.y_pred = y_pred
+        # self.Sigma_y_pred = Sigma_y_pred
+        # self.tdelta_pred = tdelta_pred
 
-        return self
-    
+        return self.model.predict(df, modelresults=self, verbose=verbose)
+
+    def _pred_summary_stats(self):
+        """
+        Small numeric summary of the last computed prediction (`.predict()`),
+        used by `generate_summary()` to populate the top_left_pred /
+        top_right_pred summary tables.
+        """
+        y_all = np.concatenate([np.asarray(y).ravel() for y in self.y_pred])
+        n_points = sum(np.asarray(p).shape[0] for p in self.points_pred)
+
+        std_all = []
+        for sigma in self.Sigma_y_pred:
+            sigma = np.asarray(sigma)
+            var = np.clip(np.diagonal(sigma, axis1=0, axis2=1), 0.0, None)  # (T, n_i)
+            std_all.append(np.sqrt(var).ravel())
+        std_all = np.concatenate(std_all) if std_all else np.array([np.nan])
+
+        return {
+            "n_points": n_points,
+            "n_pred": y_all.size,
+            "n_missing": int(np.sum(np.isnan(y_all))),
+            "y_min": np.nanmin(y_all),
+            "y_median": np.nanmedian(y_all),
+            "y_max": np.nanmax(y_all),
+            "y_mean_std": np.nanmean(std_all),
+        }
 
     def generate_summary(self):
 
@@ -510,6 +535,28 @@ class LRStateSpaceResults(StateSpaceResults):
         gen_top_left += gen_top_left_em
         gen_top_right += gen_top_right_em
 
+        # Add the out-of-sample prediction summary, if .predict() has been run
+        if self.y_pred is not None:
+            pstats = self._pred_summary_stats()
+
+            top_left_pred = dict(
+                [
+                    ("Pred. points:", lambda: [f"{pstats['n_points']}"]),
+                    ("Pred. values (# missing):", lambda: [f"{pstats['n_pred']} ({pstats['n_missing']})"]),
+                    ("Pred. y (min, med, max):", lambda: [f"{pstats['y_min']:.3g}, {pstats['y_median']:.3g}, {pstats['y_max']:.3g}"]),
+                ]
+            )
+
+            top_right_pred = {
+                "Pred. mean std:": lambda: [f"{pstats['y_mean_std']:.3g}"],
+                "Pred. runtime (s):": lambda: [f"{self.tdelta_pred:.3g}"],
+            }
+
+            gen_top_left_pred = [(item, list(fn())) for item, fn in top_left_pred.items()]
+            gen_top_right_pred = [(item, list(fn())) for item, fn in top_right_pred.items()]
+
+            gen_top_left += gen_top_left_pred
+            gen_top_right += gen_top_right_pred
 
         return gen_top_left, gen_top_right
     def summary(self, hessian=False, alpha=0.05):
@@ -520,16 +567,13 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.bse = np.zeros(len(self.beta))
         # self.tvalues = np.zeros(len(self.beta))
         # self.pvalues = np.zeros(len(self.beta))
+        name_width=15
         
         if hessian:
             bse_struct = self.bse  # structured ModelParams with bse fields
         else:
-            if self._hessian is not None:
-                bse_struct = self.bse
-            else:
-                # Hessian/SE not requested yet (e.g. deferred because it's slow) -
-                # show point estimates with NaN placeholders for bse/t/p/CI.
-                bse_struct = self._nan_bse_params()
+            # show point estimates with NaN placeholders for bse/t/p/CI.
+            bse_struct = self._nan_bse_params()
 
         gen_top_left, gen_top_right = self.generate_summary()
         
@@ -545,6 +589,26 @@ class LRStateSpaceResults(StateSpaceResults):
             xname=None,
         )
 
+        # Parameter names for every table below, padded to a common width so
+        # the name column lines up across the (independently-sized) tables
+        # produced by add_table_params.
+        xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
+        meas_err_names = [f"s2e_{i}" for i in range(self.params.s2e.size)] + [
+            f"A_{i}_{j}"
+            for i in range(self.params.A.shape[0])
+            for j in range(self.params.A.shape[1])
+        ]
+        matern_names = [f"rescale_{j}" for j in range(len(self.model.cov_function))]
+        latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
+        state_names = matern_names + latent_names
+
+        max_name_len = max(
+            [len(n) for n in xnames_stack + meas_err_names + state_names] + [name_width]
+        )
+        xnames_stack = [n.ljust(max_name_len) for n in xnames_stack]
+        meas_err_names = [n.ljust(max_name_len) for n in meas_err_names]
+        state_names = [n.ljust(max_name_len) for n in state_names]
+
         # todo: Add the parameters table (measurement equation parameters)
         self.measurement = [
             SimpleNamespace() for _ in range(self.model.nvar)
@@ -555,10 +619,6 @@ class LRStateSpaceResults(StateSpaceResults):
             m.results = np.array([0])  # Dummy results for compatibility
             m.model = None
 
-            # Get the parameter names for this variable and assign them to the model namespace
-            xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
-
-            
             # Get the fixed effect block statistics
             beta_vals = np.asarray(self.params.beta.value).ravel()
             beta_bse = np.asarray(bse_struct.beta.bse).ravel()
@@ -577,13 +637,8 @@ class LRStateSpaceResults(StateSpaceResults):
         temp = SimpleNamespace()
         temp.results = np.array([0])
         temp.model = None
-        temp.params_name = [f"s2e_{i}" for i in range(self.params.s2e.size)] + [
-            f"A_{i}_{j}"
-            for i in range(self.params.A.shape[0])
-            for j in range(self.params.A.shape[1])
-        ]
-        
-        
+        temp.params_name = meas_err_names
+
         s2e_vals = np.asarray(self.params.s2e.value).ravel()
         A_vals = np.asarray(self.params.A.value).ravel()
         
@@ -611,13 +666,8 @@ class LRStateSpaceResults(StateSpaceResults):
         f_val = np.asarray(self.params.f.value).ravel()
         f_bse = np.asarray(bse_struct.f.bse).ravel()
 
-        matern_names = [
-            f"rescale_{j}" for j in range(len(self.model.cov_function))
-        ]
-        latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
-
         # Combine all parameters and names into a single list for the summary
-        temp.param_names = matern_names + latent_names
+        temp.param_names = state_names
 
         temp.params = np.hstack((ks_val, f_val))
         temp.bse = np.hstack((ks_bse, f_bse))

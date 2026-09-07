@@ -743,10 +743,6 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return modelresults
 
-            
-
-    
-
     @_on_device
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
