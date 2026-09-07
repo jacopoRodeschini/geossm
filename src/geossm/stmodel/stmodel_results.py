@@ -143,6 +143,14 @@ class LRStateSpaceResults(StateSpaceResults):
         self.runtime_tot_estep = 0.0
         self.runtime_tot_mstep = 0.0
 
+        # Out-of-sample prediction (populated by .predict(); distinct from
+        # `y_hat`, which holds the in-sample filtered/fitted values used for
+        # residuals).
+        self.points_pred = None
+        self.y_pred = None
+        self.Sigma_y_pred = None
+        self.tdelta_pred = None
+
         self.llf_path = None  # log-likelihood across EM iterations
 
         # Inference (see attributes and methods below)
@@ -441,11 +449,20 @@ class LRStateSpaceResults(StateSpaceResults):
 
     def predict(self, df, verbose=True):
         """
-        Compute predicted observations (y_hat) based on smoothed states and model parameters.
-        """  
-        points, y_hat, Sigma_y_hat, tdelta = self.model.predict(df, modelresults=self, verbose=verbose)
+        Compute out-of-sample predictions based on smoothed states and model
+        parameters, storing them on this results object (`points_pred`,
+        `y_pred`, `Sigma_y_pred`, `tdelta_pred`) and returning `self` so
+        predictions travel with the fitted model and can be reused by other
+        methods (e.g. plotting, summaries) without re-running prediction.
+        """
+        points_pred, y_pred, Sigma_y_pred, tdelta_pred = self.model.predict(df, modelresults=self, verbose=verbose)
 
-        return points, y_hat, Sigma_y_hat, tdelta
+        self.points_pred = points_pred
+        self.y_pred = y_pred
+        self.Sigma_y_pred = Sigma_y_pred
+        self.tdelta_pred = tdelta_pred
+
+        return self
     
 
     def generate_summary(self):
