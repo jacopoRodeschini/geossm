@@ -153,6 +153,14 @@ class LRStateSpaceResults(StateSpaceResults):
         self.timestamps_pred = None
         self.crs_pred = None
 
+        # Original-scale (back-transformed) counterparts of y_hat/y_pred,
+        # populated by .back_transform() -- see that method's docstring.
+        self.y_hat_back = None
+        self.Sigma_y_hat_back = None
+        self.y_pred_back = None
+        self.Sigma_y_pred_back = None
+        self._Sigma_y_hat = None  # cache for the Sigma_y_hat property
+
         self.llf_path = None  # log-likelihood across EM iterations
 
         # Inference (see attributes and methods below)
@@ -549,6 +557,126 @@ class LRStateSpaceResults(StateSpaceResults):
             geometry=np.tile(geoms, T),
             crs=self.crs_pred,
         )
+
+    @property
+    def Sigma_y_hat(self):
+        """
+        In-sample predictive covariance of `y_hat`: `H @ P_smoothed @ H.T`
+        per time step (no measurement noise added), the training-set
+        counterpart of `Sigma_y_pred` -- computed the same way `.predict()`
+        computes `Sigma_y_pred`, but with the training `H` and `P_smoothed`
+        instead of a new grid's.
+        """
+        if self._Sigma_y_hat is None:
+            H = jnp.asarray(self.model.H)
+            P = jnp.asarray(self.P_smoothed)[:, :, 1:]
+            self._Sigma_y_hat = np.asarray(jnp.einsum("ip,pqt,jq->ijt", H, P, H))
+        return self._Sigma_y_hat
+
+    @staticmethod
+    def _delta_method(g_inv, mu, Sigma):
+        """
+        Second-order delta method: back-transform a mean `mu` (shape
+        `(n, T)`) and its full covariance `Sigma` (shape `(n, n, T)`,
+        `Sigma[:, :, t]` symmetric) through `h = g_inv`, the inverse of the
+        response transform applied by the model formula.
+
+        `h` must be invertible with `h' != 0` everywhere it's evaluated
+        (required for the linearization below to be valid) and is
+        differentiated automatically via JAX autodiff, so `g_inv` only
+        needs to be a plain scalar -> scalar JAX-traceable function (e.g.
+        `jnp.exp` for `np.log(y)`) -- no analytic derivative required.
+
+        Returns
+        -------
+        mean_back : ndarray, shape (n, T)
+            E[h(Y)] ~= h(mu) + 0.5 * h''(mu) * Var(Y), a second-order Taylor
+            expansion of h around mu (the first-order/naive term h(mu)
+            alone is biased whenever h is curved).
+        Sigma_back : ndarray, shape (n, n, T)
+            Cov[h(Y)] ~= diag(h'(mu)) @ Sigma @ diag(h'(mu)), the standard
+            (first-order) multivariate delta method, applied per time step;
+            for the diagonal this is the familiar Var[h(Y)] ~= h'(mu)^2 * Var(Y).
+        """
+        mu = jnp.asarray(mu)
+        Sigma = jnp.asarray(Sigma)
+        flat_mu = mu.ravel()
+
+        h = jax.vmap(g_inv)(flat_mu).reshape(mu.shape)
+        h1 = jax.vmap(jax.grad(g_inv))(flat_mu).reshape(mu.shape)
+        h2 = jax.vmap(jax.grad(jax.grad(g_inv)))(flat_mu).reshape(mu.shape)
+
+        var_diag = jnp.diagonal(Sigma, axis1=0, axis2=1).T  # (T, n) -> (n, T)
+        mean_back = h + 0.5 * h2 * var_diag
+        Sigma_back = h1[:, None, :] * Sigma * h1[None, :, :]
+
+        return np.asarray(mean_back), np.asarray(Sigma_back)
+
+    def back_transform(self, g_inv):
+        """
+        Map `y_hat`/`y_pred` (and their model-implied covariance) back to
+        the response's original scale, via the second-order delta method
+        (see `_delta_method`), and store the results as `y_hat_back`,
+        `Sigma_y_hat_back` and, if `.predict()` has been run, `y_pred_back`,
+        `Sigma_y_pred_back`.
+
+        This relies on the transformed response being asymptotically
+        Normal (the model's own assumption), so the delta method's local,
+        second-order Taylor expansion around the mean is a reasonable
+        approximation -- but it is *not* the only option. Alternatives,
+        roughly in order of how much they trade simplicity for accuracy:
+
+        - Naive plug-in `g_inv(y_hat)`: what the first-order term alone
+          gives; biased whenever `g_inv` is curved (Jensen's inequality),
+          which is exactly what the second-order correction here fixes.
+        - Closed-form formulas for a specific `g_inv`, when known -- e.g.
+          the lognormal mean `exp(mu + sigma^2/2)` for `log`, which is the
+          delta method's answer *and* the exact one for that case (note
+          the `/2`: `exp(mu + sigma^2)` overcorrects).
+        - Duan's smearing estimator: replace `h(mu)` by the empirical
+          average of `h(mu + residual_i)` over the in-sample residuals.
+          Distribution-free (no normality needed) but needs those residuals
+          kept around, and is usually applied to the mean only.
+        - Gauss-Hermite quadrature / Monte Carlo against `Normal(mu, Var)`:
+          numerically integrates `h` under the same normality assumption
+          used here, so it stays exact as curvature or `Var` grows large
+          (where a second-order Taylor expansion starts to break down),
+          at the cost of a handful of extra evaluations of `h` per point.
+
+        The delta method is the right default when `Var` is small relative
+        to `h`'s curvature (the usual case for a well-identified model);
+        if predictions look off for locations/times with large predictive
+        variance, quadrature is the natural drop-in replacement since it
+        reuses the same `mu`/`Sigma` this method already computes.
+
+        Parameters
+        ----------
+        g_inv : Callable[[float], float]
+            The inverse of the response transform in the model formula
+            (e.g. `jnp.exp` for a `np.log(y)` response), as a scalar ->
+            scalar JAX-traceable function.
+        """
+
+        mean_back, Sigma_back = [], []
+
+        for mu_i, Sigma_i in zip(self.y_hat, self.Sigma_y_hat):
+            m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+            mean_back.append(m)
+            Sigma_back.append(S)
+        
+        self.y_hat_back = mean_back
+        self.Sigma_y_hat_back = Sigma_back
+
+        if self.y_pred is not None:
+            y_pred_back, Sigma_pred_back = [], []
+            for mu_i, Sigma_i in zip(self.y_pred, self.Sigma_y_pred):
+                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+                y_pred_back.append(m)
+                Sigma_pred_back.append(S)
+            self.y_pred_back = y_pred_back
+            self.Sigma_y_pred_back = Sigma_pred_back
+
+        return self
 
     def generate_summary(self):
 
