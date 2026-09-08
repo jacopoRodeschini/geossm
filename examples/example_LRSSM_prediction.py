@@ -50,11 +50,19 @@ ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
 agri["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
 agri = geodf.GeoDataFrame(agri, crs=4326)
 
+# %% Remove the outliers as 99.9 percentile of the AQ_pm10 variable
+
+# replace the outlier with NaN
+thr999 = agri["AQ_pm10"].quantile(0.999)
+thr001 = agri["AQ_pm10"].quantile(0.001)
+index = agri[(agri["AQ_pm10"] >= thr999) | (agri["AQ_pm10"] <= thr001)].index
+agri.loc[index, "AQ_pm10"] = np.nan
+
 
 # %% Build the model
 
 model = lrssm(
-    agri, ["AQ_pm10 ~ 1 + WE_temp_2m + WE_tot_precipitation + WE_wind_speed_10m_mean"], verbose=True, domain=[buffer])
+    agri, ["np.log(AQ_pm10) ~ 1 + WE_temp_2m + WE_tot_precipitation + WE_wind_speed_10m_mean"], verbose=True, domain=[buffer])
 
 
 print(model)
@@ -137,12 +145,17 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 opt = FitOptions()
-opt.max_iter = 50
+opt.max_iter = 5
 opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
 print(results)  # resutls.summary()
 
+# %% Compute the covariance matrix of the estimated parameters
+
+# it's optional since it requires the computation of the hessian
+results.compute_cov_params()
+print(results)  # results.summary()
 
 # %% Do the prediction 
 import pandas as pd
@@ -181,9 +194,13 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 
 # %% Model prediction 
 
-# use the model.predict method to get the prediction and the uncertainty 
-points, y_hat, Sigma_y_hat, tdelta = model.predict(grid, results)
-# points, y_hat_v1, Sigma_y_hat, tdelta = results.predict(grid, verbose=True)
+results = results.predict(grid, verbose=True)
+print(results)  # results.summary()
+
+# %% Compute the back transformation of the predicted values and their covariance matrix
+import jax.numpy as jnp
+results.back_transform(g_inv=jnp.exp)
+
 
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
@@ -210,7 +227,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(y_hat[0][:, start:end], axis=1)
+    avg = np.nanmean(results.y_pred[0][:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
@@ -226,8 +243,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     ax = axs[i // 4, i % 4]
 
     # Get unique sorted coordinates
-    x_unique = np.sort(np.unique(points[0][:, 0]))
-    y_unique = np.sort(np.unique(points[0][:, 1]))
+    x_unique = np.sort(np.unique(results.points_pred[0][:, 0]))
+    y_unique = np.sort(np.unique(results.points_pred[0][:, 1]))
     
     # Create mapping dictionaries
     x_to_idx = {x: idx for idx, x in enumerate(x_unique)}
@@ -238,8 +255,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     Z = np.full((rows, cols), np.nan)
     
     # Fill grid
-    x_indices = np.array([x_to_idx[x] for x in points[0][:, 0]])
-    y_indices = np.array([y_to_idx[y] for y in points[0][:, 1]])
+    x_indices = np.array([x_to_idx[x] for x in results.points_pred[0][:, 0]])
+    y_indices = np.array([y_to_idx[y] for y in results.points_pred[0][:, 1]])
     Z[y_indices, x_indices] = avg_data
     
     # Mask pixels outside boundary
@@ -279,3 +296,8 @@ cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
 fig.colorbar(im, cax=cbar_ax, label="PM10 (µg/m³)")
 
 plt.tight_layout(rect=[0, 0, 0.88, 1])
+
+# %% Export the results to a shapefile
+
+df = results.to_geo()
+# df.to_file("predictions.shp")
