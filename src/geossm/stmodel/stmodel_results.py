@@ -118,6 +118,7 @@ class LRStateSpaceResults(StateSpaceResults):
         params: ModelParams = None,
         nstats: list = None,
         options: FitOptions = None,
+        H=None,
         **kwargs,
     ):
         # Initialize base class
@@ -132,6 +133,14 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.nstats = nstats
         self.options = options
+
+        # Observation matrix used to produce `y_hat`/`P_smoothed` above,
+        # snapshotted here rather than read live off `self.model.H` --
+        # `model.H` is mutated in place every `fit()` iteration (and by any
+        # later `fit()` call on the same model instance), so it would go
+        # stale for this results object as soon as the model is reused.
+        # Used by `Sigma_y_hat` for the in-sample predictive covariance.
+        self.H = H
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -350,20 +359,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self._cov_params = cov_params
         return cov_params
     
-        
-    # @property
-    # def bse(self):
-        
-    #     bse_vec = jnp.sqrt(jnp.clip(jnp.diag(self._cov_params), a_min=0.0))
-    #     # se = np.sqrt(np.diag(self.cov_params))
-
-    #     params  = _unpack_params(bse_vec, self.params, 
-    #         {name: (getattr(self.params, name).value.shape, 
-    #             getattr(self.params, name).value.size) 
-    #                 for name in self.params.__dataclass_fields__})
-    #     return params
-
-    
     @property
     def df_resid(self):
         """
@@ -550,7 +545,24 @@ class LRStateSpaceResults(StateSpaceResults):
             data[f"y_pred_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
             data[f"std_pred_{name}"] = std.ravel()
 
+        if self.y_hat_back is not None and self.y_pred_back is not None:
+            for name, y_hat, y_pred, sigma_hat, sigma_pred in zip(
+                y_names, self.y_hat_back, self.y_pred_back, self.Sigma_y_hat_back, self.Sigma_y_pred_back
+            ):
+                
+                var_hat = np.clip(np.diagonal(sigma_hat, axis1=0, axis2=1), 0.0, None)  # (T, n)
+                std_hat = np.sqrt(var_hat)
+
+                var_pred = np.clip(np.diagonal(sigma_pred, axis1=0, axis2=1), 0.0, None)  # (T, n)
+                std_pred = np.sqrt(var_pred)
+
+                data[f"y_hat_back_{name}"] = y_hat.T.ravel()
+                data[f"y_pred_back_{name}"] = y_pred.T.ravel()
+                data[f"std_hat_back_{name}"] = std_hat.ravel()
+                data[f"std_pred_back_{name}"] = std_pred.ravel()
+
         geoms = [Point(xy) for xy in points]
+
 
         return geopd.GeoDataFrame(
             data,
@@ -565,11 +577,27 @@ class LRStateSpaceResults(StateSpaceResults):
         per time step (no measurement noise added), the training-set
         counterpart of `Sigma_y_pred` -- computed the same way `.predict()`
         computes `Sigma_y_pred`, but with the training `H` and `P_smoothed`
-        instead of a new grid's.
+        instead of a new grid's. Uses `self.H` (snapshotted at fit time),
+        not the live `self.model.H`, which is mutated in place by every
+        `fit()` call/iteration and would go stale for this results object.
         """
         if self._Sigma_y_hat is None:
-            H = jnp.asarray(self.model.H)
+            if self.H is None:
+                raise ValueError(
+                    "Sigma_y_hat requires the observation matrix H used to "
+                    "produce y_hat/P_smoothed; this results object was not "
+                    "constructed with one (`H=...`)."
+                )
+            H = jnp.asarray(self.H)
             P = jnp.asarray(self.P_smoothed)[:, :, 1:]
+            if H.shape[0] != np.asarray(self.y_hat).shape[0] or H.shape[1] != P.shape[0]:
+                raise ValueError(
+                    f"Sigma_y_hat: shape mismatch between H {H.shape}, "
+                    f"y_hat {np.asarray(self.y_hat).shape} and P_smoothed "
+                    f"{np.asarray(self.P_smoothed).shape} -- H must map "
+                    "P_smoothed's latent dimension to y_hat's observation "
+                    "dimension."
+                )
             self._Sigma_y_hat = np.asarray(jnp.einsum("ip,pqt,jq->ijt", H, P, H))
         return self._Sigma_y_hat
 
@@ -629,14 +657,16 @@ class LRStateSpaceResults(StateSpaceResults):
         - Naive plug-in `g_inv(y_hat)`: what the first-order term alone
           gives; biased whenever `g_inv` is curved (Jensen's inequality),
           which is exactly what the second-order correction here fixes.
+        
         - Closed-form formulas for a specific `g_inv`, when known -- e.g.
           the lognormal mean `exp(mu + sigma^2/2)` for `log`, which is the
-          delta method's answer *and* the exact one for that case (note
-          the `/2`: `exp(mu + sigma^2)` overcorrects).
+          delta method's answer *and* the exact one for that case.
+
         - Duan's smearing estimator: replace `h(mu)` by the empirical
           average of `h(mu + residual_i)` over the in-sample residuals.
           Distribution-free (no normality needed) but needs those residuals
           kept around, and is usually applied to the mean only.
+        
         - Gauss-Hermite quadrature / Monte Carlo against `Normal(mu, Var)`:
           numerically integrates `h` under the same normality assumption
           used here, so it stays exact as curvature or `Var` grows large
@@ -747,7 +777,7 @@ class LRStateSpaceResults(StateSpaceResults):
             gen_top_right += gen_top_right_pred
 
         return gen_top_left, gen_top_right
-    def summary(self, hessian=False, alpha=0.05):
+    def summary(self, alpha=0.05):
 
         # self.results = np.array([0])
         # self.params = self.beta
@@ -757,7 +787,7 @@ class LRStateSpaceResults(StateSpaceResults):
         # self.pvalues = np.zeros(len(self.beta))
         name_width=15
         
-        if hessian:
+        if self._hessian is not None or self._cov_params is not None:
             bse_struct = self.bse  # structured ModelParams with bse fields
         else:
             # show point estimates with NaN placeholders for bse/t/p/CI.

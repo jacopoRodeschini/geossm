@@ -740,7 +740,6 @@ class LRStateSpaceModel(StateSpaceModel):
         modelresults.y_pred = y_hat
         modelresults.Sigma_y_pred = Sigma_y_hat
         modelresults.tdelta_pred = tdelta
-        # one timestamps array per variable (mirrors points_pred/y_pred);
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
         modelresults.timestamps_pred = [grid.timestamps for grid in gridList]
@@ -951,15 +950,20 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Create the results object...")
         
         results = LRStateSpaceResults(
-            model=self, 
-            params=est_params, 
-            nstats=nstat, 
+            model=self,
+            params=est_params,
+            nstats=nstat,
             options=options,
             # main arrays
-            y_hat=y_hat, 
+            y_hat=y_hat,
             x_smoothed=x_T,
             P_smoothed=P_T,
             P_pred_smoothed=None,
+            # observation matrix used to produce y_hat/P_smoothed above --
+            # stored on the results snapshot (not read live off `self.model`)
+            # since `self.model.H` is mutable and would go stale the next
+            # time `fit()` runs on this same model instance
+            H=H,
             # sufficient statistics
             S11=S11,
             S10=S10,
