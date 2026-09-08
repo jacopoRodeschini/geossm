@@ -62,7 +62,7 @@ agri.loc[index, "AQ_pm10"] = np.nan
 # %% Build the model
 
 model = lrssm(
-    agri, ["np.log(AQ_pm10) ~ 1 + WE_temp_2m + WE_tot_precipitation + WE_wind_speed_10m_mean"], verbose=True, domain=[buffer])
+    agri, ["np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m) + standardize(WE_tot_precipitation) + standardize(WE_wind_speed_10m_mean)"], verbose=True, domain=[buffer])
 
 
 print(model)
@@ -145,7 +145,7 @@ model = model.setup([mesh_io])
 
 # %% Estimate the Model (default estimation options)
 opt = FitOptions()
-opt.max_iter = 5
+opt.max_iter = 50
 opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
@@ -199,11 +199,25 @@ print(results)  # results.summary()
 
 # %% Compute the back transformation of the predicted values and their covariance matrix
 import jax.numpy as jnp
-results.back_transform(g_inv=jnp.exp)
+results = results.back_transform(g_inv=jnp.exp)
 
+
+print(results.y_hat_list[0].min(), results.y_hat_list[0].max())
+print(results.y_hat_back_list[0].min(), results.y_hat_back_list[0].max())
+print(np.nanmin(results.y_pred_back_list[0]), np.nanmax(results.y_pred_back_list[0]))
+
+# %% 
+# remove the outliers as 99.9 percentile of the AQ_pm10 variable
+fig, ax = plt.subplots(figsize=(8, 8))
+ax.hist(results.y_pred_back_list[0], color="orange", alpha=0.7)
+ax.set_title("Histogram of predicted values (back-transformed)", fontsize=14, fontweight="bold")
+ax.set_xlabel("Predicted values (back-transformed)", fontsize=12)
+ax.set_ylabel("Frequency", fontsize=12)
 
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
+
+
 
 # Define month boundaries (assuming daily data for a year)
 # Days: Jan(31), Feb(28), Mar(31), Apr(30), May(31), Jun(30), 
@@ -227,7 +241,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(results.y_pred_list[0][:, start:end], axis=1)
+    avg = np.nanmean(results.y_pred_back_list[0][:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
@@ -236,7 +250,7 @@ fig, axs = plt.subplots(3, 4, figsize=(14, 10))
 
 # Create normalization for consistent coloring
 vmin = np.nanmin([np.nanmin(m) for m in monthly_avg])
-vmax = np.nanmax([np.nanmax(m) for m in monthly_avg])
+vmax = np.nanmax([np.nanquantile(m, 0.995) for m in monthly_avg])
 norm = Normalize(vmin=vmin, vmax=vmax)
 
 for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
@@ -299,5 +313,6 @@ plt.tight_layout(rect=[0, 0, 0.88, 1])
 
 # %% Export the results to a shapefile
 
-df = results.to_geo()
-# df.to_file("predictions.shp")
+geo = results.to_geo()
+# geo["hat"].to_file("fitted.shp")
+# geo["pred"].to_file("predictions.shp")
