@@ -720,25 +720,18 @@ class LRStateSpaceModel(StateSpaceModel):
         H = self._buildH_dense(A, basis)  # dense
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
-    
-        self._log("Start Prediction the SSM...")
-        tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta_predict, beta)
-        tdelta = time.time()- tStart
+        # Predict the response variable (stacked across all variables)
+        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta)
 
-        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+        # Per-variable views, one entry per response variable, aligned with
+        # block_p
+        y_pred_list, Sigma_y_pred_list = self._split_by_block(
+            y_pred_full, Sigma_y_pred_full, block_p
+        )
 
-        # return the results as a list (same lengh of points and block_p)
-        y_hat = []
-        Sigma_y_hat = []
-        for i in range(len(block_p)-1):
-            y_hat.append(y_hat_full[block_p[i]:block_p[i+1], :])
-            Sigma_y_hat.append(Sigma_y_hat_full[block_p[i]:block_p[i+1], block_p[i]:block_p[i+1],:])
-
-        # return points, y_hat, Sigma_y_hat, tdelta
         modelresults.points_pred = points
-        modelresults.y_pred = y_hat
-        modelresults.Sigma_y_pred = Sigma_y_hat
+        modelresults.y_pred_list = y_pred_list
+        modelresults.Sigma_y_pred_list = Sigma_y_pred_list
         modelresults.tdelta_pred = tdelta
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
@@ -746,6 +739,45 @@ class LRStateSpaceModel(StateSpaceModel):
         modelresults.crs_pred = gridList[0].crs
 
         return modelresults
+
+    def _split_by_block(self, y_full, Sigma_full, block_p):
+        """
+        Split a stacked mean array `y_full` (shape `(P, T)`) and its stacked
+        covariance `Sigma_full` (shape `(P, P, T)`) into one entry per
+        response variable, using the cumulative index boundaries `block_p`
+        (length `nvar + 1`, `block_p[i]:block_p[i+1]` selects variable `i`'s
+        rows). The `i`-th entries of the returned lists hold, respectively,
+        variable `i`'s own rows of `y_full` and its own diagonal block of
+        `Sigma_full` (cross-variable covariance is dropped).
+        """
+        block_p = np.asarray(block_p)
+        y_list, Sigma_list = [], []
+        for i in range(len(block_p) - 1):
+            y_list.append(y_full[block_p[i]:block_p[i + 1], :])
+            Sigma_list.append(
+                Sigma_full[block_p[i]:block_p[i + 1], block_p[i]:block_p[i + 1], :]
+            )
+        return y_list, Sigma_list
+
+    @_on_device
+    def _predict(self, H, x_T, P_T, Xbeta, beta):
+        """
+        Core SSM prediction, stacked across all response variables -- the
+        single source of truth used both for in-sample fitted values
+        (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
+        result into per-variable views is a separate, explicit step (see
+        `self._split_by_block`), left to the caller.
+        """
+        self._log("Start Prediction the SSM...")
+
+        # Compute the prediction of linear SSM
+        tStart = time.time()
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
+        tdelta = time.time()- tStart
+
+        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+
+        return y_hat_full, Sigma_y_hat_full, tdelta
 
     @_on_device
     def fit(
@@ -948,22 +980,38 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("EM algorithm converged after {} iterations.".format(niter))
         self._log("Final log-likelihood: {}.".format(logL_cur))
         self._log("Create the results object...")
-        
+
+        # predict the respose variable using the fitted model parameters
+        beta_est = est_params.beta.value
+        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(H, x_T, P_T, Xbeta, beta_est)
+
+        # Per-variable views (one entry per response variable), snapshotted
+        # here rather than derived later from `self.model.block_p` -- that
+        # attribute is mutable and would go stale for this results object
+        # the next time `fit()`/`setup()` runs on this same model instance.
+        y_hat_list, Sigma_y_hat_list = self._split_by_block(
+            y_hat_full, Sigma_y_hat_full, block_p
+        )
+
+        # reuturn the final results as a LRStateSpaceResults object
         results = LRStateSpaceResults(
             model=self,
             params=est_params,
             nstats=nstat,
             options=options,
-            # main arrays
-            y_hat=y_hat,
+            # main arrays (stacked across all variables -- feeds the
+            # generic, model-agnostic uncertainty machinery in the base
+            # StateSpaceResults class: conf_int_y, coverage_probability, ...)
+            y_hat=y_hat_full,
+            Sigma_y_hat=Sigma_y_hat_full,
+            tdelta_hat=tdelta_hat,
+            # per-variable views (one entry per response variable)
+            y_hat_list=y_hat_list,
+            Sigma_y_hat_list=Sigma_y_hat_list,
+            block_p=block_p,
             x_smoothed=x_T,
             P_smoothed=P_T,
             P_pred_smoothed=None,
-            # observation matrix used to produce y_hat/P_smoothed above --
-            # stored on the results snapshot (not read live off `self.model`)
-            # since `self.model.H` is mutable and would go stale the next
-            # time `fit()` runs on this same model instance
-            H=H,
             # sufficient statistics
             S11=S11,
             S10=S10,
