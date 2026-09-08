@@ -206,14 +206,6 @@ print(results.y_hat_list[0].min(), results.y_hat_list[0].max())
 print(results.y_hat_back_list[0].min(), results.y_hat_back_list[0].max())
 print(np.nanmin(results.y_pred_back_list[0]), np.nanmax(results.y_pred_back_list[0]))
 
-# %% 
-# remove the outliers as 99.9 percentile of the AQ_pm10 variable
-fig, ax = plt.subplots(figsize=(8, 8))
-ax.hist(results.y_pred_back_list[0], color="orange", alpha=0.7)
-ax.set_title("Histogram of predicted values (back-transformed)", fontsize=14, fontweight="bold")
-ax.set_xlabel("Predicted values (back-transformed)", fontsize=12)
-ax.set_ylabel("Frequency", fontsize=12)
-
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
 
