@@ -26,6 +26,8 @@ class StateSpaceResults:
         self,
         model: Optional[Any],
         y_hat,
+        Sigma_y_hat,
+        tdelta_hat=None,
         # optional metadata
         params=None,
         params_names=None,
@@ -112,6 +114,8 @@ class StateSpaceResults:
 
         # ---- arrays ----
         self.y_hat = y_hat
+        self.Sigma_y_hat = Sigma_y_hat
+        self.tdelta_hat = tdelta_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
         self.x_pred = x_pred
@@ -153,6 +157,7 @@ class StateSpaceResults:
         """
         for attr in [
             "y_hat",
+            "Sigma_y_hat",
             "x_filtered",
             "P_filtered",
             "x_pred",
@@ -280,63 +285,44 @@ class StateSpaceResults:
         self, alpha: float = 0.05, prediction: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
         """Confidence intervals for y_hat. If prediction True include measurement noise R when available."""
+        
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
         y_hat = self.y_hat
         if y_hat is None:
             raise ValueError("y_hat not available.")
 
-        # try using model H and P_smoothed to compute predictive var
         p, T = y_hat.shape
-
         model = getattr(self, "model", None)
 
-        Psm = None
-        if self.P_smoothed is not None:
-            Psm = self.P_smoothed
-        elif self.P_filtered is not None:
-            Psm = (
-                self.P_filtered
-            )  # fallback to filtered covariances if smoothed not available
-        else:
-            Psm = None
-
-        if model is not None and hasattr(model, "H") and Psm is not None:
-            H = np.asarray(model.H)
-            R = np.asarray(
-                getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0))
-            )
-            # std = np.zeros((p, T))
-            lower = np.zeros((p, T), dtype=self.dtype)
-            upper = np.zeros((p, T), dtype=self.dtype)
-
-            # R is stored as its diagonal (1D) directly (see
-            # `_prepare_diag_array`), so it must be added onto var_y's
-            # diagonal only, not broadcast across every row.
-            R_diag_matrix = np.diag(R) if prediction else None
-
-            for t in range(T):
-                var_y = H @ Psm[:, :, t + 1] @ H.T
-                if prediction:
-                    var_y = var_y + R_diag_matrix
-
-                std_t = np.sqrt(np.diag(var_y))
-
-                lower[:, t] = y_hat[:, t] - z * std_t
-                upper[:, t] = y_hat[:, t] + z * std_t
-            return lower, upper
-
-        # fallback to residual std
-        err = self._compute_residuals()
-        if err is None:
+        # Sigma_y_hat is snapshotted at fit time by the concrete model
+        # subclass (e.g. LRStateSpaceResults), not reconstructed here from
+        # the model's H/P_smoothed: `model.H` is mutated in place by every
+        # `fit()` call/iteration, so rebuilding from it here could silently
+        # use a stale H that no longer matches this particular results
+        # object.
+        Sigma_y_hat = getattr(self, "Sigma_y_hat", None)
+        if Sigma_y_hat is None:
             raise ValueError(
-                "Cannot compute y confidence intervals: no residuals and no model covariance."
+                "Cannot compute y confidence intervals: Sigma_y_hat is not "
+                "available on this results object."
             )
-        resid_std = np.nanstd(err)
-        lower = y_hat - z * resid_std
-        upper = y_hat + z * resid_std
-        return lower, upper
 
+        R = np.asarray(getattr(model, "R", 0.0)) if model is not None else np.asarray(0.0)
+        R_diag_matrix = np.diag(R) if (prediction and R.ndim > 0) else None
+
+        lower = np.zeros((p, T), dtype=self.dtype)
+        upper = np.zeros((p, T), dtype=self.dtype)
+        for t in range(T):
+            var_y = np.asarray(Sigma_y_hat[:, :, t])
+            if prediction and R_diag_matrix is not None:
+                var_y = var_y + R_diag_matrix
+
+            std_t = np.sqrt(np.diag(var_y))
+            lower[:, t] = y_hat[:, t] - z * std_t
+            upper[:, t] = y_hat[:, t] + z * std_t
+        return lower, upper
+        
     def coverage_probability(self, alpha: float = 0.05, which="global"):
         return self._coverage_probability(alpha, which)
 
@@ -502,6 +488,7 @@ class StateSpaceResults:
         return {
             "y_obs": self.y_obs,
             "y_hat": self.y_hat,
+            "Sigma_y_hat": self.Sigma_y_hat,
             "x_filtered": self.x_filtered,
             "P_filtered": self.P_filtered,
             "x_smoothed": self.x_smoothed,

@@ -118,7 +118,9 @@ class LRStateSpaceResults(StateSpaceResults):
         params: ModelParams = None,
         nstats: list = None,
         options: FitOptions = None,
-        H=None,
+        y_hat_list: list = None,
+        Sigma_y_hat_list: list = None,
+        block_p=None,
         **kwargs,
     ):
         # Initialize base class
@@ -134,13 +136,16 @@ class LRStateSpaceResults(StateSpaceResults):
         self.nstats = nstats
         self.options = options
 
-        # Observation matrix used to produce `y_hat`/`P_smoothed` above,
-        # snapshotted here rather than read live off `self.model.H` --
-        # `model.H` is mutated in place every `fit()` iteration (and by any
-        # later `fit()` call on the same model instance), so it would go
-        # stale for this results object as soon as the model is reused.
-        # Used by `Sigma_y_hat` for the in-sample predictive covariance.
-        self.H = H
+        # Per-variable views (one entry per response variable, i.e. length
+        # `model.nvar`) of the base class's stacked `y_hat`/`Sigma_y_hat`,
+        # split along `block_p` -- see `_split_by_block`. `block_p` is
+        # snapshotted here (not read live off `self.model.block_p`) since
+        # that attribute is mutable and would go stale for this results
+        # object the next time `fit()`/`setup()` runs on this model instance.
+        self.y_hat_list = y_hat_list
+        self.Sigma_y_hat_list = Sigma_y_hat_list
+        self.block_p = block_p
+        self._residuals_list = None  # cache for the residuals_list property
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -152,23 +157,24 @@ class LRStateSpaceResults(StateSpaceResults):
         self.runtime_tot_estep = 0.0
         self.runtime_tot_mstep = 0.0
 
-        # Out-of-sample prediction (populated by .predict(); distinct from
-        # `y_hat`, which holds the in-sample filtered/fitted values used for
-        # residuals).
+        # Out-of-sample prediction (populated by .predict(); per-variable
+        # views, distinct from `y_hat`/`y_hat_list`, which hold the
+        # in-sample filtered/fitted values used for residuals).
         self.points_pred = None
-        self.y_pred = None
-        self.Sigma_y_pred = None
+        self.y_pred_list = None
+        self.Sigma_y_pred_list = None
         self.tdelta_pred = None
         self.timestamps_pred = None
         self.crs_pred = None
 
-        # Original-scale (back-transformed) counterparts of y_hat/y_pred,
-        # populated by .back_transform() -- see that method's docstring.
-        self.y_hat_back = None
-        self.Sigma_y_hat_back = None
-        self.y_pred_back = None
-        self.Sigma_y_pred_back = None
-        self._Sigma_y_hat = None  # cache for the Sigma_y_hat property
+        # Original-scale (back-transformed) counterparts of y_hat_list/
+        # y_pred_list, populated by .back_transform() -- see that method's
+        # docstring. Per-variable views only, mirroring y_hat_list/y_pred_list
+        # (no stacked y_hat_back/Sigma_y_hat_back).
+        self.y_hat_back_list = None
+        self.Sigma_y_hat_back_list = None
+        self.y_pred_back_list = None
+        self.Sigma_y_pred_back_list = None
 
         self.llf_path = None  # log-likelihood across EM iterations
 
@@ -456,13 +462,31 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         Compute out-of-sample predictions based on smoothed states and model
         parameters. `self.model.predict` stores them directly on this
-        results object (`points_pred`, `y_pred`, `Sigma_y_pred`,
-        `tdelta_pred`, `timestamps_pred`, `crs_pred`) and returns `self`, so
-        predictions travel with the fitted model and can be reused by other
-        methods (e.g. `.to_geo()`, plotting, summaries) without re-running
-        prediction.
+        results object (`points_pred`, `y_pred_list`, `Sigma_y_pred_list`,
+        `tdelta_pred`, `timestamps_pred`, `crs_pred` -- one entry per
+        response variable) and returns `self`, so predictions travel with
+        the fitted model and can be reused by other methods (e.g.
+        `.to_geo()`, plotting, summaries) without re-running prediction.
         """
         return self.model.predict(df, modelresults=self, verbose=verbose)
+
+
+    @property
+    def residuals_list(self):
+        """
+        Per-variable view of the base class's stacked `residuals`
+        (`y_obs - y_hat`), split along `block_p` -- the in-sample
+        counterpart of `y_hat_list`/`Sigma_y_hat_list`.
+        """
+        if self._residuals_list is None:
+            res = self.residuals
+            if res is None or self.block_p is None:
+                return None
+            block_p = np.asarray(self.block_p)
+            self._residuals_list = [
+                res[block_p[i]:block_p[i + 1], :] for i in range(len(block_p) - 1)
+            ]
+        return self._residuals_list
 
     def _pred_summary_stats(self):
         """
@@ -470,11 +494,11 @@ class LRStateSpaceResults(StateSpaceResults):
         used by `generate_summary()` to populate the top_left_pred /
         top_right_pred summary tables.
         """
-        y_all = np.concatenate([np.asarray(y).ravel() for y in self.y_pred])
+        y_all = np.concatenate([np.asarray(y).ravel() for y in self.y_pred_list])
         n_points = sum(np.asarray(p).shape[0] for p in self.points_pred)
 
         std_all = []
-        for sigma in self.Sigma_y_pred:
+        for sigma in self.Sigma_y_pred_list:
             sigma = np.asarray(sigma)
             var = np.clip(np.diagonal(sigma, axis1=0, axis2=1), 0.0, None)  # (T, n_i)
             std_all.append(np.sqrt(var).ravel())
@@ -498,8 +522,16 @@ class LRStateSpaceResults(StateSpaceResults):
 
         Columns: `point_id`, `timestamp`, then `y_pred_<var>`/`std_pred_<var>`
         for every response variable (predicted mean, and predictive standard
-        deviation from the diagonal of `Sigma_y_pred`). Geometry is the
+        deviation from the diagonal of `Sigma_y_pred_list`), plus, if
+        `.back_transform()` has been run, `y_pred_back_<var>`/
+        `std_pred_back_<var>` (original-scale counterparts). Geometry is the
         prediction point, repeated once per timestamp; CRS is `self.crs_pred`.
+
+        Only prediction-grid quantities (`y_pred_list`/`Sigma_y_pred_list`
+        and their back-transformed counterparts) are included here --
+        `y_hat_list`/`Sigma_y_hat_list` live on the *training* grid, which
+        generally has a different number of points/timestamps than the
+        prediction grid this GeoDataFrame is indexed by.
 
         All response variables must share the same prediction grid (same
         points and timestamps) -- true whenever they were all predicted from
@@ -510,7 +542,7 @@ class LRStateSpaceResults(StateSpaceResults):
         gdf.to_file("predictions.shp")
 
         """
-        if self.y_pred is None:
+        if self.y_pred_list is None:
             raise ValueError(
                 "No prediction available: call `.predict(df)` before `.to_geo()`."
             )
@@ -537,7 +569,7 @@ class LRStateSpaceResults(StateSpaceResults):
             "timestamp": np.repeat(ts, n),
         }
 
-        for name, y, sigma in zip(y_names, self.y_pred, self.Sigma_y_pred):
+        for name, y, sigma in zip(y_names, self.y_pred_list, self.Sigma_y_pred_list):
             y = np.asarray(y)
             var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
             std = np.sqrt(var)
@@ -545,20 +577,14 @@ class LRStateSpaceResults(StateSpaceResults):
             data[f"y_pred_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
             data[f"std_pred_{name}"] = std.ravel()
 
-        if self.y_hat_back is not None and self.y_pred_back is not None:
-            for name, y_hat, y_pred, sigma_hat, sigma_pred in zip(
-                y_names, self.y_hat_back, self.y_pred_back, self.Sigma_y_hat_back, self.Sigma_y_pred_back
+        if self.y_pred_back_list is not None:
+            for name, y_pred, sigma_pred in zip(
+                y_names, self.y_pred_back_list, self.Sigma_y_pred_back_list
             ):
-                
-                var_hat = np.clip(np.diagonal(sigma_hat, axis1=0, axis2=1), 0.0, None)  # (T, n)
-                std_hat = np.sqrt(var_hat)
-
-                var_pred = np.clip(np.diagonal(sigma_pred, axis1=0, axis2=1), 0.0, None)  # (T, n)
+                var_pred = np.clip(np.diagonal(np.asarray(sigma_pred), axis1=0, axis2=1), 0.0, None)  # (T, n)
                 std_pred = np.sqrt(var_pred)
 
-                data[f"y_hat_back_{name}"] = y_hat.T.ravel()
-                data[f"y_pred_back_{name}"] = y_pred.T.ravel()
-                data[f"std_hat_back_{name}"] = std_hat.ravel()
+                data[f"y_pred_back_{name}"] = np.asarray(y_pred).T.ravel()
                 data[f"std_pred_back_{name}"] = std_pred.ravel()
 
         geoms = [Point(xy) for xy in points]
@@ -569,37 +595,6 @@ class LRStateSpaceResults(StateSpaceResults):
             geometry=np.tile(geoms, T),
             crs=self.crs_pred,
         )
-
-    @property
-    def Sigma_y_hat(self):
-        """
-        In-sample predictive covariance of `y_hat`: `H @ P_smoothed @ H.T`
-        per time step (no measurement noise added), the training-set
-        counterpart of `Sigma_y_pred` -- computed the same way `.predict()`
-        computes `Sigma_y_pred`, but with the training `H` and `P_smoothed`
-        instead of a new grid's. Uses `self.H` (snapshotted at fit time),
-        not the live `self.model.H`, which is mutated in place by every
-        `fit()` call/iteration and would go stale for this results object.
-        """
-        if self._Sigma_y_hat is None:
-            if self.H is None:
-                raise ValueError(
-                    "Sigma_y_hat requires the observation matrix H used to "
-                    "produce y_hat/P_smoothed; this results object was not "
-                    "constructed with one (`H=...`)."
-                )
-            H = jnp.asarray(self.H)
-            P = jnp.asarray(self.P_smoothed)[:, :, 1:]
-            if H.shape[0] != np.asarray(self.y_hat).shape[0] or H.shape[1] != P.shape[0]:
-                raise ValueError(
-                    f"Sigma_y_hat: shape mismatch between H {H.shape}, "
-                    f"y_hat {np.asarray(self.y_hat).shape} and P_smoothed "
-                    f"{np.asarray(self.P_smoothed).shape} -- H must map "
-                    "P_smoothed's latent dimension to y_hat's observation "
-                    "dimension."
-                )
-            self._Sigma_y_hat = np.asarray(jnp.einsum("ip,pqt,jq->ijt", H, P, H))
-        return self._Sigma_y_hat
 
     @staticmethod
     def _delta_method(g_inv, mu, Sigma):
@@ -642,11 +637,12 @@ class LRStateSpaceResults(StateSpaceResults):
 
     def back_transform(self, g_inv):
         """
-        Map `y_hat`/`y_pred` (and their model-implied covariance) back to
-        the response's original scale, via the second-order delta method
-        (see `_delta_method`), and store the results as `y_hat_back`,
-        `Sigma_y_hat_back` and, if `.predict()` has been run, `y_pred_back`,
-        `Sigma_y_pred_back`.
+        Map `y_hat_list`/`y_pred_list` (and their model-implied covariance)
+        back to the response's original scale, via the second-order delta
+        method (see `_delta_method`), applied per response variable, and
+        store the results as `y_hat_back_list`/`Sigma_y_hat_back_list` and --
+        if `.predict()` has been run -- `y_pred_back_list`/
+        `Sigma_y_pred_back_list`.
 
         This relies on the transformed response being asymptotically
         Normal (the model's own assumption), so the delta method's local,
@@ -687,24 +683,25 @@ class LRStateSpaceResults(StateSpaceResults):
             scalar JAX-traceable function.
         """
 
-        mean_back, Sigma_back = [], []
-
-        for mu_i, Sigma_i in zip(self.y_hat, self.Sigma_y_hat):
-            m, S = self._delta_method(g_inv, mu_i, Sigma_i)
-            mean_back.append(m)
-            Sigma_back.append(S)
-        
-        self.y_hat_back = mean_back
-        self.Sigma_y_hat_back = Sigma_back
-
-        if self.y_pred is not None:
-            y_pred_back, Sigma_pred_back = [], []
-            for mu_i, Sigma_i in zip(self.y_pred, self.Sigma_y_pred):
+        if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
+            y_hat_back_list, Sigma_hat_back_list = [], []
+            for mu_i, Sigma_i in zip(self.y_hat_list, self.Sigma_y_hat_list):
                 m, S = self._delta_method(g_inv, mu_i, Sigma_i)
-                y_pred_back.append(m)
-                Sigma_pred_back.append(S)
-            self.y_pred_back = y_pred_back
-            self.Sigma_y_pred_back = Sigma_pred_back
+                y_hat_back_list.append(m)
+                Sigma_hat_back_list.append(S)
+
+            self.y_hat_back_list = y_hat_back_list
+            self.Sigma_y_hat_back_list = Sigma_hat_back_list
+
+        if self.y_pred_list is not None:
+            y_pred_back_list, Sigma_pred_back_list = [], []
+            for mu_i, Sigma_i in zip(self.y_pred_list, self.Sigma_y_pred_list):
+                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+                y_pred_back_list.append(m)
+                Sigma_pred_back_list.append(S)
+            
+            self.y_pred_back_list = y_pred_back_list
+            self.Sigma_y_pred_back_list = Sigma_pred_back_list
 
         return self
 
@@ -754,7 +751,7 @@ class LRStateSpaceResults(StateSpaceResults):
         gen_top_right += gen_top_right_em
 
         # Add the out-of-sample prediction summary, if .predict() has been run
-        if self.y_pred is not None:
+        if self.y_pred_list is not None:
             pstats = self._pred_summary_stats()
 
             top_left_pred = dict(
