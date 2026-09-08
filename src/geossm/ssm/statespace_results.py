@@ -26,7 +26,7 @@ class StateSpaceResults:
         self,
         model: Optional[Any],
         y_hat,
-        Sigma_y_hat,
+        Sigma_y_hat=None,
         tdelta_hat=None,
         # optional metadata
         params=None,

@@ -993,6 +993,14 @@ class LRStateSpaceModel(StateSpaceModel):
             y_hat_full, Sigma_y_hat_full, block_p
         )
 
+        # Training grid (points/timestamps/CRS), one entry per response
+        # variable -- snapshotted here for the same reason as block_p above:
+        # self.points/self.gridList are mutable and would go stale for this
+        # results object the next time setup()/fit() runs on this model.
+        points_hat = self.points
+        timestamps_hat = [grid.timestamps for grid in self.gridList]
+        crs_hat = self.gridList[0].crs
+
         # reuturn the final results as a LRStateSpaceResults object
         results = LRStateSpaceResults(
             model=self,
@@ -1009,6 +1017,9 @@ class LRStateSpaceModel(StateSpaceModel):
             y_hat_list=y_hat_list,
             Sigma_y_hat_list=Sigma_y_hat_list,
             block_p=block_p,
+            points_hat=points_hat,
+            timestamps_hat=timestamps_hat,
+            crs_hat=crs_hat,
             x_smoothed=x_T,
             P_smoothed=P_T,
             P_pred_smoothed=None,

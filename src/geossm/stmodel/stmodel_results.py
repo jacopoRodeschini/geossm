@@ -121,6 +121,9 @@ class LRStateSpaceResults(StateSpaceResults):
         y_hat_list: list = None,
         Sigma_y_hat_list: list = None,
         block_p=None,
+        points_hat: list = None,
+        timestamps_hat: list = None,
+        crs_hat=None,
         **kwargs,
     ):
         # Initialize base class
@@ -146,6 +149,12 @@ class LRStateSpaceResults(StateSpaceResults):
         self.Sigma_y_hat_list = Sigma_y_hat_list
         self.block_p = block_p
         self._residuals_list = None  # cache for the residuals_list property
+
+        # Training grid (one entry per response variable), snapshotted for
+        # the same reason as block_p above -- used by `.to_geo()`.
+        self.points_hat = points_hat
+        self.timestamps_hat = timestamps_hat
+        self.crs_hat = crs_hat
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -514,52 +523,34 @@ class LRStateSpaceResults(StateSpaceResults):
             "y_mean_std": np.nanmean(std_all),
         }
 
-    def to_geo(self):
+    @staticmethod
+    def _build_geo_dataframe(
+        y_names, points_list, timestamps_list, y_list, Sigma_list, crs,
+        prefix, y_back_list=None, Sigma_back_list=None,
+    ):
         """
-        Package the last computed prediction (`.predict()`) into a single
-        GeoDataFrame, one row per (point, timestamp), ready to be exported
-        (e.g. `.to_file("out.shp")`).
-
-        Columns: `point_id`, `timestamp`, then `y_pred_<var>`/`std_pred_<var>`
-        for every response variable (predicted mean, and predictive standard
-        deviation from the diagonal of `Sigma_y_pred_list`), plus, if
-        `.back_transform()` has been run, `y_pred_back_<var>`/
-        `std_pred_back_<var>` (original-scale counterparts). Geometry is the
-        prediction point, repeated once per timestamp; CRS is `self.crs_pred`.
-
-        Only prediction-grid quantities (`y_pred_list`/`Sigma_y_pred_list`
-        and their back-transformed counterparts) are included here --
-        `y_hat_list`/`Sigma_y_hat_list` live on the *training* grid, which
-        generally has a different number of points/timestamps than the
-        prediction grid this GeoDataFrame is indexed by.
-
-        All response variables must share the same prediction grid (same
-        points and timestamps) -- true whenever they were all predicted from
-        the same input dataframe, as `.predict()` guarantees.
-
-        results = results.predict(grid, verbose=True)
-        gdf = results.to_geo()
-        gdf.to_file("predictions.shp")
-
+        Build one GeoDataFrame, one row per (point, timestamp), from a set
+        of per-variable mean/covariance lists that share a common grid
+        (`points_list[i]`/`timestamps_list[i]` must be the same across `i`
+        -- true for both `y_hat_list`/`Sigma_y_hat_list` and
+        `y_pred_list`/`Sigma_y_pred_list`, each built from a single input
+        dataframe). `prefix` (`"hat"` or `"pred"`) names the value columns:
+        `y_<prefix>_<var>`/`std_<prefix>_<var>`, plus `y_<prefix>_back_<var>`/
+        `std_<prefix>_back_<var>` when `y_back_list`/`Sigma_back_list` are
+        given.
         """
-        if self.y_pred_list is None:
-            raise ValueError(
-                "No prediction available: call `.predict(df)` before `.to_geo()`."
-            )
-
         import geopandas as geopd
         from shapely.geometry import Point
 
-        y_names = self.model.y_name
-        points = np.asarray(self.points_pred[0])
-        ts = self.timestamps_pred[0]
+        points = np.asarray(points_list[0])
+        ts = timestamps_list[0]
         n, T = points.shape[0], ts.shape[0]
 
-        for name, p, t in zip(y_names, self.points_pred, self.timestamps_pred):
+        for name, p, t in zip(y_names, points_list, timestamps_list):
             if np.asarray(p).shape[0] != n or np.asarray(t).shape[0] != T:
                 raise ValueError(
                     f"to_geo() requires every response variable to share the same "
-                    f"prediction grid, but '{name}' has {np.asarray(p).shape[0]} points "
+                    f"grid, but '{name}' has {np.asarray(p).shape[0]} points "
                     f"and {np.asarray(t).shape[0]} timestamps, versus {n} points and "
                     f"{T} timestamps for '{y_names[0]}'."
                 )
@@ -569,32 +560,73 @@ class LRStateSpaceResults(StateSpaceResults):
             "timestamp": np.repeat(ts, n),
         }
 
-        for name, y, sigma in zip(y_names, self.y_pred_list, self.Sigma_y_pred_list):
-            y = np.asarray(y)
-            var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
-            std = np.sqrt(var)
+        def add_columns(names, ys, sigmas, col_prefix):
+            for name, y, sigma in zip(names, ys, sigmas):
+                y = np.asarray(y)
+                var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
+                std = np.sqrt(var)
+                data[f"y_{col_prefix}_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
+                data[f"std_{col_prefix}_{name}"] = std.ravel()
 
-            data[f"y_pred_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
-            data[f"std_pred_{name}"] = std.ravel()
-
-        if self.y_pred_back_list is not None:
-            for name, y_pred, sigma_pred in zip(
-                y_names, self.y_pred_back_list, self.Sigma_y_pred_back_list
-            ):
-                var_pred = np.clip(np.diagonal(np.asarray(sigma_pred), axis1=0, axis2=1), 0.0, None)  # (T, n)
-                std_pred = np.sqrt(var_pred)
-
-                data[f"y_pred_back_{name}"] = np.asarray(y_pred).T.ravel()
-                data[f"std_pred_back_{name}"] = std_pred.ravel()
+        add_columns(y_names, y_list, Sigma_list, prefix)
+        if y_back_list is not None:
+            add_columns(y_names, y_back_list, Sigma_back_list, f"{prefix}_back")
 
         geoms = [Point(xy) for xy in points]
-
 
         return geopd.GeoDataFrame(
             data,
             geometry=np.tile(geoms, T),
-            crs=self.crs_pred,
+            crs=crs,
         )
+
+    def to_geo(self):
+        """
+        Package the in-sample fitted values and, if `.predict()` has been
+        run, the out-of-sample prediction into GeoDataFrames, one row per
+        (point, timestamp), ready to be exported (e.g. `.to_file("out.shp")`).
+
+        Returns a dict with two keys:
+        - `"hat"`: GeoDataFrame over the *training* grid, from
+          `y_hat_list`/`Sigma_y_hat_list` (plus `y_hat_back_<var>`/
+          `std_hat_back_<var>` if `.back_transform()` has been run). Always
+          present.
+        - `"pred"`: GeoDataFrame over the *prediction* grid, from
+          `y_pred_list`/`Sigma_y_pred_list` (plus `y_pred_back_<var>`/
+          `std_pred_back_<var>` if `.back_transform()` has been run), or
+          `None` if `.predict()` hasn't been run yet.
+
+        These are two separate GeoDataFrames, not one, because the training
+        and prediction grids generally have a different number of
+        points/timestamps.
+
+        Columns: `point_id`, `timestamp`, then `y_<hat|pred>_<var>`/
+        `std_<hat|pred>_<var>` for every response variable.
+
+        results = results.predict(grid, verbose=True)
+        geo = results.to_geo()
+        geo["hat"].to_file("fitted.shp")
+        geo["pred"].to_file("predictions.shp")
+        """
+        y_names = self.model.y_name
+
+        gdf_hat = self._build_geo_dataframe(
+            y_names, self.points_hat, self.timestamps_hat,
+            self.y_hat_list, self.Sigma_y_hat_list, self.crs_hat,
+            prefix="hat",
+            y_back_list=self.y_hat_back_list, Sigma_back_list=self.Sigma_y_hat_back_list,
+        )
+
+        gdf_pred = None
+        if self.y_pred_list is not None:
+            gdf_pred = self._build_geo_dataframe(
+                y_names, self.points_pred, self.timestamps_pred,
+                self.y_pred_list, self.Sigma_y_pred_list, self.crs_pred,
+                prefix="pred",
+                y_back_list=self.y_pred_back_list, Sigma_back_list=self.Sigma_y_pred_back_list,
+            )
+
+        return {"hat": gdf_hat, "pred": gdf_pred}
 
     @staticmethod
     def _delta_method(g_inv, mu, Sigma):
