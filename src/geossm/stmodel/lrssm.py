@@ -775,7 +775,7 @@ class LRStateSpaceModel(StateSpaceModel):
         y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
         tdelta = time.time()- tStart
 
-        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+        self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
         return y_hat_full, Sigma_y_hat_full, tdelta
 
