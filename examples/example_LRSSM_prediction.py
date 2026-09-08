@@ -227,7 +227,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(results.y_pred[0][:, start:end], axis=1)
+    avg = np.nanmean(results.y_pred_list[0][:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
