@@ -512,9 +512,20 @@ class DesignMatrices:
 class DesignMatricesBuilder:
 
     def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = True,
-                 tmin: datetime = None, tmax: datetime = None):
+                 tmin: datetime = None, tmax: datetime = None, domain=None):
         """
         Prepare the spatial-temporal dataset for modeling.
+
+        Parameters
+        ----------
+        domain : shapely Polygon/MultiPolygon, optional
+            The scientific interest domain, in the same CRS as `geodf`. When
+            given, every site (unique geometry) outside `domain` is dropped
+            -- together with all of its timestamps -- before the design
+            matrices are built, so training never sees observations outside
+            the domain. Contrast with `build_predict`'s own `domain`
+            argument, which only flags out-of-domain points (`self.mask`)
+            rather than dropping them.
         """
         self.verbose = verbose
         self.dtype = np.dtype(dtype)
@@ -523,6 +534,7 @@ class DesignMatricesBuilder:
         self.formula = formula
         self.tmin = tmin
         self.tmax = tmax
+        self.domain = domain
 
         self.formula_info = self._check_formula(formula)
         if self.formula_info.response_name:
@@ -533,17 +545,22 @@ class DesignMatricesBuilder:
         (
             self.geodf, self.geometry_id, self.time_col_name,
             self.crs, self.box, self.geometry, self.delta, self.unit,
-        ) = self._prepare_geodf(geodf, tmin, tmax)
+        ) = self._prepare_geodf(geodf, tmin, tmax, domain=domain)
         self._log(f"Spatial check passed using geometry id column '{self.geometry_id}'")
         self._log(f"Time column detected: '{self.time_col_name}'")
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
 
-    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False):
+    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False, domain=None):
         """
         Run every check/coercion a GeoDataFrame needs before it can be
         turned into design matrices. Shared by `__init__` (on the training
         data) and `build_predict` (on new data), so both paths validate
         identically and can't drift apart.
+
+        `domain`, when given, drops out-of-domain sites here (see
+        `_filter_domain`); `build_predict` never passes it through (it uses
+        the separate, non-destructive `_check_domain`/`self.mask` instead),
+        so this only ever filters training data.
         """
         if not isinstance(geodf, geopd.GeoDataFrame):
             raise ValueError("Input dataset must be a GeoDataFrame")
@@ -568,7 +585,41 @@ class DesignMatricesBuilder:
         if tmin is not None or tmax is not None:
             geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax)
 
+        if domain is not None:
+            geodf = self._filter_domain(geodf, geometry_id, domain)
+
         return geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit
+
+    def _filter_domain(self, geodf, geometry_id, domain):
+        """
+        Drop every row belonging to a site (`geometry_id`) whose location
+        falls outside `domain` -- a whole site (every timestamp), not
+        individual rows, so the remaining data stays a complete site x time
+        grid for `_check_balanced_panel`. See `_check_domain` for the
+        counterpart used by `build_predict`, which only flags out-of-domain
+        points via `self.mask` instead of dropping them.
+        """
+        sites = geodf.drop_duplicates(subset=[geometry_id])
+
+        shapely.prepare(domain)
+        inside = shapely.covers(domain, np.asarray(sites.geometry))
+        outside_ids = sites.loc[~inside, geometry_id]
+
+        n_out = len(outside_ids)
+        n_total = len(sites)
+        if n_out:
+            self._log(
+                f"Domain check: dropping {n_out} of {n_total} site(s) outside "
+                "the scientific interest domain"
+            )
+            geodf = geodf[~geodf[geometry_id].isin(outside_ids)]
+        else:
+            self._log(f"Domain check: all {n_total} site(s) inside the domain")
+
+        if geodf.empty:
+            raise ValueError("No sites remain after filtering to the scientific interest domain")
+
+        return geodf
 
     def _log(self, msg: str) -> None:
         if self.verbose:

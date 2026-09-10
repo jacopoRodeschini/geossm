@@ -27,7 +27,7 @@ def _flatten_polygons(geom):
     if isinstance(geom, Polygon):
         return [geom]
     raise TypeError(
-        "boundary must be a Polygon, a MultiPolygon, or a (possibly "
+        "domain must be a Polygon, a MultiPolygon, or a (possibly "
         f"nested) list of these; got {type(geom)}."
     )
 
@@ -52,12 +52,12 @@ def _mesh_min_angle(mesh):
     return float(np.min(angles))
 
 
-def _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff):
-    """Shared setup for buildMesh2d/buildMesh2d_density: normalizes `boundary`
+def _prepare_domain(points, domain, max_edge, min_edge, offset, cutoff):
+    """Shared setup for buildMesh2d/buildMesh2d_density: normalizes `domain`
     (Polygon, MultiPolygon, or a possibly nested list of these) into the
     scientific-interest domain and the convex hull used to build the mesh,
     fills in max_edge/min_edge/offset/cutoff defaults, merges near-
-    duplicate points, and buffers the domain.
+    duplicate points, and buffers the domain's hull.
 
     Returns
     -------
@@ -66,27 +66,29 @@ def _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff):
     n_input : int
         Number of points *before* that merge (what `lowrank` is relative to).
     interest_domain : shapely.geometry.base.BaseGeometry
-        Union of `boundary`'s parts (or the convex hull of `points`, if
-        `boundary` is not given), *before* it is widened to its convex hull.
-    domain : shapely.geometry.Polygon
+        Union of `domain`'s parts (or the convex hull of `points`, if
+        `domain` is not given), *before* it is widened to its convex hull.
+    convex_hull : shapely.geometry.Polygon
         The convex hull of `interest_domain`, buffered by `offset`: the
-        actual extent the mesh is built over.
+        actual extent the mesh is built over -- i.e. where the SPDE/FEM
+        problem is defined, as distinct from `interest_domain` (the
+        scientific-interest domain).
     coords : (k, 2) ndarray
-        `domain`'s exterior ring, simplified, for gmsh's polygon input.
+        `convex_hull`'s exterior ring, simplified, for gmsh's polygon input.
     max_edge, min_edge, offset, cutoff : float
         The (possibly defaulted) values actually used.
     """
     points = np.asarray(points, dtype=float)[:, :2]
     n_input = len(points)
 
-    if boundary is None:
+    if domain is None:
         interest_domain = MultiPoint(points).convex_hull
-        boundary = interest_domain
+        hull = interest_domain
     else:
-        interest_domain = unary_union(_flatten_polygons(boundary))
-        boundary = interest_domain.convex_hull
+        interest_domain = unary_union(_flatten_polygons(domain))
+        hull = interest_domain.convex_hull
 
-    bbox = boundary.bounds
+    bbox = hull.bounds
     diag = float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
 
     if max_edge is None:
@@ -108,17 +110,17 @@ def _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff):
             keep[i + 1:][d < cutoff] = False
         points = points[keep]
 
-    domain = boundary.buffer(offset)
-    if not isinstance(domain, Polygon):
-        raise ValueError("boundary.buffer(offset) did not yield a single polygon.")
-    coords = np.array(domain.simplify(offset * 0.25).exterior.coords[:-1])
+    convex_hull = hull.buffer(offset)
+    if not isinstance(convex_hull, Polygon):
+        raise ValueError("domain's convex hull, buffered by offset, did not yield a single polygon.")
+    coords = np.array(convex_hull.simplify(offset * 0.25).exterior.coords[:-1])
 
-    return points, n_input, interest_domain, domain, coords, max_edge, min_edge, offset, cutoff
+    return points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, cutoff
 
 
 def buildMesh2d(
     points,
-    boundary=None,
+    domain=None,
     max_edge=None,
     min_edge=None,
     offset=None,
@@ -133,8 +135,8 @@ def buildMesh2d(
     Build a 2D triangular (gmsh/pygmsh) mesh around a set of observed
     locations, in the spirit of R-INLA's ``inla.mesh.2d()``.
 
-    The mesh covers the convex hull of ``boundary`` (or of ``points`` if
-    `boundary` is not given), extended outward by ``offset`` to limit
+    The mesh covers the convex hull of ``domain`` (or of ``points`` if
+    `domain` is not given), extended outward by ``offset`` to limit
     boundary effects, with triangle edges bounded by ``max_edge``/``min_edge``.
 
     Parameters
@@ -142,7 +144,7 @@ def buildMesh2d(
     points : (n, 2) array_like
         Observed locations. Drive the default domain and, when `lowrank`
         is set, the local mesh density. Analogous to INLA's `loc`.
-    boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
         The scientific-interest domain, e.g. the same composition of
         polygons passed to `spdeAppoxCov`/`FEMSolver`. It does not need to
         be convex or a single piece (it can be a disconnected set of
@@ -155,7 +157,7 @@ def buildMesh2d(
     min_edge : float, optional
         Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
     offset : float, optional
-        Buffer added around `boundary` so the mesh extends past the data.
+        Buffer added around `domain` so the mesh extends past the data.
         Defaults to `max_edge`.
     cutoff : float, optional
         Points closer together than `cutoff` are merged before building the
@@ -169,9 +171,9 @@ def buildMesh2d(
         the density of `points` (finer where points are dense, coarser
         where they are sparse), so that the mesh has approximately
         ``round(lowrank * len(points))`` vertices *inside the scientific-
-        interest domain* -- i.e. inside the union of `boundary` before it is
+        interest domain* -- i.e. inside the union of `domain` before it is
         widened to its convex hull and `offset` (or inside the convex hull
-        of `points`, if `boundary` is not given). Vertices in the outer
+        of `points`, if `domain` is not given). Vertices in the outer
         buffer region are not counted and are free to be as sparse as the
         size field makes them. Local density is a k-nearest-neighbor
         estimate (see `density_neighbors`) ranked by percentile, rather than
@@ -190,12 +192,13 @@ def buildMesh2d(
     Returns
     -------
     mesh : meshio.Mesh
-    domain : shapely.geometry.Polygon
-        The (buffered) domain the mesh was built over -- `boundary` (or its
-        default) extended by `offset`.
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- i.e. where the
+        SPDE/FEM problem is defined -- `domain` (or its default) widened to
+        its convex hull and extended by `offset`.
     """
-    points, n_input, interest_domain, domain, coords, max_edge, min_edge, offset, cutoff = (
-        _prepare_domain(points, boundary, max_edge, min_edge, offset, cutoff)
+    points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, cutoff = (
+        _prepare_domain(points, domain, max_edge, min_edge, offset, cutoff)
     )
 
     tree = None
@@ -263,7 +266,7 @@ def buildMesh2d(
         return mesh
 
     if tree is None:
-        return _generate(), domain
+        return _generate(), convex_hull
 
     def _n_inside(mesh):
         pts = mesh.points
@@ -303,7 +306,7 @@ def buildMesh2d(
             "larger `lowrank`, or widen the min_edge/max_edge range."
         )
 
-    return mesh, domain
+    return mesh, convex_hull
 
 
 def _relax_landmarks(landmarks, n_iter, containing_domain, damping=0.5):
@@ -352,7 +355,7 @@ def _relax_landmarks(landmarks, n_iter, containing_domain, damping=0.5):
 def buildMesh2d_density(
     points,
     lowrank,
-    boundary=None,
+    domain=None,
     max_edge=None,
     min_edge=None,
     offset=None,
@@ -386,7 +389,7 @@ def buildMesh2d_density(
     would force even the sparsest landmark-free pockets down to `max_edge`
     and badly overshoot the vertex budget for a small `lowrank`. Outside
     the interest domain -- the outer offset buffer, and, for a concave or
-    multi-part `boundary` (e.g. a country plus its islands), any bay or
+    multi-part `domain` (e.g. a country plus its islands), any bay or
     strait that falls inside the convex hull but outside the true shape --
     there are no landmarks to size from, so a lattice of extra "filler"
     vertices at `max_edge` spacing is embedded there too, exactly like the
@@ -432,7 +435,7 @@ def buildMesh2d_density(
         domain, as a fraction of `len(points)` -- see above. Values that
         would ask for fewer than 3 landmarks, including 0, are floored to
         3 (a single triangle), the smallest possible triangulation.
-    boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
         The scientific-interest domain; see `buildMesh2d`. Defaults to the
         convex hull of `points`.
     max_edge : float, optional
@@ -444,7 +447,7 @@ def buildMesh2d_density(
     min_edge : float, optional
         Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
     offset : float, optional
-        Buffer added around `boundary` so the mesh extends past the data.
+        Buffer added around `domain` so the mesh extends past the data.
         Defaults to `max_edge`.
     cutoff : float, optional
         Minimum allowed separation between points, and independently
@@ -500,9 +503,9 @@ def buildMesh2d_density(
     Returns
     -------
     mesh : meshio.Mesh
-    domain : shapely.geometry.Polygon
-        The (buffered) domain the mesh was built over -- `boundary` (or its
-        default) extended by `offset`.
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- `domain` (or
+        its default) widened to its convex hull and extended by `offset`.
     """
     cutoff_is_default = cutoff is None
     # `cutoff` doubles as the *landmark* minimum spacing here -- a far more
@@ -520,8 +523,8 @@ def buildMesh2d_density(
     # below instead, once target_n is known. An explicit user `cutoff` is
     # instead applied at both stages, exactly as in buildMesh2d.
     dedup_cutoff = 0.0 if cutoff_is_default else cutoff
-    points, n_input, interest_domain, domain, coords, max_edge, min_edge, offset, _ = (
-        _prepare_domain(points, boundary, max_edge, min_edge, offset, dedup_cutoff)
+    points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, _ = (
+        _prepare_domain(points, domain, max_edge, min_edge, offset, dedup_cutoff)
     )
 
     if not (0 < lowrank <= 1):
@@ -547,10 +550,10 @@ def buildMesh2d_density(
         seed = int(np.random.default_rng().integers(0, 2**31 - 1))
 
     # Candidate "filler" vertices for the gap between the interest domain
-    # and the full meshed extent -- everywhere in `domain` that isn't in
-    # `interest_domain`: the outer offset buffer, but also, for a concave
-    # or multi-part `boundary` (e.g. a country plus its islands), any bay
-    # or strait that falls inside the convex hull but outside the true
+    # and the full meshed extent -- everywhere in `convex_hull` that isn't
+    # in `interest_domain`: the outer offset buffer, but also, for a
+    # concave or multi-part `domain` (e.g. a country plus its islands), any
+    # bay or strait that falls inside the convex hull but outside the true
     # shape. A lattice at `max_edge` spacing, later embedded exactly like
     # landmarks so that region's resolution is *guaranteed* by an explicit
     # vertex, not left to chance. (A first version instead relied on a
@@ -565,22 +568,22 @@ def buildMesh2d_density(
     # meant to avoid: a lattice point can land just barely inside the
     # boundary, forcing a triangle that connects it to a much farther
     # neighbor across the cut cell. So candidates are pulled back by
-    # roughly half a lattice cell from *both* boundaries -- `domain`'s own
-    # outer edge, and `interest_domain`'s edge (widened outward, since
+    # roughly half a lattice cell from *both* boundaries -- `convex_hull`'s
+    # own outer edge, and `interest_domain`'s edge (widened outward, since
     # filler sits outside it) -- leaving those margins for gmsh's ordinary
     # boundary-conforming triangulation (well-behaved for this) to bridge
     # using the landmarks/boundary-ring vertices already on either side,
     # instead of a misaligned lattice point.
-    minx, miny, maxx, maxy = domain.bounds
+    minx, miny, maxx, maxy = convex_hull.bounds
     nx = max(2, int(np.ceil((maxx - minx) / max_edge)) + 1)
     ny = max(2, int(np.ceil((maxy - miny) / max_edge)) + 1)
     xx, yy = np.meshgrid(np.linspace(minx, maxx, nx), np.linspace(miny, maxy, ny))
     grid = np.column_stack([xx.ravel(), yy.ravel()])
-    domain_core = domain.buffer(-max_edge * 0.5)
-    if domain_core.is_empty:
-        domain_core = domain
+    convex_hull_core = convex_hull.buffer(-max_edge * 0.5)
+    if convex_hull_core.is_empty:
+        convex_hull_core = convex_hull
     interest_expanded = interest_domain.buffer(max_edge * 0.5)
-    inside_domain_core = shapely.contains_xy(domain_core, grid[:, 0], grid[:, 1])
+    inside_domain_core = shapely.contains_xy(convex_hull_core, grid[:, 0], grid[:, 1])
     outside_interest_expanded = ~shapely.contains_xy(
         interest_expanded, grid[:, 0], grid[:, 1]
     )
@@ -781,7 +784,7 @@ def buildMesh2d_density(
             "points."
         )
 
-    return mesh, domain
+    return mesh, convex_hull
 
 
 # Maps buildMesh2d_new's simplified `method` onto buildMesh2d_density's
@@ -796,7 +799,7 @@ _DENSITY_METHODS = {
 def buildMesh2d_new(
     points,
     lowrank,
-    boundary=None,
+    domain=None,
     method="exact",
     max_edge=None,
     min_angle=21.0,
@@ -822,7 +825,7 @@ def buildMesh2d_new(
     lowrank : float
         Value in [0, 1]. Target vertex count inside the interest domain,
         as a fraction of `len(points)`; see `buildMesh2d_density`.
-    boundary : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
         The scientific-interest domain. Defaults to the convex hull of
         `points`.
     method : {"exact", "centroid", "relaxed"}, default "exact"
@@ -858,13 +861,13 @@ def buildMesh2d_new(
     Returns
     -------
     mesh : meshio.Mesh
-    domain : shapely.geometry.Polygon
-        The (buffered) domain the mesh was built over.
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over.
 
     Examples
     --------
-    >>> mesh, domain = buildMesh2d_new(points, lowrank=0.3)
-    >>> mesh, domain = buildMesh2d_new(points, lowrank=1.0, method="relaxed")
+    >>> mesh, convex_hull = buildMesh2d_new(points, lowrank=0.3)
+    >>> mesh, convex_hull = buildMesh2d_new(points, lowrank=1.0, method="relaxed")
     """
     if method not in _DENSITY_METHODS:
         raise ValueError(
@@ -873,7 +876,7 @@ def buildMesh2d_new(
     return buildMesh2d_density(
         points,
         lowrank,
-        boundary=boundary,
+        domain=domain,
         max_edge=max_edge,
         min_angle=min_angle,
         seed=seed,
@@ -906,7 +909,7 @@ def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):
 
 def buildMeshGrid2d(
     points=None,
-    boundary=None,
+    domain=None,
     offset=None,
     nx=None,
     ny=None,
@@ -917,12 +920,12 @@ def buildMeshGrid2d(
 ):
     """
     Build a regular (structured) 2D triangular mesh: a lattice of `nx` by
-    `ny` vertices spanning the bounding box of `boundary` (or the convex
-    hull of `points` if `boundary` is not given), extended by `offset`.
-    Grid cells lying entirely outside the (buffered) domain are dropped, so
-    the mesh follows the shape of `boundary` rather than just its bounding
-    box. Any vertex left with fewer than `min_degree` mesh edges by that
-    pruning (stray corners along the boundary "staircase") is removed
+    `ny` vertices spanning the bounding box of `domain` (or the convex
+    hull of `points` if `domain` is not given), extended by `offset`.
+    Grid cells lying entirely outside the (buffered) convex hull are
+    dropped, so the mesh follows the shape of `domain` rather than just its
+    bounding box. Any vertex left with fewer than `min_degree` mesh edges by
+    that pruning (stray corners along the boundary "staircase") is removed
     together with its triangles, repeated until the whole mesh satisfies
     `min_degree`; vertices left unused are dropped from the result.
 
@@ -936,12 +939,12 @@ def buildMeshGrid2d(
     Parameters
     ----------
     points : (n, 2) array_like, optional
-        Observed locations. Used to derive `boundary` (as their convex
-        hull) when `boundary` is not given, and as the basis for `lowrank`.
-    boundary : shapely.geometry.Polygon, optional
-        Domain the mesh must cover.
+        Observed locations. Used to derive `domain` (as their convex
+        hull) when `domain` is not given, and as the basis for `lowrank`.
+    domain : shapely.geometry.Polygon, optional
+        The scientific-interest domain the mesh must cover.
     offset : float, optional
-        Buffer added around `boundary` so the lattice extends past the
+        Buffer added around `domain` so the lattice extends past the
         data. Defaults to 1/15 of the domain's bounding-box diagonal.
     nx, ny : int, optional
         Number of vertices along the x- and y-axis of the underlying
@@ -963,28 +966,28 @@ def buildMeshGrid2d(
     Returns
     -------
     mesh : meshio.Mesh
-    domain : shapely.geometry.Polygon
-        The (buffered) domain the mesh was built over -- `boundary` (or its
-        default) extended by `offset`.
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- `domain` (or
+        its default) extended by `offset`.
     """
-    if boundary is None:
+    if domain is None:
         if points is None:
-            raise ValueError("either `points` or `boundary` must be given.")
+            raise ValueError("either `points` or `domain` must be given.")
         points = np.asarray(points, dtype=float)[:, :2]
-        boundary = MultiPoint(points).convex_hull
+        domain = MultiPoint(points).convex_hull
     elif points is not None:
         points = np.asarray(points, dtype=float)[:, :2]
 
     if offset is None:
-        bbox = boundary.bounds
+        bbox = domain.bounds
         diag = float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
         offset = diag / 15
 
-    domain = boundary.buffer(offset) if offset else boundary
-    if not isinstance(domain, Polygon):
-        raise ValueError("boundary.buffer(offset) did not yield a single polygon.")
+    convex_hull = domain.buffer(offset) if offset else domain
+    if not isinstance(convex_hull, Polygon):
+        raise ValueError("domain.buffer(offset) did not yield a single polygon.")
 
-    minx, miny, maxx, maxy = domain.bounds
+    minx, miny, maxx, maxy = convex_hull.bounds
     aspect = (maxx - minx) / (maxy - miny)
 
     def _build(nx, ny):
@@ -1002,9 +1005,9 @@ def buildMeshGrid2d(
             [np.column_stack([a, b, d]), np.column_stack([a, d, c])]
         )
 
-        # keep only cells whose centroid lies within the (buffered) domain
+        # keep only cells whose centroid lies within the (buffered) convex hull
         centroids = grid[triangles].mean(axis=1)
-        inside = shapely.contains_xy(domain, centroids[:, 0], centroids[:, 1])
+        inside = shapely.contains_xy(convex_hull, centroids[:, 0], centroids[:, 1])
         triangles = triangles[inside]
 
         triangles = _prune_low_degree(grid, triangles, min_degree)
@@ -1022,7 +1025,7 @@ def buildMeshGrid2d(
     if nx is not None or ny is not None:
         if nx is None or ny is None:
             raise ValueError("`nx` and `ny` must be given together.")
-        return _build(nx, ny), domain
+        return _build(nx, ny), convex_hull
 
     if lowrank is None:
         raise ValueError("either `nx`/`ny` or `lowrank` must be given.")
@@ -1075,4 +1078,4 @@ def buildMeshGrid2d(
         else:
             lo = mid
 
-    return best, domain
+    return best, convex_hull

@@ -370,14 +370,28 @@ class LRStateSpaceModel(StateSpaceModel):
                 f"Number of formulas ({len(formulas)}) must match number of domains ({len(domain)})"
             )
 
+        # Validate an explicit domain up front (see `_checkDomain`), before
+        # any design-matrix construction below, so an invalid domain fails
+        # fast rather than after the (possibly expensive) observation grid
+        # has already been built and filtered against it. `self.domain`
+        # (with its convex-hull-of-points default) is still set the usual
+        # way further down, once `self.points` exists.
+        if domain is not None:
+            flag, msg = self._checkDomain(domain)
+            if flag:
+                raise ValueError(msg)
+
         if formulas is not None:
 
             # Compute the design matrices
             self._log("Building observation grid...")
 
-
+            # Each formula's own domain entry (if any) is forwarded to its
+            # DesignMatricesBuilder, which drops observed sites outside it
+            # (see `DesignMatricesBuilder._filter_domain`) before the design
+            # matrix is built.
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
-                self._buildObservationGrid(df, formulas, verbose=verbose)
+                self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
             )
 
             self._log("Building observation grid... Done.")
@@ -426,16 +440,17 @@ class LRStateSpaceModel(StateSpaceModel):
             below) as its domain.
         cov_fun : list of spdeAppoxCov, optional
             Already-built (and already `setup()`-ed) covariance functions,
-            one per latent factor, used as-is. `domain_latent` is not
-            needed in this case: each factor's latent domain is already
-            fixed as `covi.domain` (validated by `spdeAppoxCov` itself, via
-            `_validate_domain`, when it was constructed).
+            one per latent factor, used as-is. `domain_latent` must not be
+            given in this case (raises `ValueError`): each factor's latent
+            domain is already fixed as `covi.domain`, set when `covi` was
+            `setup()`-ed (validated by `spdeAppoxCov` itself, via
+            `_validate_domain`).
         domain_latent : list of shapely Polygon/MultiPolygon, optional
             Only used together with `mesh_obj`: one entry per latent
             factor, matching `mesh_obj` index-for-index, passed to that
-            factor's `spdeAppoxCov` to classify its mesh's vertices as
-            inner/outer. If omitted, each `spdeAppoxCov` is built with no
-            explicit domain -- `FEMSolver`'s own default then applies:
+            factor's `spdeAppoxCov.setup()` to classify its mesh's vertices
+            as inner/outer. If omitted, each `spdeAppoxCov` is set up with
+            no explicit domain -- `FEMSolver`'s own default then applies:
             the convex hull of that mesh's own vertices, i.e. every vertex
             is treated as inner. Note this is a *different*, generally
             smaller list than `self.domain` (the measurement-equation
@@ -476,13 +491,24 @@ class LRStateSpaceModel(StateSpaceModel):
 
                 self._log(f"Create the GMRF {i} object, with (line: {line},triangle: {triangle},vertex: {vertex})")
                 # create the covariance model of the matern
-                temp = spdeAppoxCov([domi] if domi is not None else None, latlon=False, nu=1.0, var=1.0, rescale=1.0)
-                self._cov_matern.append(temp.setup(meshi))
+                temp = spdeAppoxCov(latlon=False, nu=1.0, var=1.0, rescale=1.0)
+                self._cov_matern.append(
+                    temp.setup(meshi, domain=[domi] if domi is not None else None)
+                )
 
         else:
-            # cov_fun: already-built spdeAppoxCov instances, one per latent
-            # factor. Each one's own `.domain` (post-setup) already is its
-            # latent domain -- domain_latent plays no role here.
+            # cov_fun: already-built (already setup()-ed) spdeAppoxCov
+            # instances, one per latent factor. Each one's own `.domain` is
+            # already fixed -- domain_latent plays no role here, so reject
+            # it explicitly instead of silently ignoring it.
+            if domain_latent is not None:
+                raise ValueError(
+                    "domain_latent is not used when cov_fun is provided: each "
+                    "cov_fun[i].domain is already fixed (set when it was setup()). "
+                    "domain_latent only applies with mesh_obj, to build a fresh "
+                    "spdeAppoxCov per mesh."
+                )
+
             self._log(f"Checking {len(cov_fun)} covariance functions...")
 
             for i, covi in enumerate(cov_fun):
@@ -1693,8 +1719,9 @@ class LRStateSpaceModel(StateSpaceModel):
 
         Builds on `spdeAppoxCov`/`FEMSolver`'s own contract (see
         `geossm.covmodel.covmodels._validate_domain`), applied per-entry --
-        wrapping each entry the same way `setup()` will (`spdeAppoxCov([domi], ...)`)
-        -- rather than to the whole list at once: validating the whole list
+        wrapping each entry the same way `setup()` will
+        (`spdeAppoxCov(...).setup(mesh, domain=[domi])`) -- rather than to
+        the whole list at once: validating the whole list
         in one call would flatten a MultiPolygon entry into several
         separate entries and break the 1:1 correspondence with the list
         it's meant to match (`self.points` or `mesh_obj`/`cov_fun`).
@@ -1750,18 +1777,25 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         Convex hull of the union of `domain`, i.e. of *all* measurement
         equations combined -- a single Polygon summarising the model's
-        overall geographic footprint, e.g. to pass as `boundary` to
+        overall geographic footprint, e.g. to pass as `domain` to
         `buildMesh2d`. See `_domain_hull`.
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None):
-
+    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None, domain=None):
+        """
+        `domain`, if given, is a list with one entry per formula (already
+        validated by the caller, see `_checkDomain`), forwarded to the
+        matching `DesignMatricesBuilder` so it drops observed sites outside
+        it -- see `DesignMatricesBuilder._filter_domain`.
+        """
         nvar = len(formulas)  # numer of the response variable
 
+        domain_per_formula = domain if domain is not None else [None] * nvar
+
         builders = [
-            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax)
-            for f in formulas
+            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax, domain=d)
+            for f, d in zip(formulas, domain_per_formula)
         ]
         dfs = [b.build() for b in builders]
 
