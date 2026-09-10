@@ -376,7 +376,7 @@ class LRStateSpaceModel(StateSpaceModel):
             self._log("Building observation grid...")
 
 
-            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T = (
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
                 self._buildObservationGrid(df, formulas, verbose=verbose)
             )
 
@@ -544,7 +544,7 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             self._log("Building observation grid...")
             
-            nvar, points, gridList, ndim, pdim, block_p, T = (
+            nvar, points, gridList, ndim, pdim, block_p, T, _ = (
                 self._buildObservationGrid(self.df, formulas, verbose=verbose)
             )
             self._log("Building observation grid... Done.")
@@ -674,22 +674,15 @@ class LRStateSpaceModel(StateSpaceModel):
         """ 
         self._log("Predicting response variable...")
 
-        # Cut the dataframe time to the time range of the model results
-        self._log("Cutting the dataframe to the time range of the model results...")
-        tmin = self.gridList[0].timestamps.min()
-        tmax = self.gridList[0].timestamps.max()
-
-         
-        # Compute the design matrices
+        # Compute the design matrices via each formula's fitted builder
+        # (self.builders), which cuts `df` to its own training time range
+        # and reuses its X_design_info so stateful transforms (e.g.
+        # standardize()) are evaluated with the training mean/std rather
+        # than recomputed on `df`.
         self._log("Building observation grid...")
 
-        nvar, points, gridList, ndim, pdim, block_p, T = (
-            self._buildObservationGrid(df, self.formulas, predict = True, verbose=verbose, tmin=tmin, tmax=tmax)
-        )
-        
-        if nvar != self.nvar:
-            raise ValueError(f"Number of response variables in the input data ({nvar}) does not match the model's number of response variables ({self.nvar}).")
-    
+        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(df, verbose=verbose)
+
         self._log("Building Prediction grid... Done.")
 
         self._log("Building the design matrix...")
@@ -727,25 +720,64 @@ class LRStateSpaceModel(StateSpaceModel):
         H = self._buildH_dense(A, basis)  # dense
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
-    
+        # Predict the response variable (stacked across all variables)
+        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta)
+
+        # Per-variable views, one entry per response variable, aligned with
+        # block_p
+        y_pred_list, Sigma_y_pred_list = self._split_by_block(
+            y_pred_full, Sigma_y_pred_full, block_p
+        )
+
+        modelresults.points_pred = points
+        modelresults.y_pred_list = y_pred_list
+        modelresults.Sigma_y_pred_list = Sigma_y_pred_list
+        modelresults.tdelta_pred = tdelta
+        # CRS is assumed identical across variables (build_predict already
+        # enforces it matches the training CRS for each formula)
+        modelresults.timestamps_pred = [grid.timestamps for grid in gridList]
+        modelresults.crs_pred = gridList[0].crs
+
+        return modelresults
+
+    def _split_by_block(self, y_full, Sigma_full, block_p):
+        """
+        Split a stacked mean array `y_full` (shape `(P, T)`) and its stacked
+        covariance `Sigma_full` (shape `(P, P, T)`) into one entry per
+        response variable, using the cumulative index boundaries `block_p`
+        (length `nvar + 1`, `block_p[i]:block_p[i+1]` selects variable `i`'s
+        rows). The `i`-th entries of the returned lists hold, respectively,
+        variable `i`'s own rows of `y_full` and its own diagonal block of
+        `Sigma_full` (cross-variable covariance is dropped).
+        """
+        block_p = np.asarray(block_p)
+        y_list, Sigma_list = [], []
+        for i in range(len(block_p) - 1):
+            y_list.append(y_full[block_p[i]:block_p[i + 1], :])
+            Sigma_list.append(
+                Sigma_full[block_p[i]:block_p[i + 1], block_p[i]:block_p[i + 1], :]
+            )
+        return y_list, Sigma_list
+
+    @_on_device
+    def _predict(self, H, x_T, P_T, Xbeta, beta):
+        """
+        Core SSM prediction, stacked across all response variables -- the
+        single source of truth used both for in-sample fitted values
+        (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
+        result into per-variable views is a separate, explicit step (see
+        `self._split_by_block`), left to the caller.
+        """
         self._log("Start Prediction the SSM...")
+
+        # Compute the prediction of linear SSM
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta_predict, beta)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
         tdelta = time.time()- tStart
 
-        self._log("Simulation done. Time elapsed: {}.".format(tdelta))
+        self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
-        # return the results as a list (same lengh of points and block_p)
-        y_hat = []
-        Sigma_y_hat = []
-        for i in range(len(block_p)-1):
-            y_hat.append(y_hat_full[block_p[i]:block_p[i+1], :])
-            Sigma_y_hat.append(Sigma_y_hat_full[block_p[i]:block_p[i+1], block_p[i]:block_p[i+1],:])
-
-        return points, y_hat, Sigma_y_hat, tdelta
-            
-
-    
+        return y_hat_full, Sigma_y_hat_full, tdelta
 
     @_on_device
     def fit(
@@ -948,14 +980,46 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("EM algorithm converged after {} iterations.".format(niter))
         self._log("Final log-likelihood: {}.".format(logL_cur))
         self._log("Create the results object...")
-        
+
+        # predict the respose variable using the fitted model parameters
+        beta_est = est_params.beta.value
+        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(H, x_T, P_T, Xbeta, beta_est)
+
+        # Per-variable views (one entry per response variable), snapshotted
+        # here rather than derived later from `self.model.block_p` -- that
+        # attribute is mutable and would go stale for this results object
+        # the next time `fit()`/`setup()` runs on this same model instance.
+        y_hat_list, Sigma_y_hat_list = self._split_by_block(
+            y_hat_full, Sigma_y_hat_full, block_p
+        )
+
+        # Training grid (points/timestamps/CRS), one entry per response
+        # variable -- snapshotted here for the same reason as block_p above:
+        # self.points/self.gridList are mutable and would go stale for this
+        # results object the next time setup()/fit() runs on this model.
+        points_hat = self.points
+        timestamps_hat = [grid.timestamps for grid in self.gridList]
+        crs_hat = self.gridList[0].crs
+
+        # reuturn the final results as a LRStateSpaceResults object
         results = LRStateSpaceResults(
-            model=self, 
-            params=est_params, 
-            nstats=nstat, 
+            model=self,
+            params=est_params,
+            nstats=nstat,
             options=options,
-            # main arrays
-            y_hat=y_hat, 
+            # main arrays (stacked across all variables -- feeds the
+            # generic, model-agnostic uncertainty machinery in the base
+            # StateSpaceResults class: conf_int_y, coverage_probability, ...)
+            y_hat=y_hat_full,
+            Sigma_y_hat=Sigma_y_hat_full,
+            tdelta_hat=tdelta_hat,
+            # per-variable views (one entry per response variable)
+            y_hat_list=y_hat_list,
+            Sigma_y_hat_list=Sigma_y_hat_list,
+            block_p=block_p,
+            points_hat=points_hat,
+            timestamps_hat=timestamps_hat,
+            crs_hat=crs_hat,
             x_smoothed=x_T,
             P_smoothed=P_T,
             P_pred_smoothed=None,
@@ -1691,12 +1755,15 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, predict = False, verbose=True, tmin=None, tmax=None):
+    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None):
 
         nvar = len(formulas)  # numer of the response variable
 
-        # todo - check if the formulas are valid (e.g. if the response variable is in the dataframe, if the covariates are in the dataframe, etc.)
-        dfs = [DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax).build(predict=predict) for f in formulas]
+        builders = [
+            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax)
+            for f in formulas
+        ]
+        dfs = [b.build() for b in builders]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
@@ -1706,7 +1773,26 @@ class LRStateSpaceModel(StateSpaceModel):
         block_p = np.hstack((0, np.cumsum(pdim)))
         ndim = block_p[-1]
 
-        return nvar, points, dfs, ndim, pdim, block_p, T
+        return nvar, points, dfs, ndim, pdim, block_p, T, builders
+
+    def _buildPredictionGrid(self, df, verbose=True):
+        """
+        Build the design matrices for new (prediction) locations/times, one
+        per formula, reusing each formula's fitted `DesignMatricesBuilder`
+        (`self.builders`, set in `__init__`) so stateful transforms (e.g.
+        standardize()) reuse training statistics instead of being recomputed
+        on `df`.
+        """
+        dfs = [b.build_predict(df, verbose=verbose, domain=d) for b, d in zip(self.builders, self.domain)]
+
+        T = [gr.T for gr in dfs]
+        points = [gr.points for gr in dfs]
+
+        pdim = [grid.N for grid in dfs]
+        block_p = np.hstack((0, np.cumsum(pdim)))
+        ndim = block_p[-1]
+
+        return points, dfs, ndim, pdim, block_p, T
     
     def _buildDesignMatrix(self, gridList):
 

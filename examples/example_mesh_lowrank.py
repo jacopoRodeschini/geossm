@@ -13,7 +13,7 @@ import shapely
 from scipy.spatial import cKDTree
 from shapely.geometry import MultiPoint
 
-from geossm.covmodel.utils import buildMesh2d, buildMesh2d_pen, buildMeshGrid2d
+from geossm.covmodel.utils import buildMesh2d, buildMesh2d_density, buildMeshGrid2d
 
 # %% Create a set of observed locations with an inhomogeneous density:
 # a dense cluster around (0.3, 0.3) plus a sparse background over [0, 1]^2
@@ -63,7 +63,7 @@ print(f"grid mesh: {len(mesh_grid.points)} vertices "
 # snapped onto the nearest actual point so they coincide with real
 # observations instead of merely being near them
 
-mesh_pen, boundary_pen = buildMesh2d_pen(points, lowrank=0.3, max_edge=0.08, seed=0)
+mesh_pen, boundary_pen = buildMesh2d_density(points, lowrank=0.3, max_edge=0.08, seed=0)
 n_inside_pen = shapely.contains_xy(
     interest_domain, mesh_pen.points[:, 0], mesh_pen.points[:, 1]
 ).sum()

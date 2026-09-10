@@ -19,10 +19,12 @@ from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
 from geossm.covmodel import FEMSolver
+from pathlib import Path
 
 # %% Download the the Full agrimonia dataset from zenodo repository
 
-agri_path = 'Download/Agrimonia_Dataset_v_3_0_0.csv'
+
+agri_path = Path('~').expanduser() / Path('Downloads/Agrimonia_Dataset_v_3_0_0.csv')
 
 # %% Load the agrimonia dataset
 
@@ -48,11 +50,19 @@ ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
 agri["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
 agri = geodf.GeoDataFrame(agri, crs=4326)
 
+# %% Remove the outliers as 99.9 percentile of the AQ_pm10 variable
+
+# replace the outlier with NaN
+thr999 = agri["AQ_pm10"].quantile(0.999)
+thr001 = agri["AQ_pm10"].quantile(0.001)
+index = agri[(agri["AQ_pm10"] >= thr999) | (agri["AQ_pm10"] <= thr001)].index
+agri.loc[index, "AQ_pm10"] = np.nan
+
 
 # %% Build the model
 
 model = lrssm(
-    agri, ["AQ_pm10 ~ 1 + WE_temp_2m + WE_tot_precipitation + WE_wind_speed_10m_mean"], verbose=True, domain=[buffer])
+    agri, ["np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m) + standardize(WE_tot_precipitation) + standardize(WE_wind_speed_10m_mean)"], verbose=True, domain=[buffer])
 
 
 print(model)
@@ -141,12 +151,17 @@ opt.tol_relat = 1e-3
 results = model.fit(options=opt)
 print(results)  # resutls.summary()
 
+# %% Compute the covariance matrix of the estimated parameters
+
+# it's optional since it requires the computation of the hessian
+results.compute_cov_params()
+print(results)  # results.summary()
 
 # %% Do the prediction 
 import pandas as pd
 
 # import the covariates dataset
-path = "Download/AGC_Dataset_3.0.0.csv"
+path = agri_path = Path('~').expanduser() / Path("Downloads/AGC_Dataset_v_3_0_0.csv")
 
 def converter(value):
     try:
@@ -179,12 +194,22 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 
 # %% Model prediction 
 
-# use the model.predict method to get the prediction and the uncertainty 
-points, y_hat, Sigma_y_hat, tdelta = model.predict(grid, results)
-# points, y_hat_v1, Sigma_y_hat, tdelta = results.predict(grid, verbose=True)
+results = results.predict(grid, verbose=True)
+print(results)  # results.summary()
 
-# %% PLot the results using imshow (for each time step)
+# %% Compute the back transformation of the predicted values and their covariance matrix
+import jax.numpy as jnp
+results = results.back_transform(g_inv=jnp.exp)
+
+
+print(results.y_hat_list[0].min(), results.y_hat_list[0].max())
+print(results.y_hat_back_list[0].min(), results.y_hat_back_list[0].max())
+print(np.nanmin(results.y_pred_back_list[0]), np.nanmax(results.y_pred_back_list[0]))
+
+# %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
+
+
 
 # Define month boundaries (assuming daily data for a year)
 # Days: Jan(31), Feb(28), Mar(31), Apr(30), May(31), Jun(30), 
@@ -208,7 +233,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(y_hat[0][:, start:end], axis=1)
+    avg = np.nanmean(results.y_pred_back_list[0][:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
@@ -217,15 +242,15 @@ fig, axs = plt.subplots(3, 4, figsize=(14, 10))
 
 # Create normalization for consistent coloring
 vmin = np.nanmin([np.nanmin(m) for m in monthly_avg])
-vmax = np.nanmax([np.nanmax(m) for m in monthly_avg])
+vmax = np.nanmax([np.nanquantile(m, 0.995) for m in monthly_avg])
 norm = Normalize(vmin=vmin, vmax=vmax)
 
 for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     ax = axs[i // 4, i % 4]
 
     # Get unique sorted coordinates
-    x_unique = np.sort(np.unique(points[0][:, 0]))
-    y_unique = np.sort(np.unique(points[0][:, 1]))
+    x_unique = np.sort(np.unique(results.points_pred[0][:, 0]))
+    y_unique = np.sort(np.unique(results.points_pred[0][:, 1]))
     
     # Create mapping dictionaries
     x_to_idx = {x: idx for idx, x in enumerate(x_unique)}
@@ -236,8 +261,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     Z = np.full((rows, cols), np.nan)
     
     # Fill grid
-    x_indices = np.array([x_to_idx[x] for x in points[0][:, 0]])
-    y_indices = np.array([y_to_idx[y] for y in points[0][:, 1]])
+    x_indices = np.array([x_to_idx[x] for x in results.points_pred[0][:, 0]])
+    y_indices = np.array([y_to_idx[y] for y in results.points_pred[0][:, 1]])
     Z[y_indices, x_indices] = avg_data
     
     # Mask pixels outside boundary
@@ -277,3 +302,9 @@ cbar_ax = fig.add_axes([0.90, 0.15, 0.02, 0.7])
 fig.colorbar(im, cax=cbar_ax, label="PM10 (µg/m³)")
 
 plt.tight_layout(rect=[0, 0, 0.88, 1])
+
+# %% Export the results to a shapefile
+
+geo = results.to_geo()
+# geo["hat"].to_file("fitted.shp")
+# geo["pred"].to_file("predictions.shp")
