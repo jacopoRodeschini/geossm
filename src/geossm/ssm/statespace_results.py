@@ -349,6 +349,19 @@ class StateSpaceResults:
         else:
             raise ValueError("which must be 'smoothed' or 'filtered'")
 
+    @staticmethod
+    def _format_runtime_summary(parts) -> Tuple[str, str]:
+        """
+        Build a single "Runtime (a / b / ...): total (va / vb / ...)" summary
+        entry from labeled runtime components (name, seconds). The total is
+        always the sum of the given parts, so it can never drift out of
+        sync with what's shown next to it.
+        """
+        label = "Runtime (" + " / ".join(name for name, _ in parts) + "):"
+        total = sum(value for _, value in parts)
+        rendered = f"{total:.3g} (" + " / ".join(f"{value:.3g}" for _, value in parts) + ")"
+        return label, rendered
+
     # ---------- Diagnostics & summary ----------
     def diagnostics(self) -> Dict[str, float]:
         """Return a small diagnostics dict computed on residuals (numpy)."""
@@ -425,7 +438,13 @@ class StateSpaceResults:
             ]
         )
 
-        self.time_total = self.time_filter + self.time_smoother + self.time_expectation
+        runtime_label, runtime_value = self._format_runtime_summary(
+            [
+                ("filter", self.time_filter),
+                ("smoother", self.time_smoother),
+                ("expect.", self.time_expectation),
+            ]
+        )
         top_right = {
             "Jarque-Bera:": lambda: [f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})"],
             "Omnibus test:": lambda: [f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})"],
@@ -433,13 +452,7 @@ class StateSpaceResults:
             "Skewness:": lambda: [f"{stats['skew']:.2f}"],
             "Kurtosis:": lambda: [f"{stats['kurtosis']:.2f}"],
             "Coverage Prob.:": lambda: [f"{self._coverage_probability():.2f}, (alpha = 0.05)"],
-            "Runtime total (s):":
-                    lambda: [
-                        f"{self.time_total:.3g}"
-                    ],
-            "Runtime filter (s):": lambda: [f"{self.time_filter:.3g}"],
-            "Runtime smoother (s):": lambda: [f"{self.time_smoother:.3g}"],
-            "Runtime expectation (s):": lambda: [f"{self.time_expectation:.3g}"],
+            runtime_label: lambda v=runtime_value: [v],
         }
 
         # Generate the dictionaly
