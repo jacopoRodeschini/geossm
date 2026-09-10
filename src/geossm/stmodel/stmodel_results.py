@@ -162,7 +162,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self.param_dim = None
 
         self.iterations = 0
-        self.runtime_tot = 0.0
         self.runtime_tot_estep = 0.0
         self.runtime_tot_mstep = 0.0
 
@@ -755,17 +754,17 @@ class LRStateSpaceResults(StateSpaceResults):
         # Add the EM iteration statistics table
         top_left_em = dict(
             [
-                
-                # ("Runtime total (s):", lambda: [f"{self.runtime_tot:.3g}"]),
                 ("AIC:", lambda: [f"{self.aic:.4g}"]),
                 ("BIC:", lambda: [f"{self.bic:.4g}"]),
             ]
         )
 
+        runtime_label, runtime_value = self._format_runtime_summary(
+            [("E step", time_e), ("M step", time_m)]
+        )
         top_right_em = {
-            "Runtime E-step (s):": lambda: [f"{time_e:.3g}"],
-            "Runtime M-step (s):": lambda: [f"{time_m:.3g}"],
-            "EM iters :": lambda: [f"{self.iterations}"], 
+            runtime_label: lambda v=runtime_value: [v],
+            "EM iters :": lambda: [f"{self.iterations}"],
         }
 
         # Generate the dictionaly
@@ -856,29 +855,25 @@ class LRStateSpaceResults(StateSpaceResults):
         meas_err_names = [n.ljust(max_name_len) for n in meas_err_names]
         state_names = [n.ljust(max_name_len) for n in state_names]
 
-        # todo: Add the parameters table (measurement equation parameters)
-        self.measurement = [
-            SimpleNamespace() for _ in range(self.model.nvar)
-        ]  # Create a list with one SimpleNamespace for compatibility with summary structure
-
+        
         # fixed effect
-        for m in self.measurement:
-            m.results = np.array([0])  # Dummy results for compatibility
-            m.model = None
+        m = SimpleNamespace()
+        m.results = np.array([0])  # Dummy results for compatibility
+        m.model = None
 
-            # Get the fixed effect block statistics
-            beta_vals = np.asarray(self.params.beta.value).ravel()
-            beta_bse = np.asarray(bse_struct.beta.bse).ravel()
-            beta_t, beta_p, _ = self._stats_from_arrays(beta_vals, beta_bse)
+        # Get the fixed effect block statistics
+        beta_vals = np.asarray(self.params.beta.value).ravel()
+        beta_bse = np.asarray(bse_struct.beta.bse).ravel()
+        beta_t, beta_p, _ = self._stats_from_arrays(beta_vals, beta_bse)
 
-            m.params = beta_vals
-            m.bse = beta_bse
-            m.tvalues = beta_t
-            m.pvalues = beta_p
-            m.params_name = xnames_stack
-            m.conf_int = lambda alpha=alpha, v=beta_vals, s=beta_bse: self._stats_from_arrays(v, s, alpha)[2]
+        m.params = beta_vals
+        m.bse = beta_bse
+        m.tvalues = beta_t
+        m.pvalues = beta_p
+        m.params_name = xnames_stack
+        m.conf_int = lambda alpha=alpha, v=beta_vals, s=beta_bse: self._stats_from_arrays(v, s, alpha)[2]
 
-            smry.add_table_params(m, xname=m.params_name, alpha=alpha)
+        smry.add_table_params(m, xname=m.params_name, alpha=alpha)
 
         # Measrement error
         temp = SimpleNamespace()
@@ -901,9 +896,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
         
         # todo: add the parameters table (state equation parameters)
-        temp = (
-            SimpleNamespace()
-        )  # Create a list with one SimpleNamespace for compatibility with summary structure
+        temp = SimpleNamespace()
         temp.results = np.array([0])  # Dummy results for compatibility
         temp.model = None
 
