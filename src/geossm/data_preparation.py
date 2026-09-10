@@ -446,8 +446,8 @@ class DesignMatrices:
             ("[min, max, mean]", lambda: [f"[{np.nanmin(y_np):.4g}, {np.nanmax(y_np):.4g}, {np.nanmean(y_np):.4g}]"] if self.y is not None else ["N/A"]),
             ("Observed",         lambda: [f"{self.n_obs} / {self.N * self.T} ({(1 - self.nan_ratio) * 100:.1f}%)"] if self.y is not None else ["N/A"]),
             ("Missing",          lambda: [f"{int(np.isnan(y_np).sum())} ({self.nan_ratio * 100:.1f}%)"] if self.y is not None else ["N/A"]),
-            ("Transfor (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
-            ("Transfor (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
+            ("Transformation (y)",       lambda: [get_print_string(", ".join(self.y_expr) if self.y_expr else "No")] if self.y is not None else ["N/A"]),
+            ("Transformation (X)",       lambda: [get_print_string(", ".join(self.x_exprs) if self.x_exprs else "No")]),
             ("dtype",          lambda: [str(self.dtype)]),
         ])
 
@@ -728,7 +728,7 @@ class DesignMatricesBuilder:
 
         covariate_names, covariate_exprs, covariate_columns = _extract_formula_metadata(model_desc.rhs_termlist)
         self._log(f"Covariate name(s): {', '.join(covariate_names) if covariate_names else 'intercept only'}")
-        self._log(f"Covariate expression(s): {', '.join(covariate_exprs) if covariate_exprs else 'intercept only'}")
+        self._log(f"Covariate transformation(s): {', '.join(covariate_exprs) if covariate_exprs else 'intercept only'}")
 
         return _FormulaInfo(
             lhs_termlist=model_desc.lhs_termlist,
