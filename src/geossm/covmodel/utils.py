@@ -679,14 +679,20 @@ def buildMesh2d_density(
             landmark_lc = np.full(len(landmarks), max_edge)
 
         # keep filler candidates that fall in a genuine coverage gap:
-        # farther than max_edge from the nearest landmark. This is what
-        # bounds element size *everywhere*, not just outside the interest
-        # domain -- see above -- and (since max_edge > cutoff by
+        # farther than half of max_edge from the nearest landmark. This is
+        # what bounds element size *everywhere*, not just outside the
+        # interest domain -- see above -- and (since max_edge > cutoff by
         # construction) it also never crowds an existing landmark closer
-        # than `cutoff`.
+        # than `cutoff`. Using max_edge itself as the threshold (rather
+        # than half of it) is too loose: two landmarks each individually
+        # within max_edge of a shared midpoint, but up to 2*max_edge apart
+        # from *each other*, leave a real gap there with nothing added to
+        # subdivide it, since neither one's exclusion zone reaches past
+        # its own half. Halving the threshold bounds that same worst case
+        # much closer to max_edge itself, at a modest extra-vertex cost.
         if len(filler_candidates) > 0:
             d, _ = ltree.query(filler_candidates)
-            filler = filler_candidates[d >= max_edge]
+            filler = filler_candidates[d >= max_edge * 0.5]
         else:
             filler = filler_candidates
 
