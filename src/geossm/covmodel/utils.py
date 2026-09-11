@@ -383,41 +383,56 @@ def buildMesh2d_density(
     directly at those nodes; (3) embeds the landmarks into the gmsh mesh
     as fixed points -- gmsh's optimizer moves every other node but never
     relocates or removes an embedded point, so the overlap from (2)
-    survives mesh generation and smoothing exactly. Inside the interest
-    domain, gmsh fills in the rest from the landmarks' own local spacing
-    (`Mesh.MeshSizeFromPoints`) alone -- not a flat `max_edge` cap, which
-    would force even the sparsest landmark-free pockets down to `max_edge`
-    and badly overshoot the vertex budget for a small `lowrank`. Outside
-    the interest domain -- the outer offset buffer, and, for a concave or
-    multi-part `domain` (e.g. a country plus its islands), any bay or
-    strait that falls inside the convex hull but outside the true shape --
-    there are no landmarks to size from, so a lattice of extra "filler"
-    vertices at `max_edge` spacing is embedded there too, exactly like the
-    landmarks (a runtime "outside the interest domain -> cap at max_edge"
-    size field was tried instead of this lattice, but its discontinuity
-    made gmsh's mesher visibly struggle on a finely-detailed real
-    coastline, silently leaving that whole region under-meshed). The
-    lattice is pulled back about half a cell from both the interest
-    domain's edge and the outer boundary, rather than filling all the way
-    up to them: a raw grid clipped flush against a slanted or jagged edge
-    produces its own near-zero-angle slivers, so that margin is instead
-    left to gmsh's ordinary boundary-conforming triangulation, which
-    bridges it cleanly from the landmarks/boundary vertices already on
-    either side. Either way, `max_edge` (via the filler lattice) and the landmarks' own local
-    spacing are what keep interior angles away from zero: an abrupt jump
-    from a tight cluster of landmarks straight to a coarse neighboring
-    region would force sliver triangles, so gmsh grades a few extra
-    vertices in between as needed.
+    survives mesh generation and smoothing exactly. Between landmarks,
+    gmsh fills in the rest from their own local spacing
+    (`Mesh.MeshSizeFromPoints`), which lets element size track landmark
+    density rather than being held to a single `max_edge` everywhere.
 
-    Because that grading adds a few vertices beyond the landmarks
-    themselves, asking k-means for exactly ``round(lowrank * len(points))``
-    landmarks can still overshoot the vertex-count target slightly. So,
-    mirroring `buildMesh2d`'s bisection over a size-field scale, this
-    function bisects over the *number of landmarks requested* instead,
-    regenerating the mesh each time, until the total vertex count inside
-    the interest domain (landmarks plus grading) is within `tol` of the
-    target -- see `buildMesh2d`'s `lowrank` for what "interest domain"
-    means here.
+    That said, `max_edge` is still enforced as a hard *coverage* bound,
+    not just a size cap where landmarks are dense: any location more than
+    `max_edge` from every landmark -- the outer offset buffer (which has
+    no landmarks at all), a bay or strait inside the convex hull but
+    outside a concave or multi-part `domain` (e.g. a country plus its
+    islands), or, just as much, a genuinely sparse or `snap_to_points`-
+    relaxation-drifted pocket *inside* the interest domain -- gets an
+    extra lattice ("filler") vertex there too, embedded exactly like a
+    landmark. This matters because an unbounded gap doesn't just mean a
+    coarse patch of mesh: it means an unbounded-variance patch of the
+    SPDE/FEM latent field, which a data-density-matched mesh alone cannot
+    prevent if `points` happens to be sparse near, say, the domain's edge
+    -- a common real-world pattern. (A runtime "outside the interest
+    domain -> cap at max_edge" size field, and later a version that only
+    filled outside the interest domain, were both tried before this
+    lattice; the field's discontinuity made gmsh's mesher visibly
+    struggle on a finely-detailed real coastline, and restricting filler
+    to outside the interest domain left real gaps wherever `points` was
+    itself sparse.) The lattice is pulled back about half a cell from the
+    outer boundary, rather than filling all the way up to it: a raw grid
+    clipped flush against a slanted or jagged edge produces its own near-
+    zero-angle slivers, so that margin is instead left to gmsh's ordinary
+    boundary-conforming triangulation, which bridges it cleanly from the
+    boundary vertices already there. Either way, `max_edge` (via the
+    filler lattice) and the landmarks' own local spacing are what keep
+    interior angles away from zero: an abrupt jump from a tight cluster
+    of landmarks straight to a coarse neighboring region would force
+    sliver triangles, so gmsh grades a few extra vertices in between as
+    needed.
+
+    Because that grading -- now including the coverage-driven filler --
+    adds vertices beyond the landmarks themselves, asking k-means for
+    exactly ``round(lowrank * len(points))`` landmarks can overshoot the
+    vertex-count target, sometimes substantially if `lowrank` is small
+    relative to how large the interest domain is compared to `max_edge`
+    (the filler coverage floor doesn't shrink just because `lowrank`
+    asked for fewer landmarks). So, mirroring `buildMesh2d`'s bisection
+    over a size-field scale, this function bisects over the *number of
+    landmarks requested* instead, regenerating the mesh each time, until
+    the total vertex count inside the interest domain (landmarks plus
+    grading) is within `tol` of the target -- see `buildMesh2d`'s
+    `lowrank` for what "interest domain" means here. When that floor
+    exceeds the target no amount of bisecting can close the gap, and a
+    warning says so; a coarser `max_edge` is the way to actually lower
+    the floor, not a smaller `lowrank`.
 
     Landmarks closer together than `cutoff` are merged, which trades off
     against `min_angle`: forcing two near-duplicate data points to both
@@ -439,11 +454,15 @@ def buildMesh2d_density(
         The scientific-interest domain; see `buildMesh2d`. Defaults to the
         convex hull of `points`.
     max_edge : float, optional
-        Largest allowed triangle edge length, enforced by the filler
-        lattice outside the interest domain and as an upper bound on each
-        landmark's own local-spacing size; not otherwise enforced inside
-        the interest domain, so it does not fight `lowrank` -- see above.
-        Defaults to 1/15 of the domain's bounding-box diagonal.
+        Largest allowed triangle edge length: a coverage bound enforced by
+        the filler lattice anywhere a location is more than `max_edge`
+        from every landmark, inside the interest domain as much as
+        outside it, and an upper bound on each landmark's own local-
+        spacing size -- see above. This can conflict with a small
+        `lowrank` on a large interest domain, since it sets a vertex-count
+        floor `lowrank` cannot go below; a warning says so rather than
+        silently leaving the mesh under-covered. Defaults to 1/15 of the
+        domain's bounding-box diagonal.
     min_edge : float, optional
         Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
     offset : float, optional
@@ -549,14 +568,21 @@ def buildMesh2d_density(
     if seed is None:
         seed = int(np.random.default_rng().integers(0, 2**31 - 1))
 
-    # Candidate "filler" vertices for the gap between the interest domain
-    # and the full meshed extent -- everywhere in `convex_hull` that isn't
-    # in `interest_domain`: the outer offset buffer, but also, for a
-    # concave or multi-part `domain` (e.g. a country plus its islands), any
-    # bay or strait that falls inside the convex hull but outside the true
-    # shape. A lattice at `max_edge` spacing, later embedded exactly like
-    # landmarks so that region's resolution is *guaranteed* by an explicit
-    # vertex, not left to chance. (A first version instead relied on a
+    # Candidate "filler" vertices for any gap larger than `max_edge` left
+    # by the landmarks -- a lattice at `max_edge` spacing, later embedded
+    # exactly like landmarks so that no region of the mesh is under-
+    # resolved purely because it happens to be far from any landmark, not
+    # just the outer offset buffer (which never has landmarks at all) but
+    # also, *inside* the interest domain, wherever `points` are locally
+    # sparse (a real edge/border effect in most observational networks) or
+    # `snap_to_points=False` relaxation has drifted landmarks away from a
+    # region. Filling gaps that don't reach `max_edge` back in has real
+    # cost -- an unbounded element there means an unbounded-variance patch
+    # of the SPDE/FEM latent field -- so it applies everywhere, not only
+    # outside `interest_domain`; which points actually qualify as "a gap"
+    # is decided per landmark set below, in `_generate` (distance to the
+    # nearest landmark), since it depends on where the landmarks for a
+    # given search trial ended up. (A first version instead relied on a
     # runtime "outside interest_domain -> cap at max_edge" size callback;
     # for a finely-detailed real coastline that discontinuous field made
     # gmsh's mesher visibly struggle -- silently near-empty triangles
@@ -564,16 +590,14 @@ def buildMesh2d_density(
     # which uses gmsh's native per-point sizing instead of a callback.)
     #
     # A raw square lattice clipped straight against a slanted or jagged
-    # polygon edge produces exactly the near-zero-angle slivers this is
-    # meant to avoid: a lattice point can land just barely inside the
-    # boundary, forcing a triangle that connects it to a much farther
-    # neighbor across the cut cell. So candidates are pulled back by
-    # roughly half a lattice cell from *both* boundaries -- `convex_hull`'s
-    # own outer edge, and `interest_domain`'s edge (widened outward, since
-    # filler sits outside it) -- leaving those margins for gmsh's ordinary
-    # boundary-conforming triangulation (well-behaved for this) to bridge
-    # using the landmarks/boundary-ring vertices already on either side,
-    # instead of a misaligned lattice point.
+    # polygon edge produces near-zero-angle slivers: a lattice point can
+    # land just barely inside the boundary, forcing a triangle that
+    # connects it to a much farther neighbor across the cut cell. So
+    # candidates are pulled back by roughly half a lattice cell from
+    # `convex_hull`'s own outer edge, leaving that margin for gmsh's
+    # ordinary boundary-conforming triangulation (well-behaved for this)
+    # to bridge using the boundary-ring vertices already there, instead of
+    # a misaligned lattice point.
     minx, miny, maxx, maxy = convex_hull.bounds
     nx = max(2, int(np.ceil((maxx - minx) / max_edge)) + 1)
     ny = max(2, int(np.ceil((maxy - miny) / max_edge)) + 1)
@@ -582,12 +606,8 @@ def buildMesh2d_density(
     convex_hull_core = convex_hull.buffer(-max_edge * 0.5)
     if convex_hull_core.is_empty:
         convex_hull_core = convex_hull
-    interest_expanded = interest_domain.buffer(max_edge * 0.5)
     inside_domain_core = shapely.contains_xy(convex_hull_core, grid[:, 0], grid[:, 1])
-    outside_interest_expanded = ~shapely.contains_xy(
-        interest_expanded, grid[:, 0], grid[:, 1]
-    )
-    filler_candidates = grid[inside_domain_core & outside_interest_expanded]
+    filler_candidates = grid[inside_domain_core]
 
     def _place_landmarks(n_landmarks):
         n_landmarks = max(1, min(n_landmarks, len(points)))
@@ -647,9 +667,10 @@ def buildMesh2d_density(
         # Each landmark's own mesh size is its distance to its nearest
         # other landmark (clipped to [min_edge, max_edge]), not a flat
         # `max_edge`: with `Mesh.MeshSizeFromPoints` this lets gmsh grade
-        # element size from each point's *own* local spacing, so a sparse
-        # region isn't padded with extra fill just because `max_edge` is
-        # tuned for a denser region elsewhere.
+        # element size from each point's *own* local spacing, so a densely
+        # landmarked region isn't held back by `max_edge`. Coverage where
+        # landmarks are instead too sparse (further than `max_edge` from
+        # each other) is handled separately, by filler below.
         ltree = cKDTree(landmarks)
         if len(landmarks) > 1:
             nn_dist, _ = ltree.query(landmarks, k=2)
@@ -657,11 +678,15 @@ def buildMesh2d_density(
         else:
             landmark_lc = np.full(len(landmarks), max_edge)
 
-        # keep only filler candidates that don't crowd a landmark (mirrors
-        # the landmark-landmark `cutoff` filter just above)
-        if cutoff > 0 and len(filler_candidates) > 0:
+        # keep filler candidates that fall in a genuine coverage gap:
+        # farther than max_edge from the nearest landmark. This is what
+        # bounds element size *everywhere*, not just outside the interest
+        # domain -- see above -- and (since max_edge > cutoff by
+        # construction) it also never crowds an existing landmark closer
+        # than `cutoff`.
+        if len(filler_candidates) > 0:
             d, _ = ltree.query(filler_candidates)
-            filler = filler_candidates[d >= cutoff]
+            filler = filler_candidates[d >= max_edge]
         else:
             filler = filler_candidates
 
@@ -775,13 +800,27 @@ def buildMesh2d_density(
             "moved to fix this; consider a larger `cutoff`, a smaller "
             "`lowrank`, or `snap_to_points=False`."
         )
-    if best_diff > max(1, tol * target_n):
+    if best_diff > max(1, tol * target_n) and n_inside > target_n:
         warnings.warn(
             f"buildMesh2d_density: reached {n_inside} vertices inside the "
-            f"interest domain, outside the requested tolerance of target "
-            f"{target_n} (tol={tol}). Consider a larger `max_iter`, or a "
-            "coarser `max_edge` relative to the typical spacing between "
-            "points."
+            f"interest domain, above the requested tolerance of target "
+            f"{target_n} (tol={tol}). `max_edge` bounds element size "
+            "everywhere in the interest domain, not just the outer buffer "
+            "-- an unbounded gap there would mean unbounded-variance "
+            "patches of the SPDE/FEM latent field -- so it sets a coverage "
+            "floor on vertex count that `lowrank` cannot go below; for a "
+            "small `lowrank` relative to how large the interest domain is "
+            "compared to `max_edge`, that floor can exceed the target. Use "
+            "a coarser `max_edge` if you need fewer vertices, or accept "
+            "the extra coverage."
+        )
+    elif best_diff > max(1, tol * target_n):
+        warnings.warn(
+            f"buildMesh2d_density: reached {n_inside} vertices inside the "
+            f"interest domain, below the requested tolerance of target "
+            f"{target_n} (tol={tol}). Consider a larger `max_iter`, or, if "
+            "`cutoff` was given explicitly, a smaller one (it may be "
+            "merging more landmarks than expected)."
         )
 
     return mesh, convex_hull
