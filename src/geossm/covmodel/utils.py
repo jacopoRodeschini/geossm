@@ -450,19 +450,23 @@ def buildMesh2d_density(
         Buffer added around `domain` so the mesh extends past the data.
         Defaults to `max_edge`.
     cutoff : float, optional
-        Minimum allowed separation between points, and independently
-        between landmarks, and independently between a landmark and any
-        filler vertex (see above). Left at its default, this is derived
-        from `target_n` and the interest domain's area instead of
-        `max_edge` (unlike `buildMesh2d`): a large `max_edge`, appropriate
-        for a sparse, data-free outer buffer, has nothing to do with how
-        tightly `target_n` landmarks need to pack, and a `max_edge/5`
-        default would otherwise silently cap the achievable landmark count
-        well below `target_n`. That default is also shrunk automatically
-        (up to a few times) if it still leaves too few landmarks to reach
+        Minimum allowed separation between landmarks, and independently
+        between a landmark and any filler vertex (see above) -- a mesh-
+        quality knob, unlike `buildMesh2d`'s `cutoff`: it never merges or
+        discards any of `points` itself (only exact duplicates are merged,
+        always, regardless of this setting), so it can never make
+        `lowrank` (e.g. `lowrank=1`, "use every point") see fewer points
+        than you passed in. Left at its default, this is derived from
+        `target_n` and the interest domain's area instead of `max_edge`
+        (unlike `buildMesh2d`): a large `max_edge`, appropriate for a
+        sparse, data-free outer buffer, has nothing to do with how tightly
+        `target_n` landmarks need to pack, and a `max_edge/5` default
+        would otherwise silently cap the achievable landmark count well
+        below `target_n`. That default is also shrunk automatically (up to
+        a few times) if it still leaves too few landmarks to reach
         `target_n`. Passing `cutoff` explicitly disables both and is
-        honored exactly, even if that undershoots `target_n` (reported via
-        a warning).
+        honored exactly for landmark/filler spacing, even if that
+        undershoots `target_n` (reported via a warning).
     min_angle : float, default 21.0
         Target minimum interior angle (degrees). This is a soft target
         graded around the fixed landmarks; it is not enforced on the
@@ -508,23 +512,20 @@ def buildMesh2d_density(
         its default) widened to its convex hull and extended by `offset`.
     """
     cutoff_is_default = cutoff is None
-    # `cutoff` doubles as the *landmark* minimum spacing here -- a far more
-    # binding constraint than in buildMesh2d, where it only merges near-
-    # duplicate input points to protect a KNN density estimate this
-    # function doesn't use. _prepare_domain's own max_edge/5 default is
-    # tuned for buildMesh2d's smooth size field (anchored to max_edge
-    # throughout); in this function max_edge only describes the outer/gap
-    # resolution (see above), unrelated to real point spacing -- applying
-    # that default to _prepare_domain's *point*-level dedup can silently
-    # discard a large fraction of real, distinct observations before
-    # landmark selection ever sees them. So when `cutoff` is left at its
-    # default, only literal duplicate points are merged at this stage
-    # (dedup_cutoff=0); the actual landmark-spacing default is computed
-    # below instead, once target_n is known. An explicit user `cutoff` is
-    # instead applied at both stages, exactly as in buildMesh2d.
-    dedup_cutoff = 0.0 if cutoff_is_default else cutoff
+    # `cutoff` is the *landmark* (and landmark-to-filler) minimum spacing
+    # here -- a mesh-quality concern -- and is kept fully separate from
+    # _prepare_domain's *point*-level dedup, unlike in buildMesh2d (where
+    # that dedup protects a KNN density estimate this function doesn't
+    # use). Only literal duplicate points are merged at this stage
+    # (dedup_cutoff=0), *regardless* of whether `cutoff` was given
+    # explicitly: an explicit `cutoff` is a deliberate choice about how
+    # close two *mesh vertices* may be, not an instruction to silently
+    # discard real observations before `lowrank` (e.g. `lowrank=1`, "use
+    # every point") ever sees them -- letting it drive point-level dedup
+    # too previously did exactly that. The landmark-spacing default is
+    # computed below instead, once target_n is known.
     points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, _ = (
-        _prepare_domain(points, domain, max_edge, min_edge, offset, dedup_cutoff)
+        _prepare_domain(points, domain, max_edge, min_edge, offset, 0.0)
     )
 
     if not (0 < lowrank <= 1):
@@ -541,8 +542,7 @@ def buildMesh2d_density(
         # undershoots the achievable landmark count).
         even_spacing = np.sqrt(interest_domain.area / target_n)
         cutoff = 0.3 * even_spacing
-    else:
-        cutoff = dedup_cutoff
+    # else: an explicit `cutoff` is left exactly as given.
 
     # fixed for the duration of this call, so repeated k-means calls below
     # are directly comparable (see `seed` docs above)
