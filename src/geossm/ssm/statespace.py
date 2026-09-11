@@ -1697,9 +1697,13 @@ class StateSpaceModel:
                 ),
                 ("Dep. Variable:", lambda: [self.y_name if hasattr(self, "y_name") and self.y_name is not None else "N/A"]),
                 ("Date:", lambda: [self._today]),
-                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
-                ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
-                ("JAX devices:", lambda: [f"{jax.devices()}"]),
+                (
+                    "Backend (JAX):",
+                    lambda: [
+                        f"{self.backend} (dtype {self.dtype}); "
+                        f"{jax.default_backend()}, devices: {jax.devices()}"
+                    ],
+                ),
             ]
         )
 
@@ -1708,32 +1712,32 @@ class StateSpaceModel:
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 (
                     "Diag. R",
-                    lambda: [f"{jnp.mean(self.R):2f}"
+                    lambda: [f"{jnp.mean(self.R):.2f}"
                         if self.R is not None
                         else "None"]
                 ),
                 (
                     "Diag. Q",
-                    lambda: [f"{jnp.mean(jnp.diag(self.Q)):2f}"
+                    lambda: [f"{jnp.mean(jnp.diag(self.Q)):.2f}"
                         if self.Q is not None
                         else "None"],
                 ),
                 (
                     "Diag. F",
                     lambda: [
-                        f"{jnp.mean(self.F):2f}"
+                        f"{jnp.mean(self.F):.2f}"
                         if self.F is not None
                         else "None"],
                 ),
                 (
                     "mean x0",
                     lambda: [
-                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else "None"],
+                        f"{jnp.mean(self.x0):.2f}" if self.x0 is not None else "None"],
                ),
                 (
                     "mean Sigma0",
                     lambda: [
-                        f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
+                        f"{jnp.mean(jnp.diag(self.Sigma0)):.2f}"
                         if self.Sigma0 is not None
                         else "None"
                     ],

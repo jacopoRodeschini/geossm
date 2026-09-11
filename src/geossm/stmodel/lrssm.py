@@ -124,7 +124,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 @partial(jit, static_argnames=["b"])
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
-    # 1. Define thLRStateSpaceResults and the parent class StateSpaceResults and the parent class e function for a single loop iteration (the "scan body")
+    # 1. Define the function for a single loop iteration (the "scan body")
     # This function is defined inside so it can close over the non-iterating
     # variable `H`.
     def iteration(carry, x):
@@ -1902,73 +1902,28 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             [
                 ("Model name:", lambda: [self.__class__.__name__]),
                 (
-                    "Model type:",
-                    lambda: [self.type if hasattr(self, "type") else "N/A"],
-                ),
-                (
-                    "Model order:",
-                    lambda: [self.order if hasattr(self, "order") else "N/A"],
+                    "Model type (order):",
+                    lambda: [f"{self.type if hasattr(self, 'type') else 'N/A'}, {self.order if hasattr(self, 'order') else 'N/A'}"],
                 ),
                 (
                     "Dep. Variables:",
                     lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
                 ),
-                ("Date:", lambda: [self._today]),
-                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
-                ("JAX default:", lambda: [f"{jax.default_backend()}"]),
-                #("JAX devices:", lambda: [f"{jax.devices()}"]),
+                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ]
         )
 
         top_right = dict(
             [
-                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-                (
-                    "Diag. R",
-                    lambda: (
-                        f"{jnp.mean(self.R):2f}"
-                        if self.R is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "Diag. Q",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.Q)):2f}"
-                        if self.Q is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "Diag. F",
-                    lambda: (
-                        f"{jnp.mean(self.F):2f}"
-                        if self.F is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "mean x0",
-                    lambda: (
-                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else ["N/A"]
-                    ),
-                ),
-                (
-                    "mean Sigma0",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
-                        if self.Sigma0 is not None
-                        else ["N/A"]
-                    ),
-                ),
+                ("Date:", lambda: [self._today]),
                 (
                     "Rank",
                     lambda: (
-                        [f"{q/p :4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
-                        if q != "N/A" and p != "N/A"
-                        else ["N/A"]
+                        [f"{q / p:.4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
                     ),
                 ),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
+                ("JAX default:", lambda: [f"{jax.default_backend()}"]),
             ]
         )
 
@@ -1979,7 +1934,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         len_empty = len(gen_top_left)- len(gen_top_right) 
         if len_empty > 0:
@@ -2050,16 +2005,15 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
     def summary(self, print_full=True) -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
-        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
 
         # Generate the summary tables
         gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
-        
+
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(
             self,
-            title="State Space Model",
+            title="LR State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,
             yname= self.yname if self.yname is not None else "None",

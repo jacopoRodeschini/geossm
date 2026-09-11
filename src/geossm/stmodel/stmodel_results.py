@@ -742,30 +742,28 @@ class LRStateSpaceResults(StateSpaceResults):
         time_e = self.runtime_tot_estep
         time_m = self.runtime_tot_mstep
 
-        # Generate the parent summary table (with model info)
+        # Generate the parent summary table (with model info). The base
+        # class always returns left/right of equal length, so no padding
+        # is needed here to keep the two columns aligned.
         gen_top_left, gen_top_right = super().generate_summary()
-        len_empty = len(gen_top_left)- len(gen_top_right)
-        if len_empty > 0:
-            gen_top_right = gen_top_right + [("", [""])] * len_empty
-        elif len_empty < 0:
-            gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
-        
 
-        # Add the EM iteration statistics table
-        top_left_em = dict(
+        # Add the EM iteration statistics table. Left mirrors the parent's
+        # "execution" rows (log-likelihood, runtime); right mirrors its
+        # "fit quality" rows (MSE, RMSE, ...).
+        runtime_label, runtime_value = self._format_runtime_summary(
+            [("E step", time_e), ("M step", time_m)]
+        )
+        top_left_em = {
+            "EM iters :": lambda: [f"{self.iterations}"],
+            runtime_label: lambda v=runtime_value: [v],
+        }
+
+        top_right_em = dict(
             [
                 ("AIC:", lambda: [f"{self.aic:.4g}"]),
                 ("BIC:", lambda: [f"{self.bic:.4g}"]),
             ]
         )
-
-        runtime_label, runtime_value = self._format_runtime_summary(
-            [("E step", time_e), ("M step", time_m)]
-        )
-        top_right_em = {
-            runtime_label: lambda v=runtime_value: [v],
-            "EM iters :": lambda: [f"{self.iterations}"],
-        }
 
         # Generate the dictionaly
         gen_top_left_em = []
@@ -787,8 +785,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
             top_left_pred = dict(
                 [
-                    ("Pred. points:", lambda: [f"{pstats['n_points']}"]),
-                    ("Pred. values (# missing):", lambda: [f"{pstats['n_pred']} ({pstats['n_missing']})"]),
+                    ("Pred. points (values):", lambda: [f"{pstats['n_points']} ({pstats['n_pred']}, missing {pstats['n_missing']})"]),
                     ("Pred. y (min, med, max):", lambda: [f"{pstats['y_min']:.3g}, {pstats['y_median']:.3g}, {pstats['y_max']:.3g}"]),
                 ]
             )
@@ -805,16 +802,10 @@ class LRStateSpaceResults(StateSpaceResults):
             gen_top_right += gen_top_right_pred
 
         return gen_top_left, gen_top_right
-    def summary(self, alpha=0.05):
 
-        # self.results = np.array([0])
-        # self.params = self.beta
-        # self.param_names = self.xbeta_names
-        # self.bse = np.zeros(len(self.beta))
-        # self.tvalues = np.zeros(len(self.beta))
-        # self.pvalues = np.zeros(len(self.beta))
-        name_width=15
-        
+    def summary(self, alpha=0.05):
+        name_width = 15
+
         if self._hessian is not None or self._cov_params is not None:
             bse_struct = self.bse  # structured ModelParams with bse fields
         else:

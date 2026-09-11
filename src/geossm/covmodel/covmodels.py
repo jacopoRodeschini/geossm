@@ -807,15 +807,10 @@ class FEMSolver:
         top_left = dict(
                     [
                         ("Solver. type:", lambda: [self.__class__.__name__]),
-                        #("Scale (kappa):", lambda: f"{self.rescale:.2f}"),
-                        #("Range (theta):", lambda: f"{np.sqrt(8)/self.range:.2f}"),
-                        #("Variance (s2):", lambda: f"{self.var:.2f}"),
-                        #("Nu:", lambda: f"{self.nu:.2f}"),
-                        ("Mesh vertex",lambda: [f"{self.nvertex}"]),
+                        ("Mesh vertex:",lambda: [f"{self.nvertex}"]),
                         ("Mesh triangles:", lambda: [f"{self.nelements}"]),
-                        ("Mesh lines:", lambda: [f"{self.nbElements}"]), 
-                        ("Mesh inner vertex (rank):", lambda: [f"{self.n_inner_points}"]),
-                        ("Mesh outer vertex:", lambda: [f"{self.n_outer_points}"]),   
+                        ("Mesh lines:", lambda: [f"{self.nbElements}"]),
+                        ("Mesh vertex (inner, outer):", lambda: [f"{self.n_inner_points}, {self.n_outer_points}"]),
                     ]
                 )
         if self.angles is None or self.areas is None:
@@ -824,15 +819,15 @@ class FEMSolver:
         else:
             top_left["Mesh angle [min, mean, max]:"] = lambda: [f"[{self.angles.min():.2f}, {self.angles.mean():.2f}, {self.angles.max():.2f}]"]
             top_left["Mesh area [min, mean, max]:"] = lambda: [f"[{self.areas.min():.2f}, {self.areas.mean():.2f}, {self.areas.max():.2f}]"]
-            
 
 
+        # "Mesh shape" is deliberately not repeated here -- it is just
+        # (nvertex, nelements, nbElements), already shown above.
         top_right = dict(
                     [
                         ("Box:", lambda: [f"{self.box}"]),
                         ("FE space order:", lambda: [f"{self.fespace_order}"]),
                         ("Mesh DOFs:", lambda: [f"{self.ndofs}"]),
-                        ("Mesh shape:", lambda: [f"{self.shape}"]),
                         ("Mass matrix shape:", lambda: [f"{self.mass.shape}"]),
                         ("Stiff matrix shape:", lambda: [f"{self.stiff.shape}"]),
                         ("Inner indx. (shape)", lambda: [f"{self.inner.shape}"]),
@@ -847,7 +842,7 @@ class FEMSolver:
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         return gen_top_left, gen_top_right
 
@@ -1345,9 +1340,9 @@ class spdeAppoxCov(Matern):
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
-        
+
         if hasattr(self,"fem_solver"):
             gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary()
        

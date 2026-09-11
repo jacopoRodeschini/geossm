@@ -470,7 +470,7 @@ class DesignMatrices:
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         return gen_top_left, gen_top_right
 
