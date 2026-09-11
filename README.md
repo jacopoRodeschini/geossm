@@ -206,7 +206,7 @@ import gmsh
 import geopandas as geodf
 import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.covmodel import FEMSolver
+from geossm.covmodel import FEMSolver, spdeAppoxCov
 
 
 # %% Load the agrimonia dataset
@@ -293,9 +293,12 @@ fem_solver.plot_mesh(ax=ax)
 
 # %% Set up the lrssm model (univiarte latent)
 
-# add the mesh object and the domain where the laten domain is defined
-# if None it is assumed to be the same of the observation  
-model = model.setup([mesh_io])
+# Build the covariance function on the mesh (domain=None defaults to the
+# convex hull of the mesh's own vertices, i.e. every vertex is inner)
+cov_fun = spdeAppoxCov(latlon=True)
+cov_fun = cov_fun.setup(mesh_io, domain=[Polygon(buffer)])
+
+model = model.setup(cov_fun=[cov_fun])
 
 # %% Estimate the Model (default estimation options)
 results = model.fit()
