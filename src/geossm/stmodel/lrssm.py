@@ -336,6 +336,41 @@ def _compute_A2_jax_kernel(
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
+def _continuous_dividers(text, labels):
+    """Redraw section-divider rows (e.g. "Grid ...", "Latent. ...") as a
+    single unbroken dashed line spanning the full row width.
+
+    `add_table_2cols` renders a divider row as up to four separate cells
+    (left name/value, right name/value), each padded/truncated to that
+    column's own width, so a fixed-length "-" * N run lines up with the
+    surrounding columns only by coincidence and otherwise leaves visible
+    gaps. This instead finds each already-rendered divider line (one whose
+    only content after a known `label` is dashes/whitespace) and replaces
+    it wholesale with `label` followed by dashes filling the rest of the
+    line, using the real width of the rendered table.
+    """
+    lines = text.split("\n")
+    width = max((len(line) for line in lines), default=0)
+
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        label = next(
+            (
+                lb for lb in labels
+                if stripped.startswith(lb)
+                and stripped[len(lb):].strip("- \t") == ""
+            ),
+            None,
+        )
+        if label is None:
+            out.append(line)
+        else:
+            out.append(f"{label} {'-' * max(width - len(label) - 1, 3)}")
+
+    return "\n".join(out)
+
+
 class LRStateSpaceModel(StateSpaceModel):
 
     def __init__(self, df, formulas:list, domain:list,
@@ -1951,22 +1986,29 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
                 gen_top_left_grid = []
                 gen_top_right_grid = []
-                for i, grid in enumerate(self.gridList):
+                for grid in self.gridList:
 
                     left, righ = grid.generate_summary()
-                    
+
                     # check the length of the left and right tables and add empty rows if they are different
                     len_empty = len(left) - len(righ)
                     if len_empty > 0:
                         righ = righ + [("", [""])] * len_empty
                     elif len_empty < 0:
                         left = left + [("", [""])] * (-len_empty)
-                    
-                    left = [(f"Grid {i}", ["-" * 28])] + left
-                    righ = [(f"Grid {i}", ["-" * 28])] + righ
-                    
 
-                    
+                    # Section divider: the label goes once on the left; the
+                    # right side just carries a dash placeholder so it isn't
+                    # repeated. `summary()` redraws this whole row as one
+                    # continuous dashed line via `_continuous_dividers`.
+                    yname = (
+                        grid.y_design_info.column_names[0]
+                        if getattr(grid, "y_design_info", None) is not None
+                        else grid.y_name
+                    )
+                    left = [(f"Grid {yname}", ["-"])] + left
+                    righ = [("-", ["-"])] + righ
+
                     gen_top_left_grid = gen_top_left_grid + left
                     gen_top_right_grid = gen_top_right_grid + righ
 
@@ -1989,11 +2031,12 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     elif len_empty < 0:
                         left = left + [("", [""])] * (-len_empty)
 
-                    
-                    left = [(f"Latent. {i}", ["-" * 28])] + left
-                    righ = [(f"Latent {i}", ["-" * 28])] + righ
+                    # See the Grid divider above: label once on the left,
+                    # dash placeholder on the right, redrawn as one
+                    # continuous line by `_continuous_dividers` in summary().
+                    left = [(f"Latent. {i}", ["-"])] + left
+                    righ = [("-", ["-"])] + righ
 
-                    
                     gen_top_left_cov = gen_top_left_cov + left
                     gen_top_right_cov = gen_top_right_cov + righ
 
@@ -2019,6 +2062,16 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             yname= self.yname if self.yname is not None else "None",
             xname= self.xbeta_names if self.xbeta_names is not None else "None",
         )
+
+        # Redraw the "Grid .../Latent. ..." divider rows as one continuous
+        # dashed line (see `_continuous_dividers`). Divider rows are
+        # identified by their left-hand label, i.e. every row whose value
+        # is the placeholder ["-"] set above.
+        divider_labels = [stub for stub, val in gen_top_left if val == ["-"]]
+        if divider_labels:
+            smry.as_text = lambda _orig=smry.as_text, labels=divider_labels: (
+                _continuous_dividers(_orig(), labels)
+            )
 
         return smry
 
