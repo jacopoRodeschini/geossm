@@ -825,6 +825,7 @@ class LRStateSpaceResults(StateSpaceResults):
             yname=None,
             xname=None,
         )
+        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
 
         # Parameter names for every table below, padded to a common width so
         # the name column lines up across the (independently-sized) tables

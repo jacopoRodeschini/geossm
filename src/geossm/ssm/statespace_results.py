@@ -434,17 +434,21 @@ class StateSpaceResults:
             ]
         )
 
-        # Right: fit quality and residual diagnostics.
+        # Right: fit quality and residual diagnostics. Bracketed "(x*)"
+        # values are the reference value expected for normal, uncorrelated
+        # residuals -- not achievable/meaningful targets for MSE/RMSE, so
+        # those are left unannotated.
+        alpha_cov = 0.05
         top_right = dict(
             [
                 ("MSE:", lambda: [f"{self.mse():.2f}"]),
                 ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
-                ("Coverage Prob.:", lambda: [f"{self._coverage_probability():.2f}, (alpha = 0.05)"]),
-                ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})"]),
-                ("Omnibus test:", lambda: [f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})"]),
-                ("Skewness:", lambda: [f"{stats['skew']:.2f}"]),
-                ("Kurtosis:", lambda: [f"{stats['kurtosis']:.2f}"]),
-                ("Durbin-Watson:", lambda: [f"{stats['dw']:.2f}"]),
+                ("Coverage Prob.:", lambda a=alpha_cov: [f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"]),
+                ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (0*) (pvalue: {stats['jb_pvalue']:.2f})"]),
+                ("Omnibus test:", lambda: [f"{stats['omni']:.2f} (0*) (pvalue: {stats['omni_pvalue']:.2f})"]),
+                ("Skewness:", lambda: [f"{stats['skew']:.2f} (0*)"]),
+                ("Kurtosis (excess):", lambda: [f"{stats['kurtosis']:.2f} (0*)"]),
+                ("Durbin-Watson:", lambda: [f"{stats['dw']:.2f} (2*)"]),
             ]
         )
 
@@ -460,15 +464,22 @@ class StateSpaceResults:
 
         return gen_top_left, gen_top_right
 
+    #: Footnote explaining the "(x*)" reference values shown next to the
+    #: residual diagnostics in `generate_summary()`.
+    _DIAGNOSTICS_NOTE = (
+        "(x*) reference value expected for normal, uncorrelated residuals "
+        "(or, for Coverage Prob., the nominal 1 - alpha)."
+    )
+
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
         # Ensure numpy arrays for summary stats
 
         self.results = np.array([0])
-        
+
         gen_top_left, gen_top_right = self.generate_summary()
 
-        
+
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
@@ -479,6 +490,7 @@ class StateSpaceResults:
             yname=None,
             xname=None,
         )
+        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
 
         return smry
 
