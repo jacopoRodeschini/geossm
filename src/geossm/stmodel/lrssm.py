@@ -124,7 +124,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 @partial(jit, static_argnames=["b"])
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
-    # 1. Define thLRStateSpaceResults and the parent class StateSpaceResults and the parent class e function for a single loop iteration (the "scan body")
+    # 1. Define the function for a single loop iteration (the "scan body")
     # This function is defined inside so it can close over the non-iterating
     # variable `H`.
     def iteration(carry, x):
@@ -336,6 +336,41 @@ def _compute_A2_jax_kernel(
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
+def _continuous_dividers(text, labels):
+    """Redraw section-divider rows (e.g. "Grid ...", "Latent. ...") as a
+    single unbroken dashed line spanning the full row width.
+
+    `add_table_2cols` renders a divider row as up to four separate cells
+    (left name/value, right name/value), each padded/truncated to that
+    column's own width, so a fixed-length "-" * N run lines up with the
+    surrounding columns only by coincidence and otherwise leaves visible
+    gaps. This instead finds each already-rendered divider line (one whose
+    only content after a known `label` is dashes/whitespace) and replaces
+    it wholesale with `label` followed by dashes filling the rest of the
+    line, using the real width of the rendered table.
+    """
+    lines = text.split("\n")
+    width = max((len(line) for line in lines), default=0)
+
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        label = next(
+            (
+                lb for lb in labels
+                if stripped.startswith(lb)
+                and stripped[len(lb):].strip("- \t") == ""
+            ),
+            None,
+        )
+        if label is None:
+            out.append(line)
+        else:
+            out.append(f"{label} {'-' * max(width - len(label) - 1, 3)}")
+
+    return "\n".join(out)
+
+
 class LRStateSpaceModel(StateSpaceModel):
 
     def __init__(self, df, formulas:list, domain:list,
@@ -370,14 +405,28 @@ class LRStateSpaceModel(StateSpaceModel):
                 f"Number of formulas ({len(formulas)}) must match number of domains ({len(domain)})"
             )
 
+        # Validate an explicit domain up front (see `_checkDomain`), before
+        # any design-matrix construction below, so an invalid domain fails
+        # fast rather than after the (possibly expensive) observation grid
+        # has already been built and filtered against it. `self.domain`
+        # (with its convex-hull-of-points default) is still set the usual
+        # way further down, once `self.points` exists.
+        if domain is not None:
+            flag, msg = self._checkDomain(domain)
+            if flag:
+                raise ValueError(msg)
+
         if formulas is not None:
 
             # Compute the design matrices
             self._log("Building observation grid...")
 
-
+            # Each formula's own domain entry (if any) is forwarded to its
+            # DesignMatricesBuilder, which drops observed sites outside it
+            # (see `DesignMatricesBuilder._filter_domain`) before the design
+            # matrix is built.
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
-                self._buildObservationGrid(df, formulas, verbose=verbose)
+                self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
             )
 
             self._log("Building observation grid... Done.")
@@ -413,85 +462,37 @@ class LRStateSpaceModel(StateSpaceModel):
         # y_train will be used later for estimation and for the results
         super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
 
-    def setup(self, mesh_obj: list = None, cov_fun: list = None, domain_latent: list = None):
+    def setup(self, cov_fun: list):
         """
         Build the model's latent covariance functions, one per latent
-        factor. Provide exactly one of `mesh_obj` or `cov_fun`.
+        factor, from already-built (and already `setup()`-ed) covariance
+        functions.
 
         Parameters
         ----------
-        mesh_obj : list of meshio.Mesh, optional
-            One mesh per latent factor. A fresh `spdeAppoxCov` is built for
-            each entry, using the matching entry of `domain_latent` (see
-            below) as its domain.
-        cov_fun : list of spdeAppoxCov, optional
+        cov_fun : list of spdeAppoxCov
             Already-built (and already `setup()`-ed) covariance functions,
-            one per latent factor, used as-is. `domain_latent` is not
-            needed in this case: each factor's latent domain is already
-            fixed as `covi.domain` (validated by `spdeAppoxCov` itself, via
-            `_validate_domain`, when it was constructed).
-        domain_latent : list of shapely Polygon/MultiPolygon, optional
-            Only used together with `mesh_obj`: one entry per latent
-            factor, matching `mesh_obj` index-for-index, passed to that
-            factor's `spdeAppoxCov` to classify its mesh's vertices as
-            inner/outer. If omitted, each `spdeAppoxCov` is built with no
-            explicit domain -- `FEMSolver`'s own default then applies:
-            the convex hull of that mesh's own vertices, i.e. every vertex
-            is treated as inner. Note this is a *different*, generally
-            smaller list than `self.domain` (the measurement-equation
-            domain, one entry per formula) -- it is not defaulted from
-            `self.domain`.
+            one per latent factor, used as-is. Each factor's latent domain
+            is already fixed as `covi.domain`, set when `covi` was itself
+            `setup()`-ed (validated by `spdeAppoxCov`, via
+            `_validate_domain`) -- generally a *different*, usually smaller
+            list than `self.domain` (the measurement-equation domain, one
+            entry per formula); it is not defaulted from `self.domain`.
         """
-        if mesh_obj is None and cov_fun is None:
-            raise ValueError("Either mesh_obj or cov_fun must be provided")
-        if mesh_obj is not None and cov_fun is not None:
-            raise ValueError("Provide only one of mesh_obj or cov_fun, not both")
+        if cov_fun is None:
+            raise ValueError("cov_fun must be provided")
 
         self._cov_matern = []
 
-        if mesh_obj is not None:
-            # spdeAppoxCov constructed fresh per mesh; domain_latent (or its
-            # per-mesh None default) is only meaningful here.
-            if domain_latent is not None:
-                self._log(f"Checking {len(domain_latent)} latent domain(s)...")
-                flag, msg = self._checkDomain(domain_latent)
-                if flag:
-                    raise ValueError(msg)
-                if len(mesh_obj) != len(domain_latent):
-                    raise ValueError(
-                        f"Number of mesh objects ({len(mesh_obj)}) must match number of latent domains ({len(domain_latent)})"
-                    )
-            else:
-                # No explicit latent domain: let each spdeAppoxCov/FEMSolver
-                # fall back to the convex hull of its own mesh's vertices.
-                domain_latent = [None] * len(mesh_obj)
+        self._log(f"Checking {len(cov_fun)} covariance functions...")
 
-            self._log(f"Checking {len(mesh_obj)} mesh objects...")
-
-            for i, (meshi, domi) in enumerate(zip(mesh_obj, domain_latent)):
-
-                line = len(meshi.cells_dict["line"])
-                vertex = len(meshi.cells_dict["vertex"])
-                triangle = len(meshi.cells_dict["triangle"])
-
-                self._log(f"Create the GMRF {i} object, with (line: {line},triangle: {triangle},vertex: {vertex})")
-                # create the covariance model of the matern
-                temp = spdeAppoxCov([domi] if domi is not None else None, latlon=False, nu=1.0, var=1.0, rescale=1.0)
-                self._cov_matern.append(temp.setup(meshi))
-
-        else:
-            # cov_fun: already-built spdeAppoxCov instances, one per latent
-            # factor. Each one's own `.domain` (post-setup) already is its
-            # latent domain -- domain_latent plays no role here.
-            self._log(f"Checking {len(cov_fun)} covariance functions...")
-
-            for i, covi in enumerate(cov_fun):
-                if not isinstance(covi, spdeAppoxCov):
-                    raise ValueError(
-                        "Covariance function must be an instance of spdeAppoxCov"
-                    )
-                self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
-                self._cov_matern.append(covi)
+        for i, covi in enumerate(cov_fun):
+            if not isinstance(covi, spdeAppoxCov):
+                raise ValueError(
+                    "Covariance function must be an instance of spdeAppoxCov"
+                )
+            self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
+            self._cov_matern.append(covi)
 
         # Latent dimension (rank), one block per latent factor -- needed by
         # sim()/fit() regardless of how _cov_matern was built.
@@ -1686,18 +1687,18 @@ class LRStateSpaceModel(StateSpaceModel):
     def _checkDomain(self, domain):
         """
         Validate `domain`: a list/tuple where each entry is a single
-        shapely Polygon or MultiPolygon. Used both for `self.domain` (one
-        entry per measurement equation) and, in `setup()`, for
-        `domain_latent` (one entry per latent factor/mesh) -- the length is
-        the caller's responsibility to match to the right count.
+        shapely Polygon or MultiPolygon, one per measurement equation
+        (`self.domain`) -- the length is the caller's responsibility to
+        match to the right count.
 
         Builds on `spdeAppoxCov`/`FEMSolver`'s own contract (see
         `geossm.covmodel.covmodels._validate_domain`), applied per-entry --
-        wrapping each entry the same way `setup()` will (`spdeAppoxCov([domi], ...)`)
-        -- rather than to the whole list at once: validating the whole list
+        wrapping each entry the same way a `spdeAppoxCov` would
+        (`spdeAppoxCov(...).setup(mesh, domain=[domi])`) -- rather than to
+        the whole list at once: validating the whole list
         in one call would flatten a MultiPolygon entry into several
         separate entries and break the 1:1 correspondence with the list
-        it's meant to match (`self.points` or `mesh_obj`/`cov_fun`).
+        it's meant to match (`self.points`).
 
         `domain=None` is treated as valid here -- `_setDomain` fills in a
         default in that case.
@@ -1726,11 +1727,12 @@ class LRStateSpaceModel(StateSpaceModel):
         The measurement-equation domain: a list with one shapely Polygon or
         MultiPolygon per *measurement equation* (`len(formulas)`) -- see
         `_setDomain`. Distinct from the *latent* domain (one entry per
-        latent factor, generally a different, usually smaller count, see
-        `setup(domain_latent=...)`); once `setup()` has run, each factor's
-        actual domain is available via `cov_function[i].domain`. See
-        `domain_hull` for a single Polygon summarising every measurement
-        equation's domain combined.
+        latent factor, generally a different, usually smaller count): each
+        factor's latent domain is fixed on its own `spdeAppoxCov` when that
+        object is `setup()`-ed, before it is passed to `setup(cov_fun=...)`,
+        and is available via `cov_function[i].domain`. See `domain_hull`
+        for a single Polygon summarising every measurement equation's
+        domain combined.
         """
         return self._domain
 
@@ -1750,18 +1752,25 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         Convex hull of the union of `domain`, i.e. of *all* measurement
         equations combined -- a single Polygon summarising the model's
-        overall geographic footprint, e.g. to pass as `boundary` to
+        overall geographic footprint, e.g. to pass as `domain` to
         `buildMesh2d`. See `_domain_hull`.
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None):
-
+    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None, domain=None):
+        """
+        `domain`, if given, is a list with one entry per formula (already
+        validated by the caller, see `_checkDomain`), forwarded to the
+        matching `DesignMatricesBuilder` so it drops observed sites outside
+        it -- see `DesignMatricesBuilder._filter_domain`.
+        """
         nvar = len(formulas)  # numer of the response variable
 
+        domain_per_formula = domain if domain is not None else [None] * nvar
+
         builders = [
-            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax)
-            for f in formulas
+            DesignMatricesBuilder(df, f, dtype=self.dtype, verbose=verbose, tmin=tmin, tmax=tmax, domain=d)
+            for f, d in zip(formulas, domain_per_formula)
         ]
         dfs = [b.build() for b in builders]
 
@@ -1928,73 +1937,28 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             [
                 ("Model name:", lambda: [self.__class__.__name__]),
                 (
-                    "Model type:",
-                    lambda: [self.type if hasattr(self, "type") else "N/A"],
-                ),
-                (
-                    "Model order:",
-                    lambda: [self.order if hasattr(self, "order") else "N/A"],
+                    "Model type (order):",
+                    lambda: [f"{self.type if hasattr(self, 'type') else 'N/A'}, {self.order if hasattr(self, 'order') else 'N/A'}"],
                 ),
                 (
                     "Dep. Variables:",
                     lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
                 ),
-                ("Date:", lambda: [self._today]),
-                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
-                ("JAX default:", lambda: [f"{jax.default_backend()}"]),
-                #("JAX devices:", lambda: [f"{jax.devices()}"]),
+                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ]
         )
 
         top_right = dict(
             [
-                ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-                (
-                    "Diag. R",
-                    lambda: (
-                        f"{jnp.mean(self.R):2f}"
-                        if self.R is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "Diag. Q",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.Q)):2f}"
-                        if self.Q is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "Diag. F",
-                    lambda: (
-                        f"{jnp.mean(self.F):2f}"
-                        if self.F is not None
-                        else ["N/A"]
-                    ),
-                ),
-                (
-                    "mean x0",
-                    lambda: (
-                        f"{jnp.mean(self.x0):2f}" if self.x0 is not None else ["N/A"]
-                    ),
-                ),
-                (
-                    "mean Sigma0",
-                    lambda: (
-                        f"{jnp.mean(jnp.diag(self.Sigma0)):2f}"
-                        if self.Sigma0 is not None
-                        else ["N/A"]
-                    ),
-                ),
+                ("Date:", lambda: [self._today]),
                 (
                     "Rank",
                     lambda: (
-                        [f"{q/p :4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
-                        if q != "N/A" and p != "N/A"
-                        else ["N/A"]
+                        [f"{q / p:.4f}"] if q != "N/A" and p != "N/A" and p > 0 else ["N/A"]
                     ),
                 ),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
+                ("JAX default:", lambda: [f"{jax.default_backend()}"]),
             ]
         )
 
@@ -2005,7 +1969,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         len_empty = len(gen_top_left)- len(gen_top_right) 
         if len_empty > 0:
@@ -2022,22 +1986,29 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
                 gen_top_left_grid = []
                 gen_top_right_grid = []
-                for i, grid in enumerate(self.gridList):
+                for grid in self.gridList:
 
                     left, righ = grid.generate_summary()
-                    
+
                     # check the length of the left and right tables and add empty rows if they are different
                     len_empty = len(left) - len(righ)
                     if len_empty > 0:
                         righ = righ + [("", [""])] * len_empty
                     elif len_empty < 0:
                         left = left + [("", [""])] * (-len_empty)
-                    
-                    left = [(f"Grid {i}", ["-" * 28])] + left
-                    righ = [(f"Grid {i}", ["-" * 28])] + righ
-                    
 
-                    
+                    # Section divider: the label goes once on the left; the
+                    # right side just carries a dash placeholder so it isn't
+                    # repeated. `summary()` redraws this whole row as one
+                    # continuous dashed line via `_continuous_dividers`.
+                    yname = (
+                        grid.y_design_info.column_names[0]
+                        if getattr(grid, "y_design_info", None) is not None
+                        else grid.y_name
+                    )
+                    left = [(f"Grid {yname}", ["-"])] + left
+                    righ = [("-", ["-"])] + righ
+
                     gen_top_left_grid = gen_top_left_grid + left
                     gen_top_right_grid = gen_top_right_grid + righ
 
@@ -2060,11 +2031,12 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     elif len_empty < 0:
                         left = left + [("", [""])] * (-len_empty)
 
-                    
-                    left = [(f"Latent. {i}", ["-" * 28])] + left
-                    righ = [(f"Latent {i}", ["-" * 28])] + righ
+                    # See the Grid divider above: label once on the left,
+                    # dash placeholder on the right, redrawn as one
+                    # continuous line by `_continuous_dividers` in summary().
+                    left = [(f"Latent. {i}", ["-"])] + left
+                    righ = [("-", ["-"])] + righ
 
-                    
                     gen_top_left_cov = gen_top_left_cov + left
                     gen_top_right_cov = gen_top_right_cov + righ
 
@@ -2076,21 +2048,30 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
     def summary(self, print_full=True) -> Summary:
         """Return or print a structured summary of the model."""
         self.model = SimpleNamespace()
-        # self.params = np.zeros(1)  # Placeholder for model parameters if needed in the future
 
         # Generate the summary tables
         gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
-        
+
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(
             self,
-            title="State Space Model",
+            title="LR State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,
             yname= self.yname if self.yname is not None else "None",
             xname= self.xbeta_names if self.xbeta_names is not None else "None",
         )
+
+        # Redraw the "Grid .../Latent. ..." divider rows as one continuous
+        # dashed line (see `_continuous_dividers`). Divider rows are
+        # identified by their left-hand label, i.e. every row whose value
+        # is the placeholder ["-"] set above.
+        divider_labels = [stub for stub, val in gen_top_left if val == ["-"]]
+        if divider_labels:
+            smry.as_text = lambda _orig=smry.as_text, labels=divider_labels: (
+                _continuous_dividers(_orig(), labels)
+            )
 
         return smry
 

@@ -406,54 +406,51 @@ class StateSpaceResults:
 
 
         # top-left / top-right small tables
-        p, q, T = self.model.shape if hasattr(self.model, "shape") else [("N/A", "N/A", "N/A")]
-
-        top_left = dict(
-            [
-                ("Model name:", lambda: [self.model.__class__.__name__]),
-                (
-                    "Model type:",
-                    lambda: [
-                        self.model.type if hasattr(self.model, "type") else "N/A"
-                    ],
-                ),
-                (
-                    "Model order:",
-                    lambda: [
-                        self.model.order if hasattr(self.model, "order") else "N/A"
-                    ],
-                ),
-                ("Dep. Variable:", lambda: [self.model.y_name[0] if hasattr(self.model, "y_name") else "N/A"]),
-                # ("Date:", lambda: [self.today]),
-                # ('Number of obs:', lambda: [self.nobs]),
-                # ('Number of series:', lambda: [self.nspace]),
-                # ('Time length:', lambda: [self.ntime]),
-                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-                ("# missing:", lambda: [self.missing]),
-                ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
-                ("MSE:", lambda: [f"{self.mse():.2f}"]),
-                ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
-                # ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
-                ("JAX devices:", lambda: [f"{jax.devices()}"]),
-            ]
-        )
+        p, q, T = self.model.shape if hasattr(self.model, "shape") else ("N/A", "N/A", "N/A")
 
         runtime_label, runtime_value = self._format_runtime_summary(
             [
-                ("filter", self.time_filter),
-                ("smoother", self.time_smoother),
-                ("expect.", self.time_expectation),
+                ("fl.", self.time_filter),
+                ("sm.", self.time_smoother),
+                ("ex.", self.time_expectation),
             ]
         )
-        top_right = {
-            "Jarque-Bera:": lambda: [f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})"],
-            "Omnibus test:": lambda: [f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})"],
-            "Durbin-Watson:": lambda: [f"{stats['dw']:.2f}"],
-            "Skewness:": lambda: [f"{stats['skew']:.2f}"],
-            "Kurtosis:": lambda: [f"{stats['kurtosis']:.2f}"],
-            "Coverage Prob.:": lambda: [f"{self._coverage_probability():.2f}, (alpha = 0.05)"],
-            runtime_label: lambda v=runtime_value: [v],
-        }
+
+        # Left: identity/config of the model and how it was run.
+        top_left = dict(
+            [
+                ("Model name:", lambda: [self.model.__class__.__name__]),
+                ("Model type (order):",
+                    lambda: [
+                        f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
+                    ],
+                ),
+                ("Dep. Variables:", lambda: [self.model.y_name if hasattr(self.model, "y_name") else "N/A"]),
+                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+                ("# missing:", lambda: [self.missing]),
+                ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
+                ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
+                (runtime_label, lambda v=runtime_value: [v]),
+            ]
+        )
+
+        # Right: fit quality and residual diagnostics. Bracketed "(x*)"
+        # values are the reference value expected for normal, uncorrelated
+        # residuals -- not achievable/meaningful targets for MSE/RMSE, so
+        # those are left unannotated.
+        alpha_cov = 0.05
+        top_right = dict(
+            [
+                ("MSE:", lambda: [f"{self.mse():.2f}"]),
+                ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
+                ("Coverage Prob.:", lambda a=alpha_cov: [f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"]),
+                ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (0*) (pvalue: {stats['jb_pvalue']:.2f})"]),
+                ("Omnibus test:", lambda: [f"{stats['omni']:.2f} (0*) (pvalue: {stats['omni_pvalue']:.2f})"]),
+                ("Skewness:", lambda: [f"{stats['skew']:.2f} (0*)"]),
+                ("Kurtosis (excess):", lambda: [f"{stats['kurtosis']:.2f} (0*)"]),
+                ("Durbin-Watson:", lambda: [f"{stats['dw']:.2f} (2*)"]),
+            ]
+        )
 
         # Generate the dictionaly
         gen_top_left = []
@@ -467,15 +464,22 @@ class StateSpaceResults:
 
         return gen_top_left, gen_top_right
 
+    #: Footnote explaining the "(x*)" reference values shown next to the
+    #: residual diagnostics in `generate_summary()`.
+    _DIAGNOSTICS_NOTE = (
+        "(x*) reference value expected for normal, uncorrelated residuals "
+        "(or, for Coverage Prob., the nominal 1 - alpha)."
+    )
+
     def summary(self) -> Summary:
         """Return a statsmodels Summary object with a brief report."""
         # Ensure numpy arrays for summary stats
 
         self.results = np.array([0])
-        
+
         gen_top_left, gen_top_right = self.generate_summary()
 
-        
+
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
@@ -486,6 +490,7 @@ class StateSpaceResults:
             yname=None,
             xname=None,
         )
+        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
 
         return smry
 
