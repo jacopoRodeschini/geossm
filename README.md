@@ -11,7 +11,7 @@
 
 **geossm** is a Python package for applying **state space models** to **spatial and spatiotemporal data**. It is tailored for modern **geostatistical workflows** and natively operates on `GeoDataFrame` objects from the `geopandas` library.
 
-The package is designed with **scalability** and **modularity** in mind, making it suitable for large spatial and spatiotemporal datasets across environmental, climate, and geospatial applications.
+The package is designed with **scalability** and **modularity** in mind, making it suitable for large spatial and spatiotemporal datasets across environmental, climate, and geospatial applications. 
 
 
 ## Table of Contents
@@ -37,22 +37,23 @@ State space models (SSMs) are powerful statistical tools for modeling dynamic sy
 
 The package is built on the research presented in the PhD thesis: *A State-Space Modelling Framework in Geostatistics with Application to Environmental Data* by Jacopo Rodeschini.
 
-### Progect structure
+### Project structure
 ```
 geossm/
-├── pyproject.toml      <-- All package config
-├── environment.yml     <-- For Conda users
+├── pyproject.toml         <-- All package config
+├── environment.yml        <-- For Conda users
 ├── README.md
 ├── LICENSE
-├── src/                <-- The "Source" folder
-│   └── geossm/         <-- The actual package folder
+├── src/                   <-- The "Source" folder
+│   └── geossm/            <-- The actual package folder
 │       ├── __init__.py
-|       ├── datasets    <-- Submodule for the dataset
-|       ├── ssm         <-- Submodule for the State-Space model
-|       ├── stmodels    <-- Submodule for the Spatio-temporal model
-│       └── covmodel    <-- Submodule for the covariance functions
-|
-└── tests/            
+│       ├── datasets/      <-- Submodule for the datasets
+│       ├── ssm/           <-- Submodule for the State-Space model
+│       ├── stmodel/       <-- Submodule for the Spatio-temporal model
+│       ├── covmodel/      <-- Submodule for the covariance functions
+│       ├── data_preparation.py  <-- Design matrix construction utilities
+│       └── utils.py       <-- Shared helper functions
+└── tests/
 ```
 
 ### Available Datasets
@@ -86,7 +87,7 @@ The `*` symbol indicates dataset more than 10MB.
 <img src="docs/images/workflow_data_process.png" alt="data process" width="320">
 
 
-## 🔍 Key Features
+## Key Features
 
 - **Seamless GeoDataFrame Integration**: Work directly with `geopandas.GeoDataFrame` objects
 - **State Space Modeling**: Tools for building, estimating, filtering, and smoothing spatial processes
@@ -101,7 +102,7 @@ The `*` symbol indicates dataset more than 10MB.
 
 ## Requirements
 - **OS**: Linux or macOS (Windows not currently supported)
-- **Python**: 3.8 or higher
+- **Python**: 3.10 or higher (required by the `jax` dependency)
 - **Key Dependencies**:
   - `geopandas` ≥ 1.1.2 (geospatial data handling)
   - `pandas` ≥ 2.2.2 (data manipulation)
@@ -114,7 +115,7 @@ The `*` symbol indicates dataset more than 10MB.
 
 See [pyproject.toml](pyproject.toml) or [environment.yml](environment.yml) for the complete dependency list.
 
-## 🚀 Installation
+## Installation
 
 ### Option 1: From pip (Recommended)
 
@@ -196,130 +197,67 @@ print(agrimonia_gdf.columns)
 
 ### Building a Low-Rank State Space Model
 
+This walks through the core steps: load data, build a spatial mesh, define a
+covariance function, and fit the model. The full runnable script (including
+plotting) is available at
+[examples/example_LRSSM_build.py](examples/example_LRSSM_build.py).
+
 ```python
-import matplotlib.pyplot as plt
 from shapely.geometry import Point, Polygon
 import numpy as np
-
+import geopandas as geodf
 import pygmsh
 import gmsh
-import geopandas as geodf
+
 import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.covmodel import FEMSolver, spdeAppoxCov
+from geossm.covmodel import spdeAppoxCov
 
-
-# %% Load the agrimonia dataset
+# 1. Load a dataset and turn it into a GeoDataFrame
 agri, shape = df.load_dataset('agrimonia')
-
-
-# %% From .csv to geopandas
-ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
-agri['geometry'] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
+coords = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
+agri['geometry'] = [Point(p[0], p[1]) for p in coords]
 agri = geodf.GeoDataFrame(agri, crs=4326)
 
 domain = list(shape.geometry[0].geoms)[0].boundary
 buffer = list(domain.buffer(0.3).boundary.geoms)[0]
+domain_polygon = [Polygon(buffer)]
+
+# 2. Define the model formula and the observation domain
+model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain=domain_polygon)
 
 
-# %% Build the model
-model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain = [Polygon(buffer)])
-print(model)
-
-
-# %% [Utils] build mesh with gmsh
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
+# 3. Build a mesh over the domain for the latent spatial field with gmsh
+def build_mesh(poly, lc, points, lc_points=1e22):
     with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(poly.buffer(
-            lc_buffer).simplify(lc_buffer).exterior.coords[:-1])
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer*0.1)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
+        coords = np.array(poly.buffer(lc).simplify(lc).exterior.coords[:-1])
+        surface = geom.add_polygon(coords, mesh_size=lc * 0.1)
         for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        # gmsh.model.mesh.embed(
-        #     0, embedded_tags, 2, domain._id)
-
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
-
-        # 5. Generate
+            gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
+        gmsh.model.occ.synchronize()
         gmsh.model.mesh.generate(2)
+        return geom.generate_mesh()
 
-        gmsh.model.mesh.optimize("Laplace2D")
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
 
-        # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
+mesh_io = build_mesh(buffer, lc=0.35, points=model.points[0])
 
-        mesh = geom.generate_mesh()
-
-    return mesh
-
-# %% Build the mesh for the AQ_pm10 observed variable
-points = model.points[0]
-mesh_io = buildMesh(buffer, 0.35, points)
-print(mesh_io)
-
-# plot the mesh (use the fem_solver utlities)
-fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
-
-# plot the mesh using the utilities 
-fig, ax = plt.subplots(figsize=(8, 8))
-fem_solver.plot_mesh(ax=ax)
-
-# %% Set up the lrssm model (univiarte latent)
-
-# Build the covariance function on the mesh (domain=None defaults to the
-# convex hull of the mesh's own vertices, i.e. every vertex is inner)
-cov_fun = spdeAppoxCov(latlon=True)
-cov_fun = cov_fun.setup(mesh_io, domain=[Polygon(buffer)])
-
+# 4. Build the latent covariance function on the mesh and attach it
+cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain_polygon)
 model = model.setup(cov_fun=[cov_fun])
 
-# %% Estimate the Model (default estimation options)
+# 5. Fit the model
 results = model.fit()
-print(results) # resutls.summary()
-
-
-# %% Plot the likelihood curve
-fig, ax = plt.subplots()
-ax.plot(-np.array(results.llf_path[1:]))
-ax.set_yscale('log')
-ax.set_xlabel('Iteration')
-ax.set_ylabel('Log Likelihood')
-ax.set_title('Log Likelihood Curve')
-ax.grid()
-plt.show()
-
+print(results.summary())
 ```
+
+> **Note**: `build_mesh` above is simplified for readability. See
+> [examples/example_LRSSM_build.py](examples/example_LRSSM_build.py) for the
+> full mesh-generation code (mesh-density tuning options) and plotting
+> utilities (`FEMSolver.plot_mesh`).
 
 ## Examples
 
-The [examples/](examples/) directory contains comprehensive notebooks demonstrating:
+The [examples/](examples/) directory contains runnable scripts demonstrating:
 
 - **Data Loading**: [example_datasets_load.py](examples/example_datasets_load.py) — Load and explore geospatial datasets
 - **Grid Operations**: [example_datasets_grid.py](examples/example_datasets_grid.py) — Create and manipulate spatial grids
@@ -354,71 +292,13 @@ help(geossm.ssm.StateSpaceModel)
 
 ## Contributing
 
-Contributions are welcome! To contribute:
+Contributions are welcome! In short: fork the repository, create a branch off
+`develop` (`feature/your-feature` or `fix/your-bug`), and open a Pull Request
+into `develop`.
 
-1. Fork the repository
-2. Create a feature branch (`git switch -c feature/your-feature`)
-3. Commit your changes (`git commit -m 'Add your feature'`)
-4. Push to the branch (`git push origin feature/your-feature`)
-5. Open a Pull Request
-
-For questions or bug reports, please open an [Issue](../../issues).
-
-### Branching Strategy
-
-This repository follows a simple branching strategy.
-
-**Main Branches**
-
-| Branch | Purpose |
-|------|------|
-| `main` | Stable production code. Only tested and released versions live here. |
-| `develop` | Active development branch where new work is integrated. |
-
-**Working Branches**
-
-| Branch Pattern | Purpose | Example |
-|------|------|------|
-| `feature/*` | New features or improvements | `feature/add-smoothing` |
-| `fix/*` | Bug fixes | `fix/memory-leak` |
-
-After the work is complete, open a **Pull Request into `develop`**.
-
-**Typical Workflow**
-
-1. **Update your local branches**
-
-```bash
-git switch main
-git pull origin main
-git switch develop
-git pull origin develop
-```
-
-2. Create a branch from `develop`
-
-```bash
-git switch -c feature/your-feature
-```
-
-> Use `fix/your-bug` as the branch name prefix for bug fixes.
-
-3. Commit your changes
-
-```bash
-git add .
-git commit -m "Describe your change"
-```
-
-4. Push the branch
-
-```bash
-git push -u origin feature/your-feature
-```
-
-5. Open a Pull Request into `develop`.
-   - After review/approval, merge your PR into `develop`
-   - `main` will only be updated when a new release is ready
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full guide, including the
+branching strategy, local dev setup, and the PR checklist. For questions or
+bug reports, please open an [Issue](../../issues).
 
 ## License
 
@@ -451,7 +331,6 @@ url = {https://www.sciencedirect.com/science/article/pii/S2211675326000199},
 ## Contact
 
 **Author**: Jacopo Rodeschini  
-**Email**: jacopo.rodeschini@unibg.it
 
 ---
 
