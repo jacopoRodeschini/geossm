@@ -443,7 +443,11 @@ class StateSpaceResults:
             [
                 ("MSE:", lambda: [f"{self.mse():.2f}"]),
                 ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
-                ("Coverage Prob.:", lambda a=alpha_cov: [f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"]),
+                ("Coverage Prob.:", lambda a=alpha_cov: [
+                    f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"
+                    if getattr(self, "Sigma_y_hat", None) is not None
+                    else "N/A"
+                ]),
                 ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (0*) (pvalue: {stats['jb_pvalue']:.2f})"]),
                 ("Omnibus test:", lambda: [f"{stats['omni']:.2f} (0*) (pvalue: {stats['omni_pvalue']:.2f})"]),
                 ("Skewness:", lambda: [f"{stats['skew']:.2f} (0*)"]),
