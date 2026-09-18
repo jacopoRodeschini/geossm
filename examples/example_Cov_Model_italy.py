@@ -82,8 +82,8 @@ from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
 fig, ax = plt.subplots(1, len(meshes), figsize=(8, 8))
 
 for i, (mesh_lr, buffer) in enumerate(meshes):
-    cov_fun = MaternCov(italy_union, latlon=True, nu=1, var=1, rescale=4)
-    cov_fun = cov_fun.setup(mesh_lr)
+    cov_fun = MaternCov(latlon=True, nu=1, var=1, rescale=4)
+    cov_fun = cov_fun.setup(mesh_lr, domain=list(italy_union.geoms))
 
     # print(f"Covariance function for low-rank mesh (r={lr[i]}):")
     # print(cov_fun.summary())
