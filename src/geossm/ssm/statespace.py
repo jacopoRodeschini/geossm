@@ -1598,6 +1598,11 @@ class StateSpaceModel:
             # store the backend platform (e.g. 'cpu'/'gpu') so it can be
             # re-resolved to a device on the machine that unpickles this model
             "backend": getattr(self._backend, "platform", "auto"),
+            "today": self._today,
+            "type": self._type,
+            "order": self._order,
+            "yname": self._yname,
+            "xbeta_names": self._xbeta_names,
         }
         return state
 
@@ -1651,6 +1656,18 @@ class StateSpaceModel:
         self._p = state.get("p", None)
         self._q = state.get("q", None)
         self._b = state.get("b", None)
+
+        # Metadata used by summary()/__str__(); fall back to sensible
+        # defaults for state pickled before these were tracked.
+        self._today = state.get("today", date.today())
+        self._type = state.get("type", "Linear (Gaussian)")
+        self._order = state.get("order", "(1, 0)")
+        self._yname = state.get("yname", None)
+        self._xbeta_names = state.get("xbeta_names", None)
+        self._y_t = None
+        self._params = self._beta
+        self._params_names = self._xbeta_names
+        self._params_dim = self._b
 
         # Ensure other attributes exist with sensible defaults
         if not hasattr(self, "dtype"):
