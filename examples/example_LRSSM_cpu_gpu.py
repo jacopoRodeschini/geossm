@@ -220,20 +220,20 @@ if __name__ == "__main__":
             # create the dataframe with the specified dimensions
             gdf, points = build_dataframe(dims["n"], T=dims["T"])
 
-            # Create the mesh 
-            mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1,
+            # Create the mesh
+            mesh_io, buffer = buildMesh2d(points, domain=domain, offset=0.1,
                                     lowrank=1, density_neighbors=5)
             # print(mesh_io)
 
             params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
             # Create the covariance function used to simulate the "truth"
-            cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-            cov_fun = cov_fun.setup(mesh_io)
+            cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+            cov_fun = cov_fun.setup(mesh_io, domain=domain)
 
             # Build a dedicated model to simulate the "truth" data and set up its covariance
             sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
-            sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+            sim_model = sim_model.setup(cov_fun=[cov_fun])
 
             # Print the var. statistics (verbose = True)
             y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=False, verbose=False)
@@ -241,9 +241,9 @@ if __name__ == "__main__":
             # 0) Create the geopandas dataframe with the simulated data
             gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-            # 1) Create the covariance matrix 
-            est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2, verbose=False)
-            est_cov_fun = est_cov_fun.setup(mesh_io)
+            # 1) Create the covariance matrix
+            est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2, verbose=False)
+            est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
             # fit the estimation model
             opt = FitOptions()
@@ -261,8 +261,8 @@ if __name__ == "__main__":
                     verbose=False, backend=backend, dtype=jnp.float32)
 
 
-                # 3) Set up the model cov. 
-                model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+                # 3) Set up the model cov.
+                model = model.setup(cov_fun=[est_cov_fun])
                 # print(model)
 
 
