@@ -134,7 +134,7 @@ print(len(mesh.cells_dict["vertex"]))
 # %% Create the covariance function
 
 # Define the matern function (without any mesh definition)
-cov_matern = spdeAppoxCov([domain], latlon=True)
+cov_matern = spdeAppoxCov(latlon=True)
 
 print(cov_matern)
 print(cov_matern.rescale)
@@ -145,7 +145,7 @@ print(cov_matern.is_isotropic)
 
 # %% Add the mesh support for the FE representation
 
-cov_matern = cov_matern.setup(mesh)
+cov_matern = cov_matern.setup(mesh, domain=domain)
 
 print(cov_matern)
 
@@ -188,6 +188,6 @@ for lc, ax in zip(lc_list, axs):
 
     mesh = buildMesh(domain, lc, points, lc_buffer=lc * 2)
 
-    cov_matern = cov_matern.setup(mesh)
+    cov_matern = cov_matern.setup(mesh, domain=domain)
 
     cov_matern.fem_solver.plot_mesh(ax=ax, title=f"Mesh with LC={lc}")
