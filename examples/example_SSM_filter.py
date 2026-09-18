@@ -151,6 +151,13 @@ plt.show()
 # get the predicted values
 y_hat = results.y_hat
 
+# conf_int_y() needs the predictive covariance Sigma_y_hat, which filter()
+# does not compute by default (it's only needed for confidence intervals,
+# not for the filtering itself) -- so compute and attach it here
+_, results.Sigma_y_hat = model.predict(
+    model.H, results.x_filtered, results.P_filtered, model.Xbeta, model.beta
+)
+
 # get the confidence interval
 lower, upper = results.conf_int_y(alpha=0.05, prediction=True)
 
@@ -216,7 +223,7 @@ model = ssm(
 print(model.summary())
 
 # simulate the data
-y_sim, x_sim, tdelta = model.sim(seed=1234)
+y_sim, x_sim, stats, tdelta = model.sim(seed=1234)
 
 # filter the state
 results = model.filter(y_sim)
@@ -313,6 +320,12 @@ for sigma2e in domain:
 
     # filter the state
     res = model.filter(y_sim)
+
+    # coverage_probability() needs the predictive covariance Sigma_y_hat,
+    # which filter() does not compute by default -- compute and attach it
+    _, res.Sigma_y_hat = model.predict(
+        model.H, res.x_filtered, res.P_filtered, model.Xbeta, model.beta
+    )
 
     # compute the state rmse
     cov_prob.append(res.coverage_probability(which="global"))
