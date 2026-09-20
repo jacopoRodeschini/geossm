@@ -794,7 +794,7 @@ class FEMSolver:
         """(nbElements, 2) ndarray of int -- vertex-index pairs for each
         boundary edge."""
         boundaryEdge = []
-        for i in range(self.nbElement):
+        for i in range(self.nbElements):
             boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
 
         return np.array(boundaryEdge)
