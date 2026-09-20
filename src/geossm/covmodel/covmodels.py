@@ -167,6 +167,31 @@ def _domain_hull(domain):
 
 # % FEM solver class
 class FEMSolver:
+    r"""Low-level finite-element engine behind `spdeAppoxCov`.
+
+    Wraps a triangular mesh (e.g. built by `buildMesh2d`) in an MFEM
+    order-1 :math:`H^1` finite element space, and assembles the sparse
+    mass and stiffness matrices that `spdeAppoxCov.precision` combines
+    into the SPDE precision matrix. It also classifies mesh vertices as
+    "inner" (covered by `domain`, the region of scientific interest) or
+    "outer" (part of the surrounding buffer, whose role is only to push
+    the FEM's Neumann boundary effects away from `domain`), evaluates
+    basis functions at arbitrary points (`getBasis`), and reports mesh
+    quality diagnostics (`compute_stats`, `summary`).
+
+    Most users go through `spdeAppoxCov` instead, which builds and owns a
+    `FEMSolver` internally in `spdeAppoxCov.setup()`. `FEMSolver` is
+    exposed directly (e.g. via `spdeAppoxCov.fem_solver`) for lower-level
+    access to the mesh, the assembled matrices, and mesh diagnostics.
+
+    Notes
+    -----
+    Internally, the input `meshio.Mesh` is converted to an `mfem.Mesh` via
+    `meshio_to_mfem_mesh` (2D triangular meshes only); vertices and
+    elements are kept in the order given by the mesh, with no reordering
+    or optimisation performed by this class.
+    """
+
     def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
         """
         Parameters
@@ -275,13 +300,17 @@ class FEMSolver:
 
     @property
     def mesh(self):
+        """The underlying `mfem.Mesh` (converted from the input `meshio.Mesh`)."""
         return self._mesh
 
     @property
     def inner(self):
+        """Boolean array, one entry per `vertex`, True where the vertex is
+        classified as inner (covered by `domain`); see `isinner`."""
         return self._inner
 
     def _build_fespace(self):
+        """Build the order-1 H1 finite element space on `mesh`."""
 
         # Create a finite element space
         # Define a finite element space on the mesh. Here we use vector finite
@@ -323,6 +352,8 @@ class FEMSolver:
         return inner
 
     def _compute_mass_stiff(self):
+        """Assemble the sparse mass and stiffness matrices on `fespace`,
+        restricted to `effective_dofs` rows/columns."""
         # Compute the mass and stiff matrix (static matrix -> computed just one time)
 
         # Get the Mass (C matrix in RUE-LINGDEN) and Stiffness matrix (G in RUE)
@@ -381,10 +412,42 @@ class FEMSolver:
         )
 
     def getBasis(self, phy_points=None):
+        """
+        Evaluate the FE basis functions at a set of physical points.
+
+        For each point, locates the mesh element that contains it and
+        evaluates every basis function of that element there, giving a
+        sparse "observation" matrix `H` such that ``H @ field_at_vertices``
+        interpolates the FEM field at `phy_points`.
+
+        Parameters
+        ----------
+        phy_points : (p, 2) array_like, optional
+            Physical-space points to evaluate the basis at. Defaults to
+            the mesh vertices (`vertex`), giving the identity-like mapping
+            used e.g. to sanity-check the FE space.
+
+        Returns
+        -------
+        count : int
+            Number of points for which a containing mesh element was
+            found (see `mfem.Mesh.FindPoints`).
+        notfindInx : ndarray of int
+            Indices (into `phy_points`) of points for which no containing
+            element could be found -- point search is not guaranteed to
+            succeed even for points that do lie inside the mesh.
+        H : scipy.sparse.csr_matrix, shape (p, effective_dofs)
+            Basis functions evaluated at each point, one row per point and
+            one column per (inner + outer) mesh vertex/DOF. Rows for
+            points in `notfindInx` are all zero. Entries below `1e-8` are
+            zeroed out for numerical stability.
+        """
         count, notfindInx, H = self._compute_basis(phy_points)
         return count, notfindInx, H
 
     def _compute_basis(self, phy_points=None, thr=1e-5):
+        """Core of `getBasis`; `thr` is currently unused (kept for future
+        thresholding of the returned basis values)."""
         # @Points = physical point
 
         # Create the list of pysical points
@@ -480,6 +543,30 @@ class FEMSolver:
         alpha_triangle=0.5,
         alpha_border=0.5,
     ):
+        """
+        Plot the mesh: all triangle edges, inner/outer vertices, boundary
+        edges (dashed red), and the `domain` polygon(s) (orange outline).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on. A new figure/axes is created if not given.
+        figsize : tuple of float, default (10, 8)
+            Figure size, only used when `ax` is not given.
+        title : str, default "Title"
+            Plot title.
+        alpha_vertex : float, default 1
+            Transparency of the inner/outer vertex markers.
+        alpha_triangle : float, optional
+            Unused (kept for interface compatibility); triangle edges are
+            always drawn with a fixed alpha of 0.5.
+        alpha_border : float, default 0.5
+            Transparency of the dashed boundary-edge lines.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
 
         # Convert the vertex array to a numpy array
         vertex = self.vertex
@@ -561,7 +648,20 @@ class FEMSolver:
         return ax
 
     def get_distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """
+        Flat Euclidean pairwise distance between `points` and the mesh
+        `vertex` coordinates (or between mesh vertices and themselves).
+
+        Parameters
+        ----------
+        points : (p, 2) array_like, optional
+            Query points. Defaults to `vertex`, giving the full
+            vertex-to-vertex distance matrix.
+
+        Returns
+        -------
+        ndarray, shape (nvertex, nvertex) or (p, nvertex)
+        """
         return (
             cdist(self.vertex, self.vertex)
             if points is None
@@ -569,7 +669,7 @@ class FEMSolver:
         )
 
     def distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """Alias for `get_distance`."""
 
         return self.get_distance(points=points)
 
@@ -613,6 +713,7 @@ class FEMSolver:
 
     @property
     def nvertex(self):
+        """Number of mesh vertices (= `effective_dofs`)."""
         return len(self.vertex)
 
     @property
@@ -622,6 +723,8 @@ class FEMSolver:
 
     @property
     def elements(self):
+        """(nelements, 3) ndarray of int -- vertex indices (into `vertex`)
+        making up each mesh triangle."""
         triangles = []
 
         for i in range(self.mesh.GetNE()):
@@ -636,6 +739,8 @@ class FEMSolver:
 
     @property
     def box(self):
+        """Mesh bounding box as ``[minx, miny, maxx, maxy]`` (rounded to 2
+        decimals)."""
 
         box  = self.mesh.GetBoundingBox()
         box = np.round(box, 2).tolist()
@@ -646,6 +751,9 @@ class FEMSolver:
 
     @property
     def domain(self):
+        """Tuple of `shapely.geometry.Polygon`: region(s) of scientific
+        interest used to classify vertices as inner/outer (see
+        `_validate_domain` / `isinner`)."""
         return self._domain
 
     @property
@@ -668,18 +776,23 @@ class FEMSolver:
     # Property for number of boundary elements (mesh.GetNBE())
     @property
     def nbElements(self):
+        """Number of boundary elements (edges, for a 2D mesh)."""
         return self.mesh.GetNBE()
 
     @property
     def nbEdges(self):
+        """Total number of mesh edges."""
         return self.mesh.GetNEdges()
 
     @property
     def geoshape(self):
+        """MFEM geometry type of the mesh elements (e.g. triangle)."""
         return self.mesh.GetElementGeometry(0)
 
     @property
     def getBoundaryEdge(self):
+        """(nbElements, 2) ndarray of int -- vertex-index pairs for each
+        boundary edge."""
         boundaryEdge = []
         for i in range(self.nbElement):
             boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
@@ -688,6 +801,8 @@ class FEMSolver:
 
     @property
     def boundary_vertex(self, boolean=True):
+        """(nbElements, 2) ndarray of int -- vertex-index pairs of the
+        boundary elements (see `nbElements`)."""
         bdr_vertex = []
         for i in range(self.mesh.GetNBE()):
             bdr_vertex.append(self.mesh.GetBdrElement(i).GetVerticesArray())
@@ -702,11 +817,14 @@ class FEMSolver:
     # Property for the space dimension (fespace.GetVDim())
     @property
     def fespace_order(self):
+        """Vector dimension of `fespace` (1 for the scalar H1 space used here)."""
         return self._fespace.GetVDim()
 
     # Property for number of local degrees of freedom (fespace.GetNDofs())
     @property
     def ndofs(self):
+        """Number of scalar degrees of freedom in `fespace` (all mesh
+        vertices, before cutting to `effective_dofs`)."""
         return self._fespace.GetNDofs()
 
     @property
@@ -717,14 +835,19 @@ class FEMSolver:
     # Property for number of vector DOFs (fespace.GetVSize())
     @property
     def GetVSize(self):
+        """Total number of vector DOFs in `fespace` (`ndofs * fespace_order`)."""
         return self._fespace.GetVSize()
 
     @property
     def stiff(self):
+        """Sparse stiffness matrix :math:`G` (the `<grad(phi_i), grad(phi_j)>`
+        FEM Laplacian term), shape `(effective_dofs, effective_dofs)`."""
         return self._stiff
 
     @property
     def mass(self):
+        """Sparse (diagonal, lumped) mass matrix :math:`C`, shape
+        `(effective_dofs, effective_dofs)`."""
         return self._mass
 
     # Property for number of vertices (mesh.GetNV())
@@ -760,10 +883,27 @@ class FEMSolver:
 
     @property
     def shape(self):
+        """Tuple `(nvertex, nelements, nbElements)`."""
         return (self.nvertex, self.nelements, self.nbElements)
 
 
     def compute_angles(self, vertex, triangle):
+        """
+        The three interior angles (degrees) of a single triangle.
+
+        Parameters
+        ----------
+        vertex : (n, 2) array_like
+            Vertex coordinates array to index into.
+        triangle : array_like of int, length 3
+            Indices (into `vertex`) of the triangle's three corners.
+
+        Returns
+        -------
+        ndarray, shape (3,)
+            Angles at each of the three corners, in the same order as
+            `triangle`.
+        """
         A, B, C = vertex[triangle]
 
         def angle(a, b, c):
@@ -777,11 +917,38 @@ class FEMSolver:
         return np.array([angle(A, B, C), angle(B, C, A), angle(C, A, B)])
 
     def compute_area(self, vertex, triangle):
+        """
+        Area of a single triangle (shoelace formula).
+
+        Parameters
+        ----------
+        vertex : (n, 2) array_like
+            Vertex coordinates array to index into.
+        triangle : array_like of int, length 3
+            Indices (into `vertex`) of the triangle's three corners.
+
+        Returns
+        -------
+        float
+        """
         A, B, C = vertex[triangle]
         return 0.5 * abs(A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]))
 
 
     def compute_stats(self):
+        """
+        Interior angles and areas of every mesh triangle (via
+        `compute_angles`/`compute_area`); used by `__init__` (when
+        ``stats=True``) to populate `angles`/`areas` and warn about
+        poor-quality (small-angle) meshes.
+
+        Returns
+        -------
+        angles : (nelements, 3) ndarray
+            Interior angles (degrees) of each triangle.
+        areas : (nelements,) ndarray
+            Area of each triangle.
+        """
 
         # compute angles for all triangles
         angles = np.array([self.compute_angles(self.vertex, tri) for tri in self.elements])
@@ -794,14 +961,20 @@ class FEMSolver:
     
     @property
     def angles(self):
+        """(nelements, 3) ndarray of the triangles' interior angles
+        (degrees), or None if `__init__` was called with ``stats=False``."""
         return self._angles
-    
+
     @property
     def areas(self):
+        """(nelements,) ndarray of triangle areas, or None if `__init__`
+        was called with ``stats=False``."""
         return self._areas
-    
+
 
     def generate_summary(self):
+        """Build the (label, value) rows shown by `summary`, as two lists
+        of ``(str, [str])`` pairs (left and right columns)."""
         # compute the angles and areas of the triangles
 
         top_left = dict(
@@ -847,11 +1020,14 @@ class FEMSolver:
         return gen_top_left, gen_top_right
 
     def summary(self):
+        """Return a `statsmodels.iolib.summary.Summary` table of mesh/FE
+        diagnostics (vertex/element counts, angle & area ranges, DOFs,
+        matrix shapes, ...); also backs `__str__`."""
 
-        
+
         # Add the header to the summary
         gen_top_left, gen_top_right = self.generate_summary()
-        
+
         smry = Summary()
         smry.add_table_2cols(
             self,
@@ -875,6 +1051,7 @@ class FEMSolver:
             self.print_info(msg)
 
     def print_info(self, msg):
+        """Print `msg` prefixed with a UTC timestamp."""
         dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
         print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
@@ -976,7 +1153,9 @@ class FEMSolver:
 class spdeAppoxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
-    Solves the SPDE :math:`(\kappa^2 - \Delta)^{\alpha/2} x = W` by a finite
+    See [Rasmussen2003]_ for background on the Matérn family of
+    covariance functions in the Gaussian-process setting that this class
+    approximates. Solves the SPDE :math:`(\kappa^2 - \Delta)^{\alpha/2} x = W` by a finite
     element (FEM) discretisation with Neumann boundary conditions on a mesh
     covering the domain (see `setup`), giving the sparse precision matrix
     `precision()` -- optionally marginalised onto the "inner" vertices of
@@ -1044,12 +1223,26 @@ class spdeAppoxCov(Matern):
 
     @property
     def meshIO(self):
+        """The `meshio.Mesh` passed to `setup`.
+
+        Raises
+        ------
+        RuntimeError
+            If `setup` hasn't been called yet.
+        """
         if self._meshIO is None:
             raise RuntimeError("Mesh not loaded. Call setup() with a mesh first.")
         return self._meshIO
 
     @property
     def fem_solver(self):
+        """The `FEMSolver` built by `setup` from `meshIO`/`domain`.
+
+        Raises
+        ------
+        RuntimeError
+            If `setup` hasn't been called yet.
+        """
         if self._fem_solver is None:
             raise RuntimeError("FEM solver not initialized. Call setup() first.")
         return self._fem_solver
@@ -1265,14 +1458,19 @@ class spdeAppoxCov(Matern):
     # property:: spatial process
     @property
     def emp_range(self):
-        """Return the empirical range paramiter"""
+        """Practical spatial correlation range of the Matérn field,
+        :math:`\\sqrt{8 \\nu} / \\kappa`, i.e. the same `rescale`-based
+        range formula used by the parent `Matern` model, expressed in the
+        distance units of `rescale`/`geo_scale`."""
         return np.sqrt(8 * self.nu) / self.rescale
 
     @property
     def sigma2k(self):
         """
-        Return the marginal variance of the standardise approximate spatial SPDE process
-        Variance of the aproximate field x(u). Eq. 2 and Eq. 9
+        Marginal variance of the standardized SPDE approximation, i.e. the
+        variance of the approximate field x(u) obtained from `rescale`
+        (:math:`\\kappa`) alone. Used by `_compute_precision_spde` as the
+        scalar multiplier of the precision matrix.
         """
         return sc.special.gamma(1) / (
             sc.special.gamma(2) * 4 * np.pi * (self.rescale**2)
@@ -1316,7 +1514,10 @@ class spdeAppoxCov(Matern):
 
 
     def generate_summary(self):
-        
+        """Build the (label, value) rows shown by `summary`, as two lists
+        of ``(str, [str])`` pairs (left and right columns); includes the
+        `fem_solver`'s own rows once `setup()` has been called."""
+
         top_left = dict(
                     [
                         ("Cov. type:", lambda: [self.__class__.__name__]),
@@ -1353,12 +1554,15 @@ class spdeAppoxCov(Matern):
         return gen_top_left, gen_top_right
 
     def summary(self):
+        """Return a `statsmodels.iolib.summary.Summary` table of the model
+        (kappa/range/variance/nu) and, once `setup()` has been called, the
+        underlying `fem_solver`'s mesh diagnostics; also backs `__str__`."""
 
         gen_top_left, gen_top_right = self.generate_summary()
 
-        
+
         # Add the header to the summary
-        
+
         smry = Summary()
         smry.add_table_2cols(
             self,
@@ -1380,6 +1584,7 @@ class spdeAppoxCov(Matern):
             self.print_info(msg)
 
     def print_info(self, msg):
+        """Print `msg` prefixed with a UTC timestamp."""
         dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
         print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 

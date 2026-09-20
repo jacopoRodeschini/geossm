@@ -1,6 +1,15 @@
 """
-Adapter scaffolding making the project's StateSpaceModel usable with
-statsmodels' MLEModel API.
+Low-Rank State-Space Model (LRSSM) for large-scale spatio-temporal data.
+
+This module implements :class:`LRStateSpaceModel`, the package's model for
+geostatistical data with a large number of observation sites, where a
+full-rank spatial covariance over all sites is not tractable. The latent
+spatial field for each response variable ("block") is instead represented
+in a low-rank basis derived from a finite-element (SPDE/GMRF) discretization
+of a Matern-type covariance over a mesh covering the spatial domain (see
+:class:`geossm.covmodel.spdeAppoxCov`), and the model is fit with an EM
+algorithm built around the Kalman filter/smoother of the parent
+:class:`geossm.ssm.StateSpaceModel` class (`_E_step`/`_M_step`).
 """
 import numpy as np
 import jax.numpy as jnp
@@ -123,6 +132,9 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 
 @partial(jit, static_argnames=["b"])
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
+    """M-step update of the regression coefficients `beta`, accumulating the
+    (masked, missing-data-aware) normal equations over time via `lax.scan`
+    and solving them once at the end."""
 
     # 1. Define the function for a single loop iteration (the "scan body")
     # This function is defined inside so it can close over the non-iterating
@@ -183,6 +195,9 @@ def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
 @partial(jit, static_argnames=["block_p"])
 def _compute_s2e_jax_kernel(err, H, P_T, block_p):
+    """M-step update of the measurement-error variances `s2e`, one value per
+    response-variable block, from the smoothed residuals and smoothed state
+    covariance (missing observations excluded)."""
 
     # 1. Prepare data for the time-scan. This is shared across all blocks.
     # We move the time axis to the front for lax.scan.
@@ -372,9 +387,90 @@ def _continuous_dividers(text, labels):
 
 
 class LRStateSpaceModel(StateSpaceModel):
+    """
+    Low-Rank State-Space Model (LRSSM) for large-scale spatio-temporal data.
+
+    Subclass of :class:`geossm.ssm.StateSpaceModel` specialised for
+    geostatistical data observed at many sites over time. Rather than a
+    full-rank spatial covariance over all observation sites (which does not
+    scale), the latent spatial field of each response variable ("block",
+    one per formula) is written as a linear combination of a low-rank set
+    of latent factors living on a finite-element (SPDE/GMRF) mesh -- one
+    already-`setup()`-ed :class:`geossm.covmodel.spdeAppoxCov` per latent
+    factor (see `setup`). The state-space measurement matrix `H` is built
+    from a loading matrix `A` (one row per response variable, one column
+    per latent factor) and each factor's finite-element basis evaluated at
+    the observation sites, and the model is fit with an EM algorithm built
+    on the parent class's Kalman filter/smoother (`_E_step`/`_M_step`).
+
+    Typical workflow
+    -----------------
+    1. Build the model from a `geopandas.GeoDataFrame`, one Patsy/R-style
+       formula per response variable, and one domain polygon per formula::
+
+           model = LRStateSpaceModel(df, formulas=["y ~ 1 + x"], domain=[poly])
+
+    2. Build a mesh over (a buffer of) the domain and attach one already
+       `setup()`-ed covariance function per latent factor::
+
+           cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[poly])
+           model = model.setup(cov_fun=[cov_fun])
+
+    3. Fit the model with the EM algorithm::
+
+           results = model.fit()  # a LRStateSpaceResults
+
+    4. Optionally simulate (`sim`), predict at new locations/times
+       (`predict`), and inspect/report the fit (`results.summary()`).
+
+    See the `examples/example_LRSSM_*.py` scripts and the README Quick
+    Start section for complete, runnable versions of this workflow.
+    """
 
     def __init__(self, df, formulas:list, domain:list,
         verbose=True, backend="auto", dtype=jnp.float32):
+        """
+        Parameters
+        ----------
+        df : geopandas.GeoDataFrame
+            Source data: one row per observation, with a `geometry` column
+            (observation site) and a time column, plus every column
+            referenced by `formulas`. Copied on construction (`self.df`).
+        formulas : list of str
+            One Patsy/R-style formula per response variable/block (e.g.
+            `"np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m)"`). Each formula
+            is turned into a design matrix by its own
+            `geossm.data_preparation.DesignMatricesBuilder`
+            (`self.builders`). May be `None` to build an "empty" model
+            (e.g. only for simulation, where `formulas` is instead passed
+            directly to `sim`).
+        domain : list of shapely Polygon/MultiPolygon
+            One spatial domain per formula/response variable, used to keep
+            only the observed sites that fall inside it (see
+            `DesignMatricesBuilder._filter_domain`) -- this is the
+            *measurement-equation* domain (`self.domain`/`domain` property),
+            generally different from the *latent* domain of each
+            covariance function set in `setup()`. Must have the same length
+            as `formulas`. If `None`, each formula's domain defaults to the
+            convex hull of its own observed sites (see `_setDomain`).
+        verbose : bool, default True
+            Default verbosity for this model's logging (`self._log`);
+            individual calls can override it via their own `verbose`
+            argument.
+        backend : {"auto", "cpu", "gpu", ...}, default "auto"
+            Compute device passed to the parent `StateSpaceModel`; JAX
+            arrays created while running the model's public methods are
+            pinned to it (see `geossm.utils._on_device`).
+        dtype : numpy/jax dtype, default `jnp.float32`
+            Floating-point precision used for the design matrices and all
+            model computations.
+
+        Raises
+        ------
+        ValueError
+            If `formulas` and `domain` are both given but have different
+            lengths, or if `domain` fails validation (see `_checkDomain`).
+        """
 
         # Set dtype/itype before building the observation grid below, so the
         # design matrices are built directly in the model's precision instead
@@ -507,6 +603,20 @@ class LRStateSpaceModel(StateSpaceModel):
 
     @property
     def shape(self):
+        """
+        Dimensions of the model as `(p, q, T)`.
+
+        Returns
+        -------
+        tuple of (int or None, int or None, int or None)
+            `p` : total number of observed sites stacked across all response
+            variables (from `y_train`/`Xbeta`, whichever is set).
+            `q` : total latent dimension (rank), i.e. the sum of
+            `cov.fem_solver.n_inner_points` over every latent factor set in
+            `setup`. `T` : number of time steps. Any entry is `None` if the
+            corresponding data (`y_train`/`Xbeta`, `_cov_matern`) has not
+            been set yet.
+        """
         p = None
         q = None
         T = None
@@ -526,7 +636,66 @@ class LRStateSpaceModel(StateSpaceModel):
 
     @_on_device
     def sim(self, formulas:list = None , seed=1234, params: ModelParams = None, verbose=None, stats=False):
-        
+        """
+        Simulate data from the low-rank state-space model.
+
+        Builds the model matrices `H`, `R`, `F`, `Q` from `params` (or from
+        default initial values if a field is left unset, see `_parseParams`)
+        and the latent covariance functions set in `setup`, then delegates
+        to the parent class's `StateSpaceModel.sim`.
+
+        Parameters
+        ----------
+        formulas : list of str, optional
+            Patsy/R-style formulas (right-hand side only is used to build
+            `Xbeta`, e.g. `"1 + temperature"`), one per response variable,
+            used to build a fresh observation grid/design matrix for the
+            simulation. If `None`, reuses the design matrix/grid the model
+            was built with at `__init__` (`self.Xbeta`, `self.points`, ...).
+            `self.formulas` must not be `None` in that case.
+        seed : int, default 1234
+            Random seed for the simulation, forwarded to
+            `StateSpaceModel.sim`.
+        params : ModelParams, optional
+            Model parameters to simulate with (`beta`, `A`, `s2e`, `f`,
+            `ks`, one `Param` each). Fields left as `None` fall back to the
+            model's default initial values (see `_parseParams`). `ks`, if
+            given, is also written into each covariance function's
+            `rescale` attribute (`self.cov_function[i].rescale`).
+        verbose : bool, optional
+            Overrides `self.verbose` for this call's logging.
+        stats : bool, default False
+            If `True`, asks `StateSpaceModel.sim` to also compute and
+            return variance diagnostics of the simulated state/observations
+            (see `StateSpaceModel.summarize_ssm_variances`).
+
+        Returns
+        -------
+        y_sim : ndarray
+            Simulated observations, stacked across all response variables
+            (shape `(p, T)`, `p = sum(pdim)`).
+        x_sim : ndarray
+            Simulated latent state trajectory (shape `(q, T)`).
+        info : dict
+            Metadata about the simulation: `formulas`, `y_name`,
+            `xbeta_names`, `Xbeta`, `params`, `points`, `T`, `stats`
+            (variance diagnostics, if `stats=True`), `qdim`, `nvar`, `nlat`,
+            `pdim`, `block_p`, `block_q`, and the ad-hoc `sim_model`
+            (a plain `StateSpaceModel` built with the matrices used for the
+            simulation).
+        tdelta : float
+            Wall-clock time (seconds) spent in `StateSpaceModel.sim`.
+
+        Raises
+        ------
+        ValueError
+            If `formulas` and `self.formulas` are both `None`; if the
+            covariance functions have not been set via `setup`; or if the
+            shapes of `beta`, `A`, or `ks` in `params` are inconsistent with
+            the model (`Xbeta`'s width, `(nvar, nlat)`, and the number of
+            covariance functions, respectively).
+        """
+
         if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
         
@@ -671,8 +840,47 @@ class LRStateSpaceModel(StateSpaceModel):
     @_on_device
     def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
         """
-        Internal method to predict the response variable for the given points (or all points if None) using the fitted model parameters.
-        """ 
+        Out-of-sample prediction of the response variable(s) at new
+        locations/times, from an already-fitted model.
+
+        For each formula, builds a new design matrix/grid over `df` by
+        reusing the formula's fitted `DesignMatricesBuilder`
+        (`self.builders`, see `_buildPredictionGrid`) -- so stateful
+        transforms in the formula (e.g. `standardize()`) are evaluated with
+        the training mean/std rather than recomputed on `df` -- then maps
+        the fitted model's smoothed states (`modelresults.x_smoothed`,
+        `modelresults.P_smoothed`) through the new observation matrix `H`
+        and design matrix to get the predictive mean and covariance (see
+        `_predict`).
+
+        Parameters
+        ----------
+        df : geopandas.GeoDataFrame
+            New locations/times to predict at, with the same columns
+            required by the model's formulas (minus the response, which is
+            not needed for prediction) and the same CRS as the training
+            data.
+        modelresults : LRStateSpaceResults
+            Results of a previous `fit()` call, providing the estimated
+            parameters (`modelresults.params`) and smoothed states used to
+            build the prediction. Updated and returned in place.
+        verbose : bool, default True
+            Verbosity for the observation-grid/design-matrix construction
+            logging.
+
+        Returns
+        -------
+        LRStateSpaceResults
+            The same `modelresults` object, with `points_pred`,
+            `y_pred_list`, `Sigma_y_pred_list`, `tdelta_pred`,
+            `timestamps_pred`, and `crs_pred` populated (one entry per
+            response variable, except `tdelta_pred`/`crs_pred`).
+
+        Raises
+        ------
+        ValueError
+            If `modelresults` is `None`.
+        """
         self._log("Predicting response variable...")
 
         # Compute the design matrices via each formula's fitted builder
@@ -784,6 +992,51 @@ class LRStateSpaceModel(StateSpaceModel):
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
     ):
+        """
+        Estimate the model parameters with an EM algorithm.
+
+        Each EM iteration alternates: an E-step (`_E_step`) that runs the
+        parent class's Kalman filter/smoother given the current parameters
+        to get the smoothed states/covariances and the sufficient
+        statistics `S11`/`S10`/`S00`, plus the observed-data
+        log-likelihood; and an M-step (`_M_step`) that updates `beta`
+        (regression coefficients), `s2e` (measurement-error variances),
+        `f` (latent factors' AR(1) coefficients), `A` (loading matrix), and
+        `ks` (Matern rescale/range parameters, one per covariance function,
+        optimised with L-BFGS-B against exact JAX gradients -- see
+        `_build_ks_value_and_grad`) from those statistics. Iteration stops
+        when the relative change in log-likelihood drops to `tol_relat` or
+        `max_iter` iterations are reached (see `FitOptions`).
+
+        Parameters
+        ----------
+        params0 : ModelParams, optional
+            Initial/fixed values for the parameters. Any field left as
+            `None` is filled in with data-driven initial values (OLS `beta`,
+            moment-based `s2e`/`A`, a mesh-based initial `ks`, ... -- see
+            `_getInitialValues`); a field with `fixed=True` on its `Param`
+            is held at its given value and excluded from the M-step updates
+            for the whole run (see `_updateParams`). If `None`, every
+            parameter is initialised and freely estimated.
+        options : FitOptions, optional
+            EM stopping-rule and logging options: `max_iter` caps the
+            number of EM iterations, `tol_relat` is the relative
+            log-likelihood-improvement tolerance below which EM is
+            considered converged, and `verbose` overrides `self.verbose`
+            for the whole call (including the per-iteration log printed via
+            `logger`). Defaults to `max_iter=100`, `tol_relat=1e-3` if not
+            given (note this differs from `FitOptions`'s own dataclass
+            defaults, which are only used if `options` itself is `None`
+            -- passing an explicit `FitOptions()` uses its `max_iter=20`).
+
+        Returns
+        -------
+        LRStateSpaceResults
+            The fitted results: estimated parameters, per-iteration EM
+            statistics (`nstats`/`llf_path`), in-sample fitted values
+            (`y_hat`/`y_hat_list` and their covariances), the smoothed
+            states, and the sufficient statistics `S11`/`S10`/`S00`.
+        """
 
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
@@ -1034,9 +1287,20 @@ class LRStateSpaceModel(StateSpaceModel):
 
     @property
     def cov_function(self):
+        """
+        list of spdeAppoxCov : The latent covariance functions set by
+        `setup`, one per latent factor (`self._cov_matern`); `None` (or an
+        empty list) until `setup` has been called.
+        """
         return self._cov_matern
 
     def _E_step(self, y_t):
+        """
+        EM E-step: run the parent class's Kalman filter/smoother
+        (`StateSpaceModel.estimate`, `light=True`) at the current
+        parameters to get the smoothed states/covariances, the sufficient
+        statistics `S11`/`S10`/`S00`, and the log-likelihood.
+        """
 
         # E step: compute the expected values of the latent factors and the log-likelihood
         # 1) Create the SSM object with the current parameters
@@ -1086,6 +1350,13 @@ class LRStateSpaceModel(StateSpaceModel):
         Phi,
         ks_value_and_grad,
     ):
+        """
+        EM M-step: given the E-step's smoothed states/sufficient statistics,
+        update `f` (closed form), `beta` (`_compute_beta_jax_kernel`), `s2e`
+        (`_compute_s2e_jax_kernel`), `A` (`_compute_A2_jax_kernel`), and
+        `ks` (L-BFGS-B against `ks_value_and_grad`), and package them into a
+        new `ModelParams` via `_createParams`.
+        """
 
         # convert all input to save memory
         p, T = y_t.shape
@@ -1227,6 +1498,9 @@ class LRStateSpaceModel(StateSpaceModel):
 
     # %[Utils] Argmin problem, JAX  (M-step, rescale)
     def _minf(self, params, est_covList, T, Omega):
+        """Plain NumPy/SciPy-sparse (derivative-free) version of the M-step's
+        `ks` objective; superseded by the JAX value-and-gradient objective
+        built in `_build_ks_value_and_grad`, kept here for reference."""
         ks = np.exp(params)  # Stability, add small eps to avoid zeros
 
         # Compute the precision and the logdetQ (sparse matrix)
@@ -1332,8 +1606,14 @@ class LRStateSpaceModel(StateSpaceModel):
         return jax.jit(jax.value_and_grad(objective))
 
     def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
+        """
+        Build a `ModelParams -> scalar` closure computing the observed
+        log-likelihood at fixed `y_obs`/`Xbeta`/`x0`/`Sigma0`, used by
+        `LRStateSpaceResults._compute_hessian` to differentiate the
+        log-likelihood w.r.t. the free parameters via `jax.hessian`.
+        """
 
-        
+
         # Compute the FEM basis functions for the latent field
         basis = self._buildBasis_list(self.points, self.cov_function)
 
@@ -1448,6 +1728,13 @@ class LRStateSpaceModel(StateSpaceModel):
         return jax.scipy.linalg.block_diag(*invQ_blocks)
 
     def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
+        """
+        Compute data-driven initial parameter values used by `fit()` when
+        `params0` (or one of its fields) is not provided: OLS/moment-based
+        `beta`/`s2e`/`A`/`f`/`x0`/`Sigma0` (`_compute_inital_values_jax_kernel`)
+        and a mesh-based initial `ks` (from each covariance function's
+        FEM bounding box).
+        """
 
         # Compute the initial values of the parameters
         est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_A = (
@@ -1473,6 +1760,7 @@ class LRStateSpaceModel(StateSpaceModel):
     def _createParams(
         self, est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_ks, est_A
     ):
+        """Package raw parameter arrays into a `ModelParams` of (free) `Param`s."""
         est_params = ModelParams(
             beta=Param("beta", est_beta),
             s2e=Param("s2e", est_s2e),
@@ -1486,6 +1774,9 @@ class LRStateSpaceModel(StateSpaceModel):
         return est_params
 
     def _parseParams(self, params0: ModelParams | None):
+        """Return `params0` unchanged, or an all-`None`/free `ModelParams`
+        placeholder if `params0` is `None` (filled in later, e.g. by
+        `_getInitialValues`/`_updateParams0`)."""
 
         return (
             params0
@@ -1535,8 +1826,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def _updateParams0(self, params0: ModelParams, updates: ModelParams) -> ModelParams:
         """
-        Update parameters using values from `updates`,
-        respecting the `fixed` flags and handling None initial values.
+        Merge user-supplied `params0` (from `fit(params0=...)`) with the
+        data-driven `updates` (from `_getInitialValues`): a field already
+        set on `params0` (`.value is not None`) -- whether free or fixed --
+        is kept as-is; a field left as `None` on `params0` is filled in
+        from `updates`. Called once, before the EM loop starts.
         """
 
         updated_fields = {}
@@ -1566,6 +1860,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
+        """
+        Evaluate each latent factor's FEM basis functions at each response
+        variable's observation sites, row-normalised so each site's basis
+        row sums to 1 (see `_normalize_rows_sparse`). Returns a nested list
+        `basis[p][q]` (dense array, shape `(n_p, q_inner)`), one entry per
+        (response variable, latent factor) pair, used by `_buildH_dense` to
+        build the measurement matrix `H = A ⊗ basis` (loading-weighted).
+        """
         nvar = len(points)
         nlat = len(hmesh)
 
@@ -1624,6 +1926,10 @@ class LRStateSpaceModel(StateSpaceModel):
         return rdiag_vec, fdiag_vec
 
     def _buildH_dense(self, A, basis):
+        """Build the dense measurement matrix `H` by scaling each
+        (variable, latent factor) basis block from `_buildBasis_list` by the
+        corresponding loading `A[p, q]` and stacking them into one block
+        matrix."""
 
         nvar, nlat = A.shape
 
@@ -1804,6 +2110,10 @@ class LRStateSpaceModel(StateSpaceModel):
         return points, dfs, ndim, pdim, block_p, T
     
     def _buildDesignMatrix(self, gridList):
+        """Stack each formula's per-variable response (`y_train`, vstacked)
+        and fixed-effect design matrix (`Xbeta`, block-diagonal across
+        variables via `block_diag_3D`) into the model-wide arrays consumed
+        by `StateSpaceModel`."""
 
         Ylist = [grid.y for grid in gridList if grid.y is not None]
 
@@ -1836,7 +2146,30 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def logger(self, stats, beta_decimals=2, scalar_decimals=2, relat_decimals=5):
         """
-        Nicely formatted iteration logger for optimization/Kalman filter loops.
+        Format one EM iteration's statistics (as built by `_log_iteration`)
+        into a human-readable, multi-line block for console logging during
+        `fit()`.
+
+        Parameters
+        ----------
+        stats : dict
+            One entry of the `nstats` history produced by `_log_iteration`
+            (keys `niter`, `logL`, `deltaL`, `relatL`, `beta`, `s2e`, `f`,
+            `ks`, `opt_success`, `A`, `x0`, `Sigma0`, `time_tot`,
+            `tdelta_E`, `tdelta_M`).
+        beta_decimals : int, default 2
+            Decimal places used to format `stats["beta"]`.
+        scalar_decimals : int, default 2
+            Decimal places used to format the other numeric fields
+            (log-likelihood, `s2e`, `f`, `ks`, `A`, `x0`, `Sigma0`, timings).
+        relat_decimals : int, default 5
+            Decimal places used to format the relative log-likelihood
+            change `stats["relatL"]`.
+
+        Returns
+        -------
+        str
+            The formatted, multi-line iteration summary.
         """
 
         # --- Identify and format scalars vs arrays ---
@@ -1919,6 +2252,26 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
 
     def generate_summary(self, print_full=True):
+        """
+        Build the left/right key-value rows used by `summary()`'s header
+        table: model name/type/shape, then (if `print_full=True`) one
+        "Grid ..." section per response variable's `DesignMatrices` and one
+        "Latent. ..." section per latent covariance function, each via that
+        object's own `generate_summary`.
+
+        Parameters
+        ----------
+        print_full : bool, default True
+            If `False`, only the top model-level rows are returned (used
+            when this table is embedded elsewhere, e.g. by
+            `LRStateSpaceResults.generate_summary`, without repeating the
+            per-grid/per-covariance detail).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, of equal length.
+        """
 
         # top-left / top-right small tables
         p = self.shape[0] if hasattr(self, "shape") else "N/A"
@@ -2046,7 +2399,25 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             return gen_top_left, gen_top_right 
 
     def summary(self, print_full=True) -> Summary:
-        """Return or print a structured summary of the model."""
+        """
+        Return a `statsmodels`-style structured summary of the model
+        (before fitting -- for the fitted results' own summary, see
+        `LRStateSpaceResults.summary`).
+
+        Parameters
+        ----------
+        print_full : bool, default True
+            If `True`, includes one section per response variable's
+            observation grid and one per latent covariance function (see
+            `generate_summary`); if `False`, only the top model-level rows
+            (name, type, shape) are included -- used by `fit()` to print a
+            compact header before the EM iterations start.
+
+        Returns
+        -------
+        statsmodels.iolib.summary.Summary
+            Printable summary object (`str(...)`/`print(...)`).
+        """
         self.model = SimpleNamespace()
 
         # Generate the summary tables
@@ -2109,13 +2480,16 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return "\n".join(lines)
  
     def _is_verbose(self, verbose=None) -> bool:
+        """Resolve an optional per-call `verbose` override against `self.verbose`."""
         return self.verbose if verbose is None else verbose
 
     def _log(self, msg: str, verbose=None) -> None:
+        """Print `msg` via `print_info` if verbose (see `_is_verbose`)."""
         if self._is_verbose(verbose):
             self.print_info(msg)
 
     def print_info(self, msg):
+        """Print `msg` prefixed with a UTC timestamp."""
 
         dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
         print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
