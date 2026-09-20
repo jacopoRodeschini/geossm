@@ -127,14 +127,15 @@ opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
 
-#print(results)  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
-print(results.summary(hessian=False, alpha=0.05))  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
-
-print(results.summary(hessian=True, alpha=0.05)) 
+# before compute_cov_params(): bse/t/p/CI show as NaN placeholders
+print(results.summary(alpha=0.05))
 
 # %% Compute the standard errors of the parameters
 
 hessian = results.compute_cov_params()
+
+# after compute_cov_params(): summary() now shows the real bse/t/p/CI
+print(results.summary(alpha=0.05))
 
 # %% Get the model parameter inference
 
