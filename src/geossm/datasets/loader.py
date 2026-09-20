@@ -1,3 +1,13 @@
+"""
+Loaders for the example datasets bundled with geossm.
+
+Each dataset is a pair of files packaged under
+``geossm/datasets/data`` (a Parquet table of observations) and
+``geossm/datasets/shapefiles`` (an optional Shapefile describing the
+region the observations cover). See `list_datasets` for the currently
+available names.
+"""
+
 from importlib import resources
 import pandas as pd
 import geopandas as geopd
@@ -9,6 +19,33 @@ _AVAILABLE = {
 
 
 def load_dataset(name: str, return_geometry: bool = True):
+    """
+    Load one of the example datasets bundled with geossm.
+
+    Parameters
+    ----------
+    name : str
+        Dataset identifier, e.g. ``"agrimonia"``. See `list_datasets`
+        for the full list of names currently bundled with the package.
+    return_geometry : bool, default True
+        If `True`, also return the dataset's region shapefile (e.g. an
+        administrative boundary) as a :class:`geopandas.GeoDataFrame`,
+        when one is available for `name`. If `False`, only the
+        observations table is returned.
+
+    Returns
+    -------
+    df : pandas.DataFrame or geopandas.GeoDataFrame
+        The dataset's observations, as stored in its Parquet file.
+    gdf : geopandas.GeoDataFrame
+        The dataset's region shapefile. Only returned when
+        `return_geometry` is `True`.
+
+    Raises
+    ------
+    ValueError
+        If `name` is not one of the bundled dataset identifiers.
+    """
     if name not in _AVAILABLE:
         raise ValueError(
             f"Unknown dataset '{name}'. " f"Available datasets: {list(_AVAILABLE)}"

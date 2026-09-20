@@ -1,3 +1,14 @@
+"""
+Parameter containers for :class:`~geossm.stmodel.LRStateSpaceModel`.
+
+`Param` wraps a single named parameter (value, whether it is fixed
+during estimation, and its standard error once fit); `ModelParams`
+groups the full set of parameters a low-rank state-space model
+estimates. Both are registered as JAX pytrees so they can be passed
+directly through ``jax.grad``/``jax.jit`` during `fit`. `FitOptions`
+configures the EM stopping rule used by `fit`.
+"""
+
 from dataclasses import dataclass, replace
 import jax
 import jax.numpy as jnp
@@ -23,6 +34,21 @@ def _safe_asarray(value):
 
 @dataclass
 class FitOptions:
+    """
+    Stopping-rule and logging options for :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
+
+    Parameters
+    ----------
+    max_iter : int, default 20
+        Maximum number of EM iterations to run.
+    tol_relat : float, default 1e-3
+        Relative log-likelihood-improvement tolerance below which the EM
+        iteration is considered converged and stops early (before
+        `max_iter` is reached).
+    verbose : bool, default True
+        If `True`, log per-iteration progress during `fit`.
+    """
+
     max_iter: int = 20
     tol_relat: float = 1e-3
     verbose: bool = True
@@ -45,6 +71,33 @@ class FitOptions:
 @tree_util.register_pytree_node_class
 @dataclass
 class Param:
+    """
+    A single named model parameter, with its value, fixed/free status,
+    and (once available) standard error.
+
+    Registered as a JAX pytree: when `fixed` is `False`, `value` is the
+    single differentiable leaf (so `Param` instances can be passed
+    directly through ``jax.grad``); `name`, `fixed` and `bse` are static
+    (non-differentiable) auxiliary data. A fixed parameter (or one with
+    `value=None`) has no leaves at all, so it is excluded from
+    gradient-based updates during :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
+
+    Parameters
+    ----------
+    name : str
+        Parameter name (e.g. ``"beta"``, ``"s2e"``).
+    value : jax.numpy.ndarray or None
+        Current parameter value. `None` before an initial value has been
+        set.
+    fixed : bool, default False
+        If `True`, the parameter is held at `value` and excluded from
+        estimation in `fit`; if `False`, it is estimated.
+    bse : jax.numpy.ndarray or None, default None
+        Standard error(s) of `value`, filled in by
+        :meth:`~geossm.stmodel.LRStateSpaceResults.compute_cov_params`.
+        `None` until then.
+    """
+
     name: str
     value: jnp.ndarray | None
     fixed: bool = False
@@ -58,23 +111,41 @@ class Param:
             self.bse = _safe_asarray(self.bse)
 
     def set(self, new_value):
-        """Update parameter value if not fixed."""
+        """
+        Return a copy of this parameter with `value` replaced.
+
+        No-op (returns `self` unchanged) if the parameter is `fixed`.
+
+        Parameters
+        ----------
+        new_value : array_like
+            Replacement value.
+
+        Returns
+        -------
+        Param
+            A new `Param` with the updated value (or `self`, if fixed).
+        """
         if self.fixed:
             return self
         return Param(name=self.name, value=new_value, fixed=self.fixed)
 
     def freeze(self):
+        """Return a copy of this parameter with `fixed=True`."""
         return Param(self.name, self.value, True)
 
     def unfreeze(self):
+        """Return a copy of this parameter with `fixed=False`."""
         return Param(self.name, self.value, False)
 
     @property
     def shape(self):
+        """tuple or None: Shape of `value`, or `None` if `value` is `None`."""
         return self.value.shape if self.value is not None else None
 
     @property
     def size(self):
+        """int: Number of elements in `value` (0 if `value` is `None`)."""
         return self.value.size if self.value is not None else 0
 
     def __len__(self):
@@ -125,6 +196,39 @@ class Param:
 @tree_util.register_pytree_node_class
 @dataclass
 class ModelParams:
+    """
+    The full set of parameters estimated by :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
+
+    Each field is a :class:`Param` (wrapping a value, fixed/free status,
+    and standard error); passing a plain array-like instead of a `Param`
+    for any field is allowed and is converted to a free (non-fixed)
+    `Param` automatically (see `_ensure_param`). Registered as a JAX
+    pytree, so a `ModelParams` can be passed directly through
+    ``jax.grad``/``jax.jit``.
+
+    Parameters
+    ----------
+    beta : Param or array_like, optional
+        Regression coefficients for the model's exogenous covariates.
+    s2e : Param or array_like, optional
+        Measurement-error (observation noise) variance(s).
+    f : Param or array_like, optional
+        AR(1) coefficient(s) of the latent spatial factor(s)' temporal
+        evolution.
+    A : Param or array_like, optional
+        Loading matrix linking the latent spatial factor(s) to the
+        observations.
+    ks : Param or array_like, optional
+        Matérn rescale/range parameter(s) of the latent covariance
+        function(s) (one per factor).
+    x0 : Param or array_like, optional
+        Mean of the initial latent state, as in
+        :class:`~geossm.ssm.StateSpaceModel`.
+    Sigma0 : Param or array_like, optional
+        Covariance of the initial latent state, as in
+        :class:`~geossm.ssm.StateSpaceModel`.
+    """
+
     beta: Param | None = None
     s2e: Param | None = None
     f: Param | None = None
@@ -152,9 +256,11 @@ class ModelParams:
         return Param(name=name, value=_safe_asarray(value), fixed=False)
 
     def as_dict(self):
+        """dict: Map each field name to its `Param.value` (fixed and free)."""
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}
 
     def free_params(self):
+        """dict: Map each non-fixed field name to its `Param.value`."""
         return {
             k: getattr(self, k).value
             for k in self.__dataclass_fields__

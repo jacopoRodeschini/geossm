@@ -102,9 +102,9 @@ mesh_io = buildMesh(domain, 0.1, points, lc_buffer=0.5)
 print(mesh_io)
 
 
-# %% Create the covariance function    
-cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-cov_fun = cov_fun.setup(mesh_io)
+# %% Create the covariance function
+cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+cov_fun = cov_fun.setup(mesh_io, domain=domain)
 
 print(cov_fun.summary())
 
@@ -174,8 +174,8 @@ plt.show()
 # %% Build the lrssm and set the covariance function
 
 
-model = lrssm(df=gdf, domain=[domain], verbose=True, backend="gpu")
-model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+model = lrssm(df=gdf, formulas=None, domain=[domain], verbose=True, backend="gpu")
+model = model.setup(cov_fun=[cov_fun])
 
 print(model)
 
@@ -237,9 +237,9 @@ plt.show()
 # 0) Create the geopandas dataframe with the simulated data
 gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-# 1) Create the covariance matrix 
-est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-est_cov_fun = est_cov_fun.setup(mesh_io)
+# 1) Create the covariance matrix
+est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2)
+est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
 # 2) Create the model
 model = lrssm(
@@ -249,8 +249,8 @@ model = lrssm(
     verbose=True)
 
 
-# 3) Set up the model cov. 
-model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+# 3) Set up the model cov.
+model = model.setup(cov_fun=[est_cov_fun])
 print(model)
 
 # %% 4) fit the model 

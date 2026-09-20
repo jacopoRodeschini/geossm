@@ -18,7 +18,7 @@ from geossm import datasets
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
-from geossm.covmodel import FEMSolver
+from geossm.covmodel import FEMSolver, spdeAppoxCov
 from pathlib import Path
 
 # %% Download the the Full agrimonia dataset from zenodo repository
@@ -138,9 +138,9 @@ fem_solver.plot_mesh(ax=ax)
 
 # %% Set up the lrssm model (univiarte latent)
 
-# add the mesh object and the domain where the laten domain is defined
-# if None it is assumed to be the same of the observation
-model = model.setup([mesh_io])
+# build the latent covariance function on the mesh, then attach it to the model
+cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[Polygon(buffer)])
+model = model.setup(cov_fun=[cov_fun])
 
 
 # %% Estimate the Model (default estimation options)

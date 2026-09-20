@@ -91,7 +91,7 @@ print(model.F.device)
 # %% Simulate the model
 
 # Use the default Xbeta (see the ssm() for details)
-y_sim, x_sim, tdelta = model.sim(seed=1234)
+y_sim, x_sim, stats, tdelta = model.sim(seed=1234)
 print("Simulate response y:", y_sim.shape)
 print("Simulate stete x:", x_sim.shape)
 print("Computation time tDelta (s):", tdelta)

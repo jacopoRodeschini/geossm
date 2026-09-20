@@ -26,7 +26,7 @@ domain = list(shape.geometry[0].geoms)[0]
 
 # %% Build the mesh for the AQ_pm10 observed variable
 
-mesh_io, buffer = buildMesh2d(points, boundary=domain.boundary, offset=0.3, 
+mesh_io, buffer = buildMesh2d(points, domain=domain, offset=0.3,
     max_edge=0.35, min_edge=0.05, lowrank=0.75, density_neighbors=4)
 print(mesh_io)
 
@@ -45,7 +45,7 @@ ax.set_ylabel("Latitude")
 from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
 
 
-covf = MaternCov([domain], latlon=True, nu=1, var=1.0, rescale=1.0)
-covf = covf.setup(mesh_io)
+covf = MaternCov(latlon=True, nu=1, var=1.0, rescale=1.0)
+covf = covf.setup(mesh_io, domain=domain)
 
 print(covf.summary()) 
