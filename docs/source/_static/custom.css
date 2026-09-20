@@ -1,0 +1,17 @@
+/* Minimal overrides on top of the Furo theme. Keep this small: prefer
+ * Furo's built-in theming (light/dark mode, spacing, typography) over
+ * custom rules. */
+
+:root {
+  --geossm-code-font-size: 0.85em;
+}
+
+/* Keep API signatures and code blocks compact and readable. */
+.sig-name, .sig-prename, code, pre {
+  font-size: var(--geossm-code-font-size);
+}
+
+/* Math should not overflow narrow viewports (mobile). */
+.math {
+  overflow-x: auto;
+}
