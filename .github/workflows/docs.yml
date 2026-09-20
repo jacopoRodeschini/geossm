@@ -6,8 +6,8 @@ name: Documentation
 #
 # geossm depends on a few native/mesh packages (gmsh, mfem, jax) that are
 # installed via Conda in local development (see environment.yml) rather
-# than plain pip; this workflow mirrors that and installs the same Conda
-# environment so the package - and therefore `sphinx.ext.autodoc` - can
+# than plain pip; this workflow installs them from conda-forge (unpinned,
+# see the steps below) so the package - and `sphinx.ext.autodoc` - can
 # actually be imported.
 on:
   push:
@@ -44,14 +44,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up the geossm Conda environment
+      # environment.yml pins exact versions (e.g. pyarrow=24.0.0, jax=0.6.2)
+      # that are not co-installable on a CPU-only runner (the pinned pyarrow
+      # build pulls CUDA / a different libabseil). The docs build only needs
+      # the package to be importable, so install the native geospatial/mesh
+      # stack from conda-forge unpinned and let pip resolve the rest from
+      # pyproject.toml.
+      - name: Set up Conda (native geospatial/mesh stack)
         uses: conda-incubator/setup-miniconda@v3
         with:
-          environment-file: environment.yml
-          activate-environment: geossm
+          python-version: "3.12"
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: geossm-docs
           miniforge-version: latest
 
-      - name: Install documentation dependencies
+      - name: Install native dependencies from conda-forge
+        shell: bash -el {0}
+        run: conda install -y geopandas shapely pyarrow gmsh python-gmsh
+
+      - name: Install geossm and documentation dependencies
         shell: bash -el {0}
         run: pip install -e ".[docs]"
 
