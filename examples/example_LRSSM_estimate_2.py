@@ -102,9 +102,9 @@ mesh_io = buildMesh(domain, 0.1, points, lc_buffer=0.5)
 print(mesh_io)
 
 
-# %% Create the covariance function    
-cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-cov_fun = cov_fun.setup(mesh_io)
+# %% Create the covariance function
+cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+cov_fun = cov_fun.setup(mesh_io, domain=domain)
 
 print(cov_fun.summary())
 
@@ -117,7 +117,7 @@ ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
-plt.show()
+# plt.show()
 
 
 # %% Build the geopandas dataframe
@@ -173,8 +173,9 @@ plt.show()
 
 # %% Build the lrssm and set the covariance function
 
-model = lrssm(df=gdf, domain=[domain], verbose=True)
-model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+
+model = lrssm(df=gdf, formulas=None, domain=[domain], verbose=True, backend="gpu")
+model = model.setup(cov_fun=[cov_fun])
 
 print(model)
 
@@ -183,10 +184,6 @@ print(model)
 
 # %% Create the model parameters for the simulation
 params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[20], f=[0.7])
-
-# %% 
-
-# print also the variance summary
 y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
 
 # %% Plot one response variable time series and state
@@ -240,9 +237,9 @@ plt.show()
 # 0) Create the geopandas dataframe with the simulated data
 gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-# 1) Create the covariance matrix 
-est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-est_cov_fun = est_cov_fun.setup(mesh_io)
+# 1) Create the covariance matrix
+est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2)
+est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
 # 2) Create the model
 model = lrssm(
@@ -252,8 +249,8 @@ model = lrssm(
     verbose=True)
 
 
-# 3) Set up the model cov. 
-model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+# 3) Set up the model cov.
+model = model.setup(cov_fun=[est_cov_fun])
 print(model)
 
 # %% 4) fit the model 
@@ -264,3 +261,5 @@ opt.tol_relat = 1e-5
 
 results = model.fit(options=opt)
 print(results)
+
+

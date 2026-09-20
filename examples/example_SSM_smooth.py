@@ -29,7 +29,7 @@ beta = np.ones(b)
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
 
 # simulate the data
-y_sim, x_sim, tdelta = model.sim(seed=1234)
+y_sim, x_sim, stats, tdelta = model.sim(seed=1234)
 
 # smooth the state
 results = model.smoother(y_sim)
@@ -95,7 +95,7 @@ for sigma2 in np.linspace(0.1, 10, num=num):
     model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta)
 
     # simulate the data
-    y_sim, x_sim, tdelta = model.sim(seed=1234)
+    y_sim, x_sim, stats, tdelta = model.sim(seed=1234)
 
     # smooth the state
     res = model.smoother(y_sim)
@@ -121,7 +121,7 @@ plt.show()
 seed = jax.random.PRNGKey(1234)
 
 stream = KeyStream(seed)
-y_sim, x_sim, tdelta = model.sim(seed=stream)
+y_sim, x_sim, stats, tdelta = model.sim(seed=stream)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))
@@ -148,7 +148,7 @@ class mystream(KeyStream):
 
 
 stream = mystream()
-y_sim, x_sim, tdelta = model.sim(seed=stream)
+y_sim, x_sim, stats, tdelta = model.sim(seed=stream)
 
 # plot one time-series
 fig, ax = plt.subplots(figsize=(10, 6))

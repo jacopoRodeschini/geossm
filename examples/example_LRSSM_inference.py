@@ -18,7 +18,7 @@ import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
-from geossm.covmodel import FEMSolver
+from geossm.covmodel import FEMSolver, spdeAppoxCov
 
 # %% Load the agrimonia dataset
 
@@ -114,9 +114,9 @@ fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
 
 # %% Set up the lrssm model (univiarte latent)
 
-# add the mesh object and the domain where the laten domain is defined
-# if None it is assumed to be the same of the observation
-model = model.setup([mesh_io])
+# build the latent covariance function on the mesh, then attach it to the model
+cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[Polygon(buffer)])
+model = model.setup(cov_fun=[cov_fun])
 
 
 # %% Estimate the Model (default estimation options)
@@ -127,14 +127,15 @@ opt.tol_relat = 1e-3
 
 results = model.fit(options=opt)
 
-#print(results)  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
-print(results.summary(hessian=False, alpha=0.05))  # resutls.summary(hessian=True, alpha=0.05) can be used to get a summary of the results
-
-print(results.summary(hessian=True, alpha=0.05)) 
+# before compute_cov_params(): bse/t/p/CI show as NaN placeholders
+print(results.summary(alpha=0.05))
 
 # %% Compute the standard errors of the parameters
 
 hessian = results.compute_cov_params()
+
+# after compute_cov_params(): summary() now shows the real bse/t/p/CI
+print(results.summary(alpha=0.05))
 
 # %% Get the model parameter inference
 

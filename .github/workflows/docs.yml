@@ -1,0 +1,101 @@
+name: Documentation
+
+# Builds the Sphinx documentation and, on pushes to `main`, deploys it to
+# GitHub Pages. Pull requests only get a build check (broken docs should
+# not merge), they are never deployed.
+#
+# geossm depends on a few native/mesh packages (gmsh, mfem, jax) that are
+# installed via Conda in local development (see environment.yml) rather
+# than plain pip; this workflow installs them from conda-forge (unpinned,
+# see the steps below) so the package - and `sphinx.ext.autodoc` - can
+# actually be imported.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "examples/**"
+      - "pyproject.toml"
+      - "environment.yml"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [develop, main]
+    paths:
+      - "docs/**"
+      - "src/**"
+      - "examples/**"
+      - "pyproject.toml"
+      - "environment.yml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "docs-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Sphinx docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # environment.yml pins exact versions (e.g. pyarrow=24.0.0, jax=0.6.2)
+      # that are not co-installable on a CPU-only runner (the pinned pyarrow
+      # build pulls CUDA / a different libabseil). The docs build only needs
+      # the package to be importable, so install the native geospatial/mesh
+      # stack from conda-forge unpinned and let pip resolve the rest from
+      # pyproject.toml.
+      - name: Set up Conda (native geospatial/mesh stack)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: "3.12"
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: geossm-docs
+          miniforge-version: latest
+
+      - name: Install native dependencies from conda-forge
+        shell: bash -el {0}
+        run: conda install -y geopandas shapely pyarrow gmsh python-gmsh
+
+      - name: Install geossm and documentation dependencies
+        shell: bash -el {0}
+        run: pip install -e ".[docs]"
+
+      - name: Build HTML docs
+        shell: bash -el {0}
+        run: sphinx-build -b html docs/source docs/build/html
+
+      - name: Upload built docs as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: geossm-docs-html
+          path: docs/build/html
+          retention-days: 7
+
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/build/html
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

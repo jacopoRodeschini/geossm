@@ -1,0 +1,1126 @@
+import warnings
+
+import gmsh
+import meshio
+import numpy as np
+import pygmsh
+import shapely
+from scipy.cluster.vq import kmeans2
+from scipy.spatial import cKDTree, Delaunay, QhullError
+from scipy.spatial.distance import cdist
+from shapely.geometry import MultiPoint, MultiPolygon, Polygon
+from shapely.ops import unary_union
+
+
+# % Utility functions
+
+def _flatten_polygons(geom):
+    """Flatten a Polygon / MultiPolygon / (possibly nested) list of these
+    into a plain list of Polygons."""
+    if isinstance(geom, (list, tuple)):
+        polys = []
+        for g in geom:
+            polys.extend(_flatten_polygons(g))
+        return polys
+    if isinstance(geom, MultiPolygon):
+        return list(geom.geoms)
+    if isinstance(geom, Polygon):
+        return [geom]
+    raise TypeError(
+        "domain must be a Polygon, a MultiPolygon, or a (possibly "
+        f"nested) list of these; got {type(geom)}."
+    )
+
+
+def _mesh_min_angle(mesh):
+    """Smallest interior angle (degrees) over all triangles of a meshio mesh."""
+    tri = mesh.cells_dict.get("triangle")
+    if tri is None or len(tri) == 0:
+        return np.nan
+
+    pts = mesh.points[:, :2]
+    p0, p1, p2 = pts[tri[:, 0]], pts[tri[:, 1]], pts[tri[:, 2]]
+
+    angles = []
+    for a, b, c in ((p0, p1, p2), (p1, p2, p0), (p2, p0, p1)):
+        u, v = b - a, c - a
+        cos_t = np.einsum("ij,ij->i", u, v) / (
+            np.linalg.norm(u, axis=1) * np.linalg.norm(v, axis=1)
+        )
+        angles.append(np.degrees(np.arccos(np.clip(cos_t, -1.0, 1.0))))
+
+    return float(np.min(angles))
+
+
+def _prepare_domain(points, domain, max_edge, min_edge, offset, cutoff):
+    """Shared setup for buildMesh2d/buildMesh2d_density: normalizes `domain`
+    (Polygon, MultiPolygon, or a possibly nested list of these) into the
+    scientific-interest domain and the convex hull used to build the mesh,
+    fills in max_edge/min_edge/offset/cutoff defaults, merges near-
+    duplicate points, and buffers the domain's hull.
+
+    Returns
+    -------
+    points : (m, 2) ndarray
+        `points` after merging near-duplicates within `cutoff`.
+    n_input : int
+        Number of points *before* that merge (what `lowrank` is relative to).
+    interest_domain : shapely.geometry.base.BaseGeometry
+        Union of `domain`'s parts (or the convex hull of `points`, if
+        `domain` is not given), *before* it is widened to its convex hull.
+    convex_hull : shapely.geometry.Polygon
+        The convex hull of `interest_domain`, buffered by `offset`: the
+        actual extent the mesh is built over -- i.e. where the SPDE/FEM
+        problem is defined, as distinct from `interest_domain` (the
+        scientific-interest domain).
+    coords : (k, 2) ndarray
+        `convex_hull`'s exterior ring, simplified, for gmsh's polygon input.
+    max_edge, min_edge, offset, cutoff : float
+        The (possibly defaulted) values actually used.
+    """
+    points = np.asarray(points, dtype=float)[:, :2]
+    n_input = len(points)
+
+    if domain is None:
+        interest_domain = MultiPoint(points).convex_hull
+        hull = interest_domain
+    else:
+        interest_domain = unary_union(_flatten_polygons(domain))
+        hull = interest_domain.convex_hull
+
+    bbox = hull.bounds
+    diag = float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
+
+    if max_edge is None:
+        max_edge = diag / 15
+    if min_edge is None:
+        min_edge = max_edge / 10
+    if cutoff is None:
+        cutoff = max_edge / 5
+    if offset is None:
+        offset = max_edge
+
+    # merge near-duplicate points within `cutoff`, as inla.mesh.2d does
+    if cutoff > 0 and len(points) > 1:
+        keep = np.ones(len(points), dtype=bool)
+        for i in range(len(points)):
+            if not keep[i]:
+                continue
+            d = np.linalg.norm(points[i] - points[i + 1:], axis=1)
+            keep[i + 1:][d < cutoff] = False
+        points = points[keep]
+
+    convex_hull = hull.buffer(offset)
+    if not isinstance(convex_hull, Polygon):
+        raise ValueError("domain's convex hull, buffered by offset, did not yield a single polygon.")
+    coords = np.array(convex_hull.simplify(offset * 0.25).exterior.coords[:-1])
+
+    return points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, cutoff
+
+
+def buildMesh2d(
+    points,
+    domain=None,
+    max_edge=None,
+    min_edge=None,
+    offset=None,
+    cutoff=None,
+    min_angle=21.0,
+    lowrank=None,
+    density_neighbors=8,
+    tol=0.02,
+    max_iter=25,
+):
+    """
+    Build a 2D triangular (gmsh/pygmsh) mesh around a set of observed
+    locations, in the spirit of R-INLA's ``inla.mesh.2d()``.
+
+    The mesh covers the convex hull of ``domain`` (or of ``points`` if
+    `domain` is not given), extended outward by ``offset`` to limit
+    boundary effects, with triangle edges bounded by ``max_edge``/``min_edge``.
+
+    Parameters
+    ----------
+    points : (n, 2) array_like
+        Observed locations. Drive the default domain and, when `lowrank`
+        is set, the local mesh density. Analogous to INLA's `loc`.
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The scientific-interest domain, e.g. the same composition of
+        polygons passed to `spdeAppoxCov`/`FEMSolver`. It does not need to
+        be convex or a single piece (it can be a disconnected set of
+        regions, as for a country plus its islands): all parts are unioned
+        together, and the mesh is built over the convex hull of that union,
+        extended by `offset`. Defaults to the convex hull of `points`.
+    max_edge : float, optional
+        Largest allowed triangle edge length. Defaults to 1/15 of the
+        domain's bounding-box diagonal.
+    min_edge : float, optional
+        Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
+    offset : float, optional
+        Buffer added around `domain` so the mesh extends past the data.
+        Defaults to `max_edge`.
+    cutoff : float, optional
+        Points closer together than `cutoff` are merged before building the
+        density field. Defaults to `max_edge / 5`.
+    min_angle : float, default 21.0
+        Target minimum interior angle (degrees); drives extra mesh
+        optimization passes. Mirrors INLA's `min.angle`. This is a soft
+        target: no unstructured mesher guarantees it exactly.
+    lowrank : float, optional
+        Value in (0, 1]. When given, the local element size is rescaled by
+        the density of `points` (finer where points are dense, coarser
+        where they are sparse), so that the mesh has approximately
+        ``round(lowrank * len(points))`` vertices *inside the scientific-
+        interest domain* -- i.e. inside the union of `domain` before it is
+        widened to its convex hull and `offset` (or inside the convex hull
+        of `points`, if `domain` is not given). Vertices in the outer
+        buffer region are not counted and are free to be as sparse as the
+        size field makes them. Local density is a k-nearest-neighbor
+        estimate (see `density_neighbors`) ranked by percentile, rather than
+        a single-bandwidth KDE, so that separate clusters of comparable
+        local density (e.g. several cities) are all refined even if one
+        cluster has far more points overall.
+    density_neighbors : int, default 8
+        Number of neighbors used for the local density estimate that drives
+        `lowrank`. Ignored if `lowrank` is not given.
+    tol : float, default 0.02
+        Relative tolerance on the vertex-count target used to stop the
+        `lowrank` search.
+    max_iter : int, default 25
+        Maximum number of mesh (re)generations used by the `lowrank` search.
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- i.e. where the
+        SPDE/FEM problem is defined -- `domain` (or its default) widened to
+        its convex hull and extended by `offset`.
+    """
+    points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, cutoff = (
+        _prepare_domain(points, domain, max_edge, min_edge, offset, cutoff)
+    )
+
+    tree = None
+    target_n = None
+    k = None
+    sorted_local_dens = None
+    if lowrank is not None:
+        if not (0 < lowrank <= 1):
+            raise ValueError("lowrank must be in (0, 1].")
+        k = max(1, min(density_neighbors, len(points) - 1))
+        tree = cKDTree(points)
+        # local density at each point, from the distance to its k-th
+        # *other* point (hence k + 1 neighbors, dropping the self-match)
+        dist, _ = tree.query(points, k=k + 1)
+        dk = dist[:, k]
+        local_dens = k / (np.pi * dk**2 + 1e-12)
+        sorted_local_dens = np.sort(local_dens)
+        target_n = max(3, round(lowrank * n_input))
+
+    def _percentile_weight(x, y):
+        # k-th nearest-neighbor local density at (x, y), converted to its
+        # percentile rank among the points' own local densities: a cluster
+        # that is *locally* as tight as the busiest cluster gets w close to
+        # 1 even if it has far fewer points overall (unlike a fixed-
+        # bandwidth KDE, whose single global bandwidth is dominated by
+        # whichever cluster has the most points).
+        dist, _ = tree.query([x, y], k=k)
+        dk = dist if k == 1 else dist[-1]
+        dens = k / (np.pi * dk**2 + 1e-12)
+        return np.searchsorted(sorted_local_dens, dens) / len(sorted_local_dens)
+
+    def _size_callback(scale):
+        def callback(dim, tag, x, y, z, lc):
+            w = _percentile_weight(x, y)  # 0 sparse .. 1 dense
+            size = max_edge - w * (max_edge - min_edge)  # in [min_edge, max_edge]
+            return float(size * scale)
+
+        return callback
+
+    def _generate(scale=1.0, opt_rounds=2):
+        with pygmsh.occ.Geometry() as geom:
+            surf = geom.add_polygon(coords, mesh_size=max_edge)
+            geom.add_physical(surf, label="surface_domain")
+            gmsh.model.occ.synchronize()
+
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+            gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+
+            lo_bound = min_edge * min(scale, 1.0)
+            hi_bound = max_edge * max(scale, 1.0)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lo_bound)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", hi_bound)
+
+            if tree is not None:
+                gmsh.model.mesh.setSizeCallback(_size_callback(scale))
+
+            gmsh.model.mesh.generate(2)
+            for _ in range(opt_rounds):
+                gmsh.model.mesh.optimize("Laplace2D")
+                gmsh.model.mesh.optimize("Netgen")
+
+            mesh = geom.generate_mesh()
+
+        return mesh
+
+    if tree is None:
+        return _generate(), convex_hull
+
+    def _n_inside(mesh):
+        pts = mesh.points
+        return int(shapely.contains_xy(interest_domain, pts[:, 0], pts[:, 1]).sum())
+
+    # Bisection on a global size-scale factor to hit the target vertex count
+    # *inside the interest domain* (vertices in the outer offset buffer
+    # don't count): smaller scale -> smaller elements everywhere -> more
+    # vertices.
+    lo, hi = 0.1, 10.0
+    scale = lo
+    mesh = _generate(scale=lo, opt_rounds=1)
+    n_lo = _n_inside(mesh)
+
+    if n_lo > target_n:
+        for _ in range(max_iter):
+            scale = 0.5 * (lo + hi)
+            mesh = _generate(scale=scale, opt_rounds=1)
+            n = _n_inside(mesh)
+            if abs(n - target_n) <= max(1, tol * target_n):
+                break
+            if n > target_n:
+                lo = scale
+            else:
+                hi = scale
+
+    # final pass with more optimization rounds to push the min angle up
+    mesh = _generate(scale=scale, opt_rounds=5)
+
+    angle = _mesh_min_angle(mesh)
+    if angle < min_angle:
+        warnings.warn(
+            f"buildMesh2d: reached {_n_inside(mesh)} vertices inside the "
+            f"interest domain (target {target_n}; {len(mesh.points)} total "
+            "including the outer buffer) but the minimum interior angle is "
+            f"{angle:.1f} deg < min_angle={min_angle} deg. Consider a "
+            "larger `lowrank`, or widen the min_edge/max_edge range."
+        )
+
+    return mesh, convex_hull
+
+
+def _relax_landmarks(landmarks, n_iter, containing_domain, damping=0.5):
+    """A few rounds of Delaunay-neighbor averaging, pulling landmarks that
+    sit unusually close to a neighbor (colinear or tightly clustered raw
+    points -- the case k-means's own placement cannot fix, see below)
+    toward locally more even spacing, without erasing the overall density
+    signal of `points` (each step is a local, damped nudge, not a full
+    Lloyd-relaxation to convergence). Landmarks that would leave
+    `containing_domain` are reverted to their pre-step position instead of
+    being clipped, since clipping onto its boundary can itself create new
+    close pairs there."""
+    if n_iter <= 0 or len(landmarks) < 4:
+        return landmarks
+
+    pts = landmarks.copy()
+    for _ in range(n_iter):
+        try:
+            tri = Delaunay(pts)
+        except QhullError:
+            break
+
+        neighbor_sum = np.zeros_like(pts)
+        neighbor_count = np.zeros(len(pts))
+        for simplex in tri.simplices:
+            for i in simplex:
+                for j in simplex:
+                    if i != j:
+                        neighbor_sum[i] += pts[j]
+                        neighbor_count[i] += 1
+
+        has_neighbors = neighbor_count > 0
+        target = pts.copy()
+        target[has_neighbors] = (
+            neighbor_sum[has_neighbors] / neighbor_count[has_neighbors, None]
+        )
+        new_pts = pts + damping * (target - pts)
+
+        inside = shapely.contains_xy(containing_domain, new_pts[:, 0], new_pts[:, 1])
+        new_pts[~inside] = pts[~inside]
+        pts = new_pts
+
+    return pts
+
+
+def buildMesh2d_density(
+    points,
+    lowrank,
+    domain=None,
+    max_edge=None,
+    min_edge=None,
+    offset=None,
+    cutoff=None,
+    min_angle=21.0,
+    snap_to_points=True,
+    relax_iters=2,
+    tol=0.05,
+    max_iter=20,
+    seed=None,
+):
+    """
+    Build a 2D triangular mesh whose interior vertices *are* a density-
+    matched subset of `points`, rather than free vertices placed by a
+    smooth size field (as `buildMesh2d` does).
+
+    Where `buildMesh2d` steers a Delaunay mesher's local element size to
+    approximate the density of `points`, this function instead: (1) picks
+    landmark locations via k-means on `points` -- since k-means codebook
+    density tracks source density, this directly matches mesh-vertex
+    density to point density; (2) by default snaps each landmark to its
+    nearest *not-yet-used* point (a greedy closest-pair matching), so
+    landmarks coincide exactly with observed locations instead of merely
+    being near them, letting the mesh capture the observed variability
+    directly at those nodes; (3) embeds the landmarks into the gmsh mesh
+    as fixed points -- gmsh's optimizer moves every other node but never
+    relocates or removes an embedded point, so the overlap from (2)
+    survives mesh generation and smoothing exactly. Between landmarks,
+    gmsh fills in the rest from their own local spacing
+    (`Mesh.MeshSizeFromPoints`), which lets element size track landmark
+    density rather than being held to a single `max_edge` everywhere.
+
+    That said, `max_edge` is still enforced as a hard *coverage* bound,
+    not just a size cap where landmarks are dense: any location more than
+    `max_edge` from every landmark -- the outer offset buffer (which has
+    no landmarks at all), a bay or strait inside the convex hull but
+    outside a concave or multi-part `domain` (e.g. a country plus its
+    islands), or, just as much, a genuinely sparse or `snap_to_points`-
+    relaxation-drifted pocket *inside* the interest domain -- gets an
+    extra lattice ("filler") vertex there too, embedded exactly like a
+    landmark. This matters because an unbounded gap doesn't just mean a
+    coarse patch of mesh: it means an unbounded-variance patch of the
+    SPDE/FEM latent field, which a data-density-matched mesh alone cannot
+    prevent if `points` happens to be sparse near, say, the domain's edge
+    -- a common real-world pattern. (A runtime "outside the interest
+    domain -> cap at max_edge" size field, and later a version that only
+    filled outside the interest domain, were both tried before this
+    lattice; the field's discontinuity made gmsh's mesher visibly
+    struggle on a finely-detailed real coastline, and restricting filler
+    to outside the interest domain left real gaps wherever `points` was
+    itself sparse.) The lattice is pulled back about half a cell from the
+    outer boundary, rather than filling all the way up to it: a raw grid
+    clipped flush against a slanted or jagged edge produces its own near-
+    zero-angle slivers, so that margin is instead left to gmsh's ordinary
+    boundary-conforming triangulation, which bridges it cleanly from the
+    boundary vertices already there. Either way, `max_edge` (via the
+    filler lattice) and the landmarks' own local spacing are what keep
+    interior angles away from zero: an abrupt jump from a tight cluster
+    of landmarks straight to a coarse neighboring region would force
+    sliver triangles, so gmsh grades a few extra vertices in between as
+    needed.
+
+    Because that grading -- now including the coverage-driven filler --
+    adds vertices beyond the landmarks themselves, asking k-means for
+    exactly ``round(lowrank * len(points))`` landmarks can overshoot the
+    vertex-count target, sometimes substantially if `lowrank` is small
+    relative to how large the interest domain is compared to `max_edge`
+    (the filler coverage floor doesn't shrink just because `lowrank`
+    asked for fewer landmarks). So, mirroring `buildMesh2d`'s bisection
+    over a size-field scale, this function bisects over the *number of
+    landmarks requested* instead, regenerating the mesh each time, until
+    the total vertex count inside the interest domain (landmarks plus
+    grading) is within `tol` of the target -- see `buildMesh2d`'s
+    `lowrank` for what "interest domain" means here. When that floor
+    exceeds the target no amount of bisecting can close the gap, and a
+    warning says so; a coarser `max_edge` is the way to actually lower
+    the floor, not a smaller `lowrank`.
+
+    Landmarks closer together than `cutoff` are merged, which trades off
+    against `min_angle`: forcing two near-duplicate data points to both
+    remain exact, fixed vertices is often what produces a sliver triangle
+    that no amount of optimization can fix, since fixed points cannot be
+    moved. Widen `cutoff` (or reduce `lowrank`) if the `min_angle` warning
+    fires often.
+
+    Parameters
+    ----------
+    points : (n, 2) array_like
+        Observed locations.
+    lowrank : float
+        Value in [0, 1]. Target number of vertices inside the interest
+        domain, as a fraction of `len(points)` -- see above. Values that
+        would ask for fewer than 3 landmarks, including 0, are floored to
+        3 (a single triangle), the smallest possible triangulation.
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The scientific-interest domain; see `buildMesh2d`. Defaults to the
+        convex hull of `points`.
+    max_edge : float, optional
+        Largest allowed triangle edge length: a coverage bound enforced by
+        the filler lattice anywhere a location is more than `max_edge`
+        from every landmark, inside the interest domain as much as
+        outside it, and an upper bound on each landmark's own local-
+        spacing size -- see above. This can conflict with a small
+        `lowrank` on a large interest domain, since it sets a vertex-count
+        floor `lowrank` cannot go below; a warning says so rather than
+        silently leaving the mesh under-covered. Defaults to 1/15 of the
+        domain's bounding-box diagonal.
+    min_edge : float, optional
+        Smallest allowed triangle edge length. Defaults to `max_edge / 10`.
+    offset : float, optional
+        Buffer added around `domain` so the mesh extends past the data.
+        Defaults to `max_edge`.
+    cutoff : float, optional
+        Minimum allowed separation between landmarks, and independently
+        between a landmark and any filler vertex (see above) -- a mesh-
+        quality knob, unlike `buildMesh2d`'s `cutoff`: it never merges or
+        discards any of `points` itself (only exact duplicates are merged,
+        always, regardless of this setting), so it can never make
+        `lowrank` (e.g. `lowrank=1`, "use every point") see fewer points
+        than you passed in. Left at its default, this is derived from
+        `target_n` and the interest domain's area instead of `max_edge`
+        (unlike `buildMesh2d`): a large `max_edge`, appropriate for a
+        sparse, data-free outer buffer, has nothing to do with how tightly
+        `target_n` landmarks need to pack, and a `max_edge/5` default
+        would otherwise silently cap the achievable landmark count well
+        below `target_n`. That default is also shrunk automatically (up to
+        a few times) if it still leaves too few landmarks to reach
+        `target_n`. Passing `cutoff` explicitly disables both and is
+        honored exactly for landmark/filler spacing, even if that
+        undershoots `target_n` (reported via a warning).
+    min_angle : float, default 21.0
+        Target minimum interior angle (degrees). This is a soft target
+        graded around the fixed landmarks; it is not enforced on the
+        landmarks' own placement, which is data-driven, not
+        quality-driven -- see above.
+    snap_to_points : bool, default True
+        If True (recommended), landmarks coincide exactly with observed
+        points (greedy nearest-pair matching from k-means centroids to
+        `points`). If False, landmarks are left at the k-means centroids
+        (relaxed by `relax_iters`) -- close to the data but generally not
+        exactly on it, which can give a smoother, better-quality
+        triangulation.
+    relax_iters : int, default 2
+        Only used when `snap_to_points=False`. Number of Delaunay-neighbor
+        averaging passes applied to the k-means centroids before they are
+        embedded, nudging landmarks that ended up too close to a neighbor
+        toward more even local spacing. Centroids alone are not enough:
+        when `target_n` (via `lowrank`) approaches `len(points)`, k-means
+        with that many clusters degenerates to one point per cluster, so
+        every centroid lands exactly on its point regardless of
+        `snap_to_points` -- this is what actually gives `snap_to_points`
+        room to move landmarks off the raw data in that regime. Set to 0
+        to disable and use the raw (possibly point-coincident) centroids.
+    tol : float, default 0.05
+        Relative tolerance on the vertex-count target used to stop the
+        landmark-count search. Landmark placement (via k-means) and mesh
+        grading are both a little noisy as the requested count changes by
+        one, so this defaults looser than `buildMesh2d`'s `tol`.
+    max_iter : int, default 20
+        Maximum number of mesh (re)generations used by the search.
+    seed : int, optional
+        Seed for the k-means initialization. Also fixes it internally
+        across the search's repeated k-means calls (even if left `None`,
+        in which case a seed is drawn once and reused for this call only),
+        so that requesting fewer landmarks is what changes the mesh, not
+        fresh k-means randomness.
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- `domain` (or
+        its default) widened to its convex hull and extended by `offset`.
+    """
+    cutoff_is_default = cutoff is None
+    # `cutoff` is the *landmark* (and landmark-to-filler) minimum spacing
+    # here -- a mesh-quality concern -- and is kept fully separate from
+    # _prepare_domain's *point*-level dedup, unlike in buildMesh2d (where
+    # that dedup protects a KNN density estimate this function doesn't
+    # use). Only literal duplicate points are merged at this stage
+    # (dedup_cutoff=0), *regardless* of whether `cutoff` was given
+    # explicitly: an explicit `cutoff` is a deliberate choice about how
+    # close two *mesh vertices* may be, not an instruction to silently
+    # discard real observations before `lowrank` (e.g. `lowrank=1`, "use
+    # every point") ever sees them -- letting it drive point-level dedup
+    # too previously did exactly that. The landmark-spacing default is
+    # computed below instead, once target_n is known.
+    points, n_input, interest_domain, convex_hull, coords, max_edge, min_edge, offset, _ = (
+        _prepare_domain(points, domain, max_edge, min_edge, offset, 0.0)
+    )
+
+    if not (0 < lowrank <= 1):
+        raise ValueError("lowrank must be in (0, 1].")
+    # 3 is the smallest possible triangulation (a single triangle); lowrank
+    # values that would ask for fewer landmarks than that (including 0)
+    # are floored to it rather than rejected.
+    target_n = min(len(points), max(3, round(lowrank * n_input)))
+
+    if cutoff_is_default:
+        # Rebase the landmark-spacing default on the spacing target_n
+        # landmarks would have if evenly spread over the interest domain
+        # (a further adaptive fallback below shrinks it more if even this
+        # undershoots the achievable landmark count).
+        even_spacing = np.sqrt(interest_domain.area / target_n)
+        cutoff = 0.3 * even_spacing
+    # else: an explicit `cutoff` is left exactly as given.
+
+    # fixed for the duration of this call, so repeated k-means calls below
+    # are directly comparable (see `seed` docs above)
+    if seed is None:
+        seed = int(np.random.default_rng().integers(0, 2**31 - 1))
+
+    # Candidate "filler" vertices for any gap larger than `max_edge` left
+    # by the landmarks -- a lattice at `max_edge` spacing, later embedded
+    # exactly like landmarks so that no region of the mesh is under-
+    # resolved purely because it happens to be far from any landmark, not
+    # just the outer offset buffer (which never has landmarks at all) but
+    # also, *inside* the interest domain, wherever `points` are locally
+    # sparse (a real edge/border effect in most observational networks) or
+    # `snap_to_points=False` relaxation has drifted landmarks away from a
+    # region. Filling gaps that don't reach `max_edge` back in has real
+    # cost -- an unbounded element there means an unbounded-variance patch
+    # of the SPDE/FEM latent field -- so it applies everywhere, not only
+    # outside `interest_domain`; which points actually qualify as "a gap"
+    # is decided per landmark set below, in `_generate` (distance to the
+    # nearest landmark), since it depends on where the landmarks for a
+    # given search trial ended up. (A first version instead relied on a
+    # runtime "outside interest_domain -> cap at max_edge" size callback;
+    # for a finely-detailed real coastline that discontinuous field made
+    # gmsh's mesher visibly struggle -- silently near-empty triangles
+    # spanning the whole gap -- so it's replaced by this explicit lattice,
+    # which uses gmsh's native per-point sizing instead of a callback.)
+    #
+    # A raw square lattice clipped straight against a slanted or jagged
+    # polygon edge produces near-zero-angle slivers: a lattice point can
+    # land just barely inside the boundary, forcing a triangle that
+    # connects it to a much farther neighbor across the cut cell. So
+    # candidates are pulled back by roughly half a lattice cell from
+    # `convex_hull`'s own outer edge, leaving that margin for gmsh's
+    # ordinary boundary-conforming triangulation (well-behaved for this)
+    # to bridge using the boundary-ring vertices already there, instead of
+    # a misaligned lattice point.
+    minx, miny, maxx, maxy = convex_hull.bounds
+    nx = max(2, int(np.ceil((maxx - minx) / max_edge)) + 1)
+    ny = max(2, int(np.ceil((maxy - miny) / max_edge)) + 1)
+    xx, yy = np.meshgrid(np.linspace(minx, maxx, nx), np.linspace(miny, maxy, ny))
+    grid = np.column_stack([xx.ravel(), yy.ravel()])
+    convex_hull_core = convex_hull.buffer(-max_edge * 0.5)
+    if convex_hull_core.is_empty:
+        convex_hull_core = convex_hull
+    inside_domain_core = shapely.contains_xy(convex_hull_core, grid[:, 0], grid[:, 1])
+    filler_candidates = grid[inside_domain_core]
+
+    def _place_landmarks(n_landmarks):
+        n_landmarks = max(1, min(n_landmarks, len(points)))
+        with warnings.catch_warnings():
+            # scipy warns if k-means collapses onto fewer than
+            # `n_landmarks` distinct clusters (e.g. many duplicate/near-
+            # duplicate points); the cutoff-merge below reports that
+            # outcome on its own.
+            warnings.simplefilter("ignore", UserWarning)
+            centroids, _ = kmeans2(points, k=n_landmarks, minit="++", seed=seed)
+
+        if snap_to_points:
+            # greedy closest-pair matching from centroids to points: not
+            # the globally optimal assignment, but simple and effective,
+            # and it guarantees each point is used as a landmark at most
+            # once
+            dist = cdist(centroids, points)
+            order = np.argsort(dist, axis=None)
+            n_pts = len(points)
+            centroid_to_point = np.full(n_landmarks, -1)
+            point_used = np.zeros(n_pts, dtype=bool)
+            n_assigned = 0
+            for flat_idx in order:
+                ci, pi = divmod(int(flat_idx), n_pts)
+                if centroid_to_point[ci] == -1 and not point_used[pi]:
+                    centroid_to_point[ci] = pi
+                    point_used[pi] = True
+                    n_assigned += 1
+                    if n_assigned == n_landmarks:
+                        break
+            landmarks = points[centroid_to_point]
+        else:
+            # Raw centroids alone don't reliably move landmarks off the
+            # data: as target_n -> len(points), k-means with that many
+            # clusters degenerates to one point per cluster, so every
+            # centroid lands exactly on its point regardless of
+            # snap_to_points (verified: distance 0 to the nearest point).
+            # Relaxation is what actually gives snap_to_points=False room
+            # to improve on that.
+            landmarks = _relax_landmarks(centroids, relax_iters, interest_domain)
+
+        # enforce a minimum landmark separation: two landmarks closer than
+        # `cutoff` would force a sliver triangle that fixed (embedded)
+        # points can never be optimized away
+        if cutoff > 0 and len(landmarks) > 1:
+            keep = np.ones(len(landmarks), dtype=bool)
+            for i in range(len(landmarks)):
+                if not keep[i]:
+                    continue
+                d = np.linalg.norm(landmarks[i] - landmarks[i + 1:], axis=1)
+                keep[i + 1:][d < cutoff] = False
+            landmarks = landmarks[keep]
+
+        return landmarks
+
+    def _generate(landmarks, opt_rounds):
+        # Each landmark's own mesh size is its distance to its nearest
+        # other landmark (clipped to [min_edge, max_edge]), not a flat
+        # `max_edge`: with `Mesh.MeshSizeFromPoints` this lets gmsh grade
+        # element size from each point's *own* local spacing, so a densely
+        # landmarked region isn't held back by `max_edge`. Coverage where
+        # landmarks are instead too sparse (further than `max_edge` from
+        # each other) is handled separately, by filler below.
+        ltree = cKDTree(landmarks)
+        if len(landmarks) > 1:
+            nn_dist, _ = ltree.query(landmarks, k=2)
+            landmark_lc = np.clip(nn_dist[:, 1], min_edge, max_edge)
+        else:
+            landmark_lc = np.full(len(landmarks), max_edge)
+
+        # keep filler candidates that fall in a genuine coverage gap:
+        # farther than half of max_edge from the nearest landmark. This is
+        # what bounds element size *everywhere*, not just outside the
+        # interest domain -- see above -- and (since max_edge > cutoff by
+        # construction) it also never crowds an existing landmark closer
+        # than `cutoff`. Using max_edge itself as the threshold (rather
+        # than half of it) is too loose: two landmarks each individually
+        # within max_edge of a shared midpoint, but up to 2*max_edge apart
+        # from *each other*, leave a real gap there with nothing added to
+        # subdivide it, since neither one's exclusion zone reaches past
+        # its own half. Halving the threshold bounds that same worst case
+        # much closer to max_edge itself, at a modest extra-vertex cost.
+        if len(filler_candidates) > 0:
+            d, _ = ltree.query(filler_candidates)
+            filler = filler_candidates[d >= max_edge * 0.5]
+        else:
+            filler = filler_candidates
+
+        all_points = np.vstack([landmarks, filler]) if len(filler) else landmarks
+        all_lc = (
+            np.concatenate([landmark_lc, np.full(len(filler), max_edge)])
+            if len(filler)
+            else landmark_lc
+        )
+
+        with pygmsh.occ.Geometry() as geom:
+            surf = geom.add_polygon(coords, mesh_size=max_edge)
+            geom.add_physical(surf, label="surface_domain")
+
+            embedded_tags = [
+                gmsh.model.occ.addPoint(x, y, 0, lc)
+                for (x, y), lc in zip(all_points, all_lc)
+            ]
+            gmsh.model.occ.synchronize()
+            gmsh.model.mesh.embed(0, embedded_tags, 2, surf.dim_tag[1])
+
+            gmsh.option.setNumber("Mesh.Algorithm", 6)
+            # let element size follow every embedded point's own local
+            # spacing/assignment (landmarks *and* filler), rather than a
+            # hand-built field as in buildMesh2d or a runtime callback
+            gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 1)
+            gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMin", min_edge)
+            # a loose safety cap only -- per-point sizes above do the real
+            # work, both inside the interest domain (landmark_lc) and in
+            # the gap/buffer (filler, at a flat max_edge)
+            gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 1.0e22)
+
+            gmsh.model.mesh.generate(2)
+            for _ in range(opt_rounds):
+                gmsh.model.mesh.optimize("Laplace2D")
+                gmsh.model.mesh.optimize("Netgen")
+
+            mesh = geom.generate_mesh()
+
+        return mesh
+
+    def _n_inside(mesh):
+        pts = mesh.points
+        return int(shapely.contains_xy(interest_domain, pts[:, 0], pts[:, 1]).sum())
+
+    # Bisect the *number of requested landmarks* (not a continuous scale,
+    # since placement itself is discrete/explicit here) so the final mesh
+    # -- landmarks plus whatever grading gmsh adds -- has approximately
+    # target_n vertices inside the interest domain. More landmarks always
+    # means at least as much grading, so this is monotonic enough to
+    # bisect despite the k-means/cutoff noise between successive integers.
+    lo, hi = 3, target_n
+    landmarks = _place_landmarks(hi)
+    mesh = _generate(landmarks, opt_rounds=1)
+    n_hi = _n_inside(mesh)
+
+    # If even asking for target_n landmarks (the most this search ever
+    # requests) undershoots, `cutoff` -- not `lowrank` -- is the binding
+    # constraint: no amount of bisecting the requested count downward can
+    # help, since that count is already capped by cutoff-merging. When
+    # `cutoff` was left at its default, shrink it and retry a few times
+    # before falling back to the ordinary search; an explicit user
+    # `cutoff` is instead honored as-is (the tol warning below still
+    # reports the shortfall).
+    shrink_tries = 0
+    while (
+        cutoff_is_default
+        and n_hi < target_n - max(1, tol * target_n)
+        and shrink_tries < 6
+    ):
+        cutoff /= 2
+        landmarks = _place_landmarks(hi)
+        mesh = _generate(landmarks, opt_rounds=1)
+        n_hi = _n_inside(mesh)
+        shrink_tries += 1
+
+    best_landmarks, best_diff = landmarks, abs(n_hi - target_n)
+
+    if n_hi > target_n:
+        for _ in range(max_iter):
+            if hi - lo <= 1:
+                break
+            mid = (lo + hi) // 2
+            landmarks = _place_landmarks(mid)
+            mesh = _generate(landmarks, opt_rounds=1)
+            n = _n_inside(mesh)
+            diff = abs(n - target_n)
+            if diff < best_diff:
+                best_landmarks, best_diff = landmarks, diff
+            if diff <= max(1, tol * target_n):
+                break
+            if n > target_n:
+                hi = mid
+            else:
+                lo = mid
+
+    # final pass with more optimization rounds to push the min angle up
+    mesh = _generate(best_landmarks, opt_rounds=5)
+    landmarks = best_landmarks
+
+    n_inside = _n_inside(mesh)
+    angle = _mesh_min_angle(mesh)
+    if angle < min_angle:
+        warnings.warn(
+            f"buildMesh2d_density: {len(landmarks)} landmark vertices placed "
+            f"(requested from a {target_n}-vertex target), {n_inside} mesh "
+            "vertices inside the interest domain, but the minimum interior "
+            f"angle is {angle:.1f} deg < min_angle={min_angle} deg. "
+            "Landmarks are fixed at (or near) data locations and cannot be "
+            "moved to fix this; consider a larger `cutoff`, a smaller "
+            "`lowrank`, or `snap_to_points=False`."
+        )
+    if best_diff > max(1, tol * target_n) and n_inside > target_n:
+        warnings.warn(
+            f"buildMesh2d_density: reached {n_inside} vertices inside the "
+            f"interest domain, above the requested tolerance of target "
+            f"{target_n} (tol={tol}). `max_edge` bounds element size "
+            "everywhere in the interest domain, not just the outer buffer "
+            "-- an unbounded gap there would mean unbounded-variance "
+            "patches of the SPDE/FEM latent field -- so it sets a coverage "
+            "floor on vertex count that `lowrank` cannot go below; for a "
+            "small `lowrank` relative to how large the interest domain is "
+            "compared to `max_edge`, that floor can exceed the target. Use "
+            "a coarser `max_edge` if you need fewer vertices, or accept "
+            "the extra coverage."
+        )
+    elif best_diff > max(1, tol * target_n):
+        warnings.warn(
+            f"buildMesh2d_density: reached {n_inside} vertices inside the "
+            f"interest domain, below the requested tolerance of target "
+            f"{target_n} (tol={tol}). Consider a larger `max_iter`, or, if "
+            "`cutoff` was given explicitly, a smaller one (it may be "
+            "merging more landmarks than expected)."
+        )
+
+    return mesh, convex_hull
+
+
+# Maps buildMesh2d_new's simplified `method` onto buildMesh2d_density's
+# underlying (snap_to_points, relax_iters) knobs -- see buildMesh2d_new.
+_DENSITY_METHODS = {
+    "exact": {"snap_to_points": True, "relax_iters": 0},
+    "centroid": {"snap_to_points": False, "relax_iters": 0},
+    "relaxed": {"snap_to_points": False, "relax_iters": 2},
+}
+
+
+def buildMesh2d_new(
+    points,
+    lowrank,
+    domain=None,
+    method="exact",
+    max_edge=None,
+    min_angle=21.0,
+    seed=None,
+):
+    """
+    Simplified front door to `buildMesh2d_density`'s density-matched mesh:
+    picks a landmark-placement `method` instead of juggling
+    `snap_to_points`/`relax_iters` directly, and leaves every other knob
+    (`min_edge`, `offset`, `cutoff`, `tol`, `max_iter`) at
+    `buildMesh2d_density`'s own defaults, which are self-tuning (derived
+    from `lowrank`, the interest domain, and `max_edge`) and rarely need
+    hand-adjustment. This wrapper adds no logic of its own -- it exists to
+    cut down the parameter surface, not to reimplement the mesher; call
+    `buildMesh2d_density` directly for full control (a different
+    `cutoff`/`tol`/`max_iter`, or a `relax_iters` count other than the
+    "relaxed" method's default of 2).
+
+    Parameters
+    ----------
+    points : (n, 2) array_like
+        Observed locations.
+    lowrank : float
+        Value in [0, 1]. Target vertex count inside the interest domain,
+        as a fraction of `len(points)`; see `buildMesh2d_density`.
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The scientific-interest domain. Defaults to the convex hull of
+        `points`.
+    method : {"exact", "centroid", "relaxed"}, default "exact"
+        How landmark vertices relate to `points` (all are placed via
+        k-means, so their density still tracks the density of `points`;
+        this only changes where *within* that density each landmark
+        actually sits):
+
+        - ``"exact"``: landmarks coincide exactly with observed points
+          (nearest-point snapping). Choose this when downstream model
+          fitting needs the latent field's degrees of freedom to sit
+          directly on observations.
+        - ``"centroid"``: landmarks are left at raw k-means centroids --
+          close to the data, generally not exactly on it, no further
+          smoothing.
+        - ``"relaxed"``: k-means centroids, then a few rounds of Delaunay-
+          neighbor smoothing. Usually the best triangle quality (interior
+          angles), at the cost of landmarks no longer sitting at specific
+          observations. Recommended over `"centroid"` whenever `lowrank`
+          is close to 1: k-means with that many clusters places a
+          centroid on every point regardless of method, so smoothing is
+          what actually gives room to move landmarks off the raw data.
+    max_edge : float, optional
+        Largest triangle edge length outside the interest domain (and an
+        upper bound on landmark spacing inside it). Defaults to 1/15 of
+        the domain's bounding-box diagonal.
+    min_angle : float, default 21.0
+        Soft target for the minimum interior angle (degrees); see
+        `buildMesh2d_density`.
+    seed : int, optional
+        Seed for the landmark search, for reproducibility.
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over.
+
+    Examples
+    --------
+    >>> mesh, convex_hull = buildMesh2d_new(points, lowrank=0.3)
+    >>> mesh, convex_hull = buildMesh2d_new(points, lowrank=1.0, method="relaxed")
+    """
+    if method not in _DENSITY_METHODS:
+        raise ValueError(
+            f"method must be one of {sorted(_DENSITY_METHODS)}, got {method!r}."
+        )
+    return buildMesh2d_density(
+        points,
+        lowrank,
+        domain=domain,
+        max_edge=max_edge,
+        min_angle=min_angle,
+        seed=seed,
+        **_DENSITY_METHODS[method],
+    )
+
+
+def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):
+    """Drop triangles touching any vertex with fewer than `min_degree`
+    distinct mesh edges, iterating since removal can lower a neighbor's
+    degree in turn."""
+    for _ in range(max_iter):
+        edges = np.vstack(
+            [triangles[:, [0, 1]], triangles[:, [1, 2]], triangles[:, [2, 0]]]
+        )
+        edges = np.unique(np.sort(edges, axis=1), axis=0)
+        degree = np.bincount(edges.ravel(), minlength=len(vertices))
+        bad = degree < min_degree
+        if not bad.any():
+            break
+        triangles = triangles[~bad[triangles].any(axis=1)]
+        if len(triangles) == 0:
+            raise ValueError(
+                "buildMeshGrid2d: the mesh vanished while enforcing "
+                "min_degree; use a larger nx/ny (or lowrank), or a "
+                "smaller min_degree."
+            )
+    return triangles
+
+
+def buildMeshGrid2d(
+    points=None,
+    domain=None,
+    offset=None,
+    nx=None,
+    ny=None,
+    lowrank=None,
+    min_degree=3,
+    tol=0.02,
+    max_iter=25,
+):
+    """
+    Build a regular (structured) 2D triangular mesh: a lattice of `nx` by
+    `ny` vertices spanning the bounding box of `domain` (or the convex
+    hull of `points` if `domain` is not given), extended by `offset`.
+    Grid cells lying entirely outside the (buffered) convex hull are
+    dropped, so the mesh follows the shape of `domain` rather than just its
+    bounding box. Any vertex left with fewer than `min_degree` mesh edges by
+    that pruning (stray corners along the boundary "staircase") is removed
+    together with its triangles, repeated until the whole mesh satisfies
+    `min_degree`; vertices left unused are dropped from the result.
+
+    The resolution can be set directly with `nx`/`ny`, or -- when `points`
+    and `lowrank` are given instead -- solved for automatically so the
+    final mesh has approximately ``round(lowrank * len(points))``
+    vertices, mirroring `buildMesh2d`'s `lowrank` argument. Note the
+    lattice stays regular: `lowrank` only controls its overall resolution
+    here, not a spatially-varying density.
+
+    Parameters
+    ----------
+    points : (n, 2) array_like, optional
+        Observed locations. Used to derive `domain` (as their convex
+        hull) when `domain` is not given, and as the basis for `lowrank`.
+    domain : shapely.geometry.Polygon, optional
+        The scientific-interest domain the mesh must cover.
+    offset : float, optional
+        Buffer added around `domain` so the lattice extends past the
+        data. Defaults to 1/15 of the domain's bounding-box diagonal.
+    nx, ny : int, optional
+        Number of vertices along the x- and y-axis of the underlying
+        rectangular lattice (before pruning). Give both together, or give
+        `lowrank` instead.
+    lowrank : float, optional
+        Value in (0, 1]. When given (with `nx`/`ny` left unset), the
+        resolution is found automatically so the mesh has approximately
+        ``round(lowrank * len(points))`` vertices. Requires `points`.
+    min_degree : int, default 3
+        Minimum number of mesh edges required at every vertex.
+    tol : float, default 0.02
+        Relative tolerance on the vertex-count target used by the
+        `lowrank` search.
+    max_iter : int, default 25
+        Maximum number of mesh (re)generations used by the `lowrank`
+        search.
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over -- `domain` (or
+        its default) extended by `offset`.
+    """
+    if domain is None:
+        if points is None:
+            raise ValueError("either `points` or `domain` must be given.")
+        points = np.asarray(points, dtype=float)[:, :2]
+        domain = MultiPoint(points).convex_hull
+    elif points is not None:
+        points = np.asarray(points, dtype=float)[:, :2]
+
+    if offset is None:
+        bbox = domain.bounds
+        diag = float(np.hypot(bbox[2] - bbox[0], bbox[3] - bbox[1]))
+        offset = diag / 15
+
+    convex_hull = domain.buffer(offset) if offset else domain
+    if not isinstance(convex_hull, Polygon):
+        raise ValueError("domain.buffer(offset) did not yield a single polygon.")
+
+    minx, miny, maxx, maxy = convex_hull.bounds
+    aspect = (maxx - minx) / (maxy - miny)
+
+    def _build(nx, ny):
+        xs = np.linspace(minx, maxx, nx)
+        ys = np.linspace(miny, maxy, ny)
+        grid = np.column_stack([np.tile(xs, ny), np.repeat(ys, nx)])
+
+        # two triangles per grid cell, both wound counter-clockwise
+        idx = np.arange(nx * ny).reshape(ny, nx)
+        a = idx[:-1, :-1].ravel()
+        b = idx[:-1, 1:].ravel()
+        c = idx[1:, :-1].ravel()
+        d = idx[1:, 1:].ravel()
+        triangles = np.vstack(
+            [np.column_stack([a, b, d]), np.column_stack([a, d, c])]
+        )
+
+        # keep only cells whose centroid lies within the (buffered) convex hull
+        centroids = grid[triangles].mean(axis=1)
+        inside = shapely.contains_xy(convex_hull, centroids[:, 0], centroids[:, 1])
+        triangles = triangles[inside]
+
+        triangles = _prune_low_degree(grid, triangles, min_degree)
+
+        # drop vertices that are no longer referenced and remap indices
+        used, triangles = np.unique(triangles, return_inverse=True)
+        triangles = triangles.reshape(-1, 3)
+        vertices = grid[used]
+
+        return meshio.Mesh(
+            points=np.column_stack([vertices, np.zeros(len(vertices))]),
+            cells=[("triangle", triangles)],
+        )
+
+    if nx is not None or ny is not None:
+        if nx is None or ny is None:
+            raise ValueError("`nx` and `ny` must be given together.")
+        return _build(nx, ny), convex_hull
+
+    if lowrank is None:
+        raise ValueError("either `nx`/`ny` or `lowrank` must be given.")
+    if points is None:
+        raise ValueError("`points` is required when `lowrank` is given.")
+    if not (0 < lowrank <= 1):
+        raise ValueError("lowrank must be in (0, 1].")
+
+    target_n = max(3, round(lowrank * len(points)))
+
+    def _safe_build(res):
+        # res ~ nx * ny before domain/degree pruning
+        nx_ = max(2, round(np.sqrt(res * aspect)))
+        ny_ = max(2, round(np.sqrt(res / aspect)))
+        try:
+            return _build(nx_, ny_)
+        except ValueError:
+            return None
+
+    # Bisection on a lattice-resolution scalar to hit the target vertex
+    # count: larger resolution -> more vertices (monotonic up to rounding
+    # and boundary/degree pruning noise, which `tol` absorbs).
+    lo, hi = 4.0, max(4.0, float(target_n))
+    mesh = _safe_build(hi)
+    tries = 0
+    while (mesh is None or len(mesh.points) < target_n) and tries < 15:
+        hi *= 2
+        mesh = _safe_build(hi)
+        tries += 1
+    if mesh is None:
+        raise ValueError(
+            "buildMeshGrid2d: could not reach `lowrank` with a mesh "
+            "satisfying `min_degree`; try a larger lowrank or a smaller "
+            "min_degree."
+        )
+
+    best = mesh
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        mesh = _safe_build(mid)
+        if mesh is None:
+            lo = mid
+            continue
+        n = len(mesh.points)
+        best = mesh
+        if abs(n - target_n) <= max(1, tol * target_n):
+            break
+        if n > target_n:
+            hi = mid
+        else:
+            lo = mid
+
+    return best, convex_hull

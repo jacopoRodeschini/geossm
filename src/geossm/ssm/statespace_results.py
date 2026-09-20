@@ -1,5 +1,14 @@
 """
 Convenience container for State Space Model outputs (filter + smoother).
+
+Defines :class:`StateSpaceResults`, the result object returned by
+`geossm.ssm.statespace.StateSpaceModel.filter`,
+`geossm.ssm.statespace.StateSpaceModel.smoother` and
+`geossm.ssm.statespace.StateSpaceModel.estimate`. It stores the filtered
+and/or smoothed state arrays, predicted observations, the EM sufficient
+statistics and the log-likelihood, and adds convenience methods for
+residuals, error metrics, confidence intervals, residual diagnostics and
+a printable summary.
 """
 
 from __future__ import annotations
@@ -12,19 +21,64 @@ from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date
 import jax
+from geossm.utils import _select_device
 
 ArrayLike = Optional[Any]
 
 
 class StateSpaceResults:
-    """
-    Container for state-space model estimation results.
+    """Container for state-space model estimation results (filter and/or
+    smoother outputs), with convenience methods for residuals, error
+    metrics, confidence intervals, diagnostics and a printable summary.
+
+    Instances are normally created by
+    `geossm.ssm.statespace.StateSpaceModel.filter`,
+    `geossm.ssm.statespace.StateSpaceModel.smoother` or
+    `geossm.ssm.statespace.StateSpaceModel.estimate`, not directly by
+    user code. All array-valued attributes are stored as NumPy arrays
+    (converted from JAX arrays on construction, see `to_numpy`) in the
+    dtype of the originating model.
+
+    Attributes
+    ----------
+    model : object or None
+        The `geossm.ssm.statespace.StateSpaceModel` (or subclass) instance
+        that produced these results.
+    y_obs : numpy.ndarray, shape (p, T)
+        Observed data used for fitting (may contain ``NaN``).
+    y_hat : numpy.ndarray, shape (p, T)
+        Predicted/fitted observation means.
+    Sigma_y_hat : numpy.ndarray, shape (p, p, T) or None
+        State-driven predictive covariance of ``y_hat`` (excludes
+        observation noise ``R``); see
+        `geossm.ssm.statespace._compute_predict_kernel_JAX`.
+    x_filtered, P_filtered : numpy.ndarray or None
+        Filtered state means/covariances (``None`` when unavailable, e.g.
+        after ``smoother(..., light=True)``).
+    x_pred, P_pred : numpy.ndarray or None
+        One-step-ahead predicted state means/covariances from the filter.
+    K : numpy.ndarray or None
+        Kalman gain at the final time step.
+    x_smoothed, P_smoothed : numpy.ndarray or None
+        Smoothed state means/covariances.
+    P_pred_smoothed : numpy.ndarray or None
+        Smoothed lag-one state covariances.
+    S11, S10, S00 : numpy.ndarray or None
+        EM sufficient statistics; see
+        `geossm.ssm.statespace._compute_expected_values_kernelJAX`.
+    llf : float or None
+        Model log-likelihood.
+    time_filter, time_smoother, time_expectation, time_total : float
+        Wall-clock runtimes (seconds) of the filter, smoother, expected-
+        value/sufficient-statistics computation, and their sum.
     """
 
     def __init__(
         self,
         model: Optional[Any],
         y_hat,
+        Sigma_y_hat=None,
+        tdelta_hat=None,
         # optional metadata
         params=None,
         params_names=None,
@@ -32,17 +86,19 @@ class StateSpaceResults:
         y_obs=None,
         yname=None,
         Xbeta=None,
+        backend=None,
+        dtype=None,
         # likelihood / info
         llf: Optional[float] = None,
         time_filter: float = 0.0,
         time_smoother: float = 0.0,
         time_expectation: float = 0.0,
+        time_total: float = 0.0,
         # main arrays
         x_filtered: ArrayLike = None,
         P_filtered: ArrayLike = None,
         x_pred: ArrayLike = None,
         P_pred: ArrayLike = None,
-        invP_pred: ArrayLike = None,
         K: ArrayLike = None,
         x_smoothed: ArrayLike = None,
         P_smoothed: ArrayLike = None,
@@ -52,9 +108,88 @@ class StateSpaceResults:
         S10: ArrayLike = None,
         S00: ArrayLike = None,
     ):
+        """Build a results container from a model and its fitted arrays.
+
+        Most callers should not construct this directly; use
+        `geossm.ssm.statespace.StateSpaceModel.filter`,
+        `.smoother` or `.estimate` instead.
+
+        Parameters
+        ----------
+        model : object or None
+            The fitted `geossm.ssm.statespace.StateSpaceModel` (or
+            subclass) instance. When given, ``params``, ``params_names``,
+            ``params_dim``, ``yname``, ``y_obs`` (from ``model.y_t``),
+            ``Xbeta``, ``backend`` and ``dtype`` default to the
+            corresponding model attributes unless overridden below.
+        y_hat : array_like, shape (p, T)
+            Predicted/fitted observation means.
+        Sigma_y_hat : array_like, shape (p, p, T), optional
+            State-driven predictive covariance of ``y_hat``.
+        tdelta_hat : float, optional
+            Wall-clock time spent computing ``y_hat``/``Sigma_y_hat``
+            (currently for informational/metadata purposes).
+        params, params_names, params_dim : optional
+            Overrides for the model's `params`/`params_names`/
+            `params_dim`.
+        y_obs : array_like, shape (p, T), optional
+            Override for the observed data (defaults to ``model.y_t``).
+        yname : str, optional
+            Override for the dependent variable's name.
+        Xbeta : array_like, shape (p, b, T), optional
+            Override for the exogenous regressors.
+        backend : {'auto', 'cpu', 'gpu'} or jax.Device, optional
+            JAX device any further computation on these results (e.g. a
+            Hessian in a subclass) runs on; defaults to ``model.backend``.
+        dtype : numpy/jax dtype, optional
+            Floating-point precision results are stored/computed in;
+            defaults to ``model.dtype``.
+        llf : float, optional
+            Model log-likelihood.
+        time_filter, time_smoother, time_expectation, time_total : float, default 0.0
+            Wall-clock runtimes (seconds); ``time_total`` is recomputed
+            internally as the sum of the first three (this argument's
+            value is not used).
+        x_filtered, P_filtered : array_like, optional
+            Filtered state means/covariances, shapes ``(q, T+1)`` /
+            ``(q, q, T+1)``.
+        x_pred, P_pred : array_like, optional
+            One-step-ahead predicted state means/covariances from the
+            filter.
+        K : array_like, shape (q, p), optional
+            Kalman gain at the final time step.
+        x_smoothed, P_smoothed : array_like, optional
+            Smoothed state means/covariances.
+        P_pred_smoothed : array_like, optional
+            Smoothed lag-one state covariances.
+        S11, S10, S00 : array_like, shape (q, q), optional
+            EM sufficient statistics.
+        """
 
         # ---- Update the metadata from the model----
         self.model = model
+
+        # ---- Backend: default to the model's backend, so any JAX
+        # computation performed on the results (e.g. the Hessian in
+        # LRStateSpaceResults) runs on the same device the model was fit
+        # on, unless a different backend is explicitly requested here.
+        if backend is not None:
+            self._backend = _select_device(backend)
+        elif model is not None and getattr(model, "backend", None) is not None:
+            self._backend = _select_device(model.backend)
+        else:
+            self._backend = _select_device("auto")
+
+        # ---- dtype: default to the model's dtype, so results stay in the
+        # same precision the model was fit in (e.g. the Hessian computed in
+        # LRStateSpaceResults), unless a different dtype is explicitly
+        # requested here.
+        if dtype is not None:
+            self._dtype = np.dtype(dtype)
+        elif model is not None and getattr(model, "dtype", None) is not None:
+            self._dtype = np.dtype(model.dtype)
+        else:
+            self._dtype = np.dtype(np.float32)
 
         # get the observed data from the model if available
         if model is not None:
@@ -83,15 +218,16 @@ class StateSpaceResults:
         self.time_filter = time_filter
         self.time_smoother = time_smoother
         self.time_expectation = time_expectation
-        # self.time_total = self.time_filter + self.time_smoother + self.time_expectation
+        self.time_total = self.time_filter + self.time_smoother + self.time_expectation
 
         # ---- arrays ----
         self.y_hat = y_hat
+        self.Sigma_y_hat = Sigma_y_hat
+        self.tdelta_hat = tdelta_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
         self.x_pred = x_pred
         self.P_pred = P_pred
-        self.invP_pred = invP_pred
         self.K = K
         self.x_smoothed = x_smoothed
         self.P_smoothed = P_smoothed
@@ -111,19 +247,34 @@ class StateSpaceResults:
         # convert arrays if needed
         self.to_numpy()
 
+    @property
+    def backend(self):
+        """jax.Device: JAX compute device any further computation on
+        these results runs on (defaults to the originating model's
+        `geossm.ssm.statespace.StateSpaceModel.backend`)."""
+        return self._backend
+
+    @property
+    def dtype(self):
+        """numpy.dtype: Floating-point precision results are stored in
+        (defaults to the originating model's dtype)."""
+        return self._dtype
+
     # Utility method to convert array-like inputs to numpy arrays
 
     def to_numpy(self):
         """
-        Convert array-like attributes to numpy arrays if needed.
+        Convert array-like attributes to numpy arrays in the results' dtype
+        (the model's dtype, by default), so results stay numerically
+        consistent with the precision the model was fit in.
         """
         for attr in [
             "y_hat",
+            "Sigma_y_hat",
             "x_filtered",
             "P_filtered",
             "x_pred",
             "P_pred",
-            "invP_pred",
             "K",
             "x_smoothed",
             "P_smoothed",
@@ -133,12 +284,32 @@ class StateSpaceResults:
             "S00",
         ]:
             value = getattr(self, attr)
-            if value is not None and not isinstance(value, np.ndarray):
-                setattr(self, attr, np.asarray(value))
+            if value is not None:
+                setattr(self, attr, np.asarray(value, dtype=self.dtype))
 
     def update(self, **kwargs) -> "StateSpaceResults":
-        """
-        Return a NEW StateSpaceResults with updated fields.
+        """Return a new `StateSpaceResults` with some fields replaced.
+
+        Copies every current public (non-underscore-prefixed) attribute
+        except ``today``, overrides the ones given in ``kwargs``, and
+        constructs a new instance from the result. Does not mutate
+        ``self``.
+
+        Parameters
+        ----------
+        **kwargs
+            Attribute name/value pairs to override; each key must already
+            be a public attribute of this instance.
+
+        Returns
+        -------
+        StateSpaceResults
+            A new instance with the requested fields updated.
+
+        Raises
+        ------
+        AttributeError
+            If a key in ``kwargs`` is not an existing public attribute.
         """
 
         # Collect all current attributes (excluding private ones if desired)
@@ -162,6 +333,7 @@ class StateSpaceResults:
         return self.__class__(**current_data)
 
     def _to_numpy(self, arr):
+        """Best-effort conversion of a (possibly JAX) array to NumPy, passing ``None`` through."""
         if arr is None:
             return None
         try:
@@ -188,11 +360,43 @@ class StateSpaceResults:
 
     @property
     def residuals(self) -> Optional[np.ndarray]:
+        """
+        Observation residuals, or `None` if unavailable.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            ``y_obs - y_hat``, shape ``(p, T)`` (``NaN`` where ``y_obs``
+            is missing), or `None` if either ``y_obs`` or ``y_hat`` is
+            unavailable.
+        """
         return self._compute_residuals()
 
     # ---------- Error metrics ----------
     def mse(self, which: str = "global") -> float:
-        """Mean squared error. kind in {'global','space','time'}."""
+        """Mean squared error of the residuals.
+
+        Parameters
+        ----------
+        which : {'global', 'space', 'time'}, default 'global'
+            Aggregation axis: ``'global'`` averages over all
+            (non-missing) entries; ``'space'`` averages over time,
+            returning one value per observed location/variable, shape
+            ``(p,)``; ``'time'`` averages over space, returning one value
+            per time step, shape ``(T,)``. ``NaN`` residuals (missing
+            observations) are ignored.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Mean squared error, aggregated as requested.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is not one of ``'global'``, ``'space'``,
+            ``'time'``.
+        """
         err = self._compute_residuals()
         if which is None:
             return float("nan")
@@ -208,6 +412,18 @@ class StateSpaceResults:
         raise ValueError("which must be one of {'global','space','time'}")
 
     def rmse(self, which: str = "global") -> float:
+        """Root mean squared error of the residuals.
+
+        Parameters
+        ----------
+        which : {'global', 'space', 'time'}, default 'global'
+            Aggregation axis; forwarded to `mse`.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Square root of `mse`, aggregated as requested.
+        """
         v = self.mse(which=which)
         if isinstance(v, np.ndarray):
             return np.sqrt(v)
@@ -217,8 +433,34 @@ class StateSpaceResults:
     def conf_int_state(
         self, which: str = "smoothed", alpha: float = 0.05
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (lower, upper) CI arrays for states.
-        which: 'smoothed'|'filtered' -> uses P_smoothed or P_filtered and corresponding means.
+        """Compute pointwise Gaussian confidence intervals for the
+        latent state.
+
+        For each time step, uses the marginal state mean/variance
+        (:math:`x_t`, :math:`\\mathrm{diag}(P_t)`) and a two-sided
+        Normal quantile: :math:`x_t \\pm z_{1-\\alpha/2}
+        \\sqrt{\\mathrm{diag}(P_t)}`. Does not account for cross-state
+        covariances (only the marginal per-component variance is used).
+
+        Parameters
+        ----------
+        which : {'smoothed', 'filtered'}, default 'smoothed'
+            Whether to use the smoothed (``x_smoothed``/``P_smoothed``)
+            or filtered (``x_filtered``/``P_filtered``) state estimates.
+        alpha : float, default 0.05
+            Significance level; the interval has nominal coverage
+            ``1 - alpha``.
+
+        Returns
+        -------
+        lower, upper : numpy.ndarray, shape (q, T+1)
+            Lower and upper confidence bounds for the state mean.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is invalid, or the required state means/
+            covariances are not available on this results object.
         """
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
@@ -246,60 +488,101 @@ class StateSpaceResults:
     def conf_int_y(
         self, alpha: float = 0.05, prediction: bool = False
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """Confidence intervals for y_hat. If prediction True include measurement noise R when available."""
+        """Compute pointwise Gaussian confidence/prediction intervals
+        for the predicted observations ``y_hat``.
+
+        For each time step, uses :math:`\\hat y_t \\pm z_{1-\\alpha/2}
+        \\sqrt{\\mathrm{diag}(\\Sigma_{\\hat y, t})}`, where
+        :math:`\\Sigma_{\\hat y, t}` is `Sigma_y_hat` (the state-driven
+        predictive covariance, excluding observation noise) plus, when
+        ``prediction=True``, the observation noise covariance ``R`` read
+        from ``self.model`` - turning a confidence interval for the mean
+        response into a prediction interval for a new observation.
+
+        Parameters
+        ----------
+        alpha : float, default 0.05
+            Significance level; the interval has nominal coverage
+            ``1 - alpha``.
+        prediction : bool, default False
+            If True, add the model's observation noise covariance ``R``
+            to ``Sigma_y_hat`` before computing the interval (prediction
+            interval); if False, use ``Sigma_y_hat`` alone (confidence
+            interval for the mean).
+
+        Returns
+        -------
+        lower, upper : numpy.ndarray, shape (p, T)
+            Lower and upper interval bounds for ``y_hat``.
+
+        Raises
+        ------
+        ValueError
+            If ``y_hat`` or `Sigma_y_hat` is not available on this
+            results object.
+        """
+
         alpha = float(alpha)
         z = norm.ppf(1 - alpha / 2.0)
         y_hat = self.y_hat
         if y_hat is None:
             raise ValueError("y_hat not available.")
 
-        # try using model H and P_smoothed to compute predictive var
         p, T = y_hat.shape
-
         model = getattr(self, "model", None)
 
-        Psm = None
-        if self.P_smoothed is not None:
-            Psm = self.P_smoothed
-        elif self.P_filtered is not None:
-            Psm = (
-                self.P_filtered
-            )  # fallback to filtered covariances if smoothed not available
-        else:
-            Psm = None
-
-        if model is not None and hasattr(model, "H") and Psm is not None:
-            H = np.asarray(model.H)
-            R = np.asarray(
-                getattr(model, "R", 0.0 if not prediction else getattr(model, "R", 0.0))
-            )
-            # std = np.zeros((p, T))
-            lower = np.zeros((p, T))
-            upper = np.zeros((p, T))
-
-            for t in range(T):
-                var_y = H @ Psm[:, :, t + 1] @ H.T
-                if prediction:
-                    var_y = var_y + R
-
-                std_t = np.sqrt(np.diag(var_y))
-
-                lower[:, t] = y_hat[:, t] - z * std_t
-                upper[:, t] = y_hat[:, t] + z * std_t
-            return lower, upper
-
-        # fallback to residual std
-        err = self._compute_residuals()
-        if err is None:
+        # Sigma_y_hat is snapshotted at fit time by the concrete model
+        # subclass (e.g. LRStateSpaceResults), not reconstructed here from
+        # the model's H/P_smoothed: `model.H` is mutated in place by every
+        # `fit()` call/iteration, so rebuilding from it here could silently
+        # use a stale H that no longer matches this particular results
+        # object.
+        Sigma_y_hat = getattr(self, "Sigma_y_hat", None)
+        if Sigma_y_hat is None:
             raise ValueError(
-                "Cannot compute y confidence intervals: no residuals and no model covariance."
+                "Cannot compute y confidence intervals: Sigma_y_hat is not "
+                "available on this results object."
             )
-        resid_std = np.nanstd(err)
-        lower = y_hat - z * resid_std
-        upper = y_hat + z * resid_std
-        return lower, upper
 
+        R = np.asarray(getattr(model, "R", 0.0)) if model is not None else np.asarray(0.0)
+        R_diag_matrix = np.diag(R) if (prediction and R.ndim > 0) else None
+
+        lower = np.zeros((p, T), dtype=self.dtype)
+        upper = np.zeros((p, T), dtype=self.dtype)
+        for t in range(T):
+            var_y = np.asarray(Sigma_y_hat[:, :, t])
+            if prediction and R_diag_matrix is not None:
+                var_y = var_y + R_diag_matrix
+
+            std_t = np.sqrt(np.diag(var_y))
+            lower[:, t] = y_hat[:, t] - z * std_t
+            upper[:, t] = y_hat[:, t] + z * std_t
+        return lower, upper
+        
     def coverage_probability(self, alpha: float = 0.05, which="global"):
+        """Empirical coverage probability of the `conf_int_y` prediction
+        intervals.
+
+        Computes the fraction of observed values ``y_obs`` that fall
+        within the ``1 - alpha`` prediction interval from
+        ``conf_int_y(alpha, prediction=True)``; for a well-calibrated
+        model this should be close to ``1 - alpha``.
+
+        Parameters
+        ----------
+        alpha : float, default 0.05
+            Significance level used for the prediction interval.
+        which : {'global', 'space', 'time'}, default 'global'
+            Aggregation axis: ``'global'`` averages over all entries;
+            ``'space'`` averages over time (shape ``(p,)``); ``'time'``
+            averages over space (shape ``(T,)``).
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Empirical coverage probability in ``[0, 1]``, aggregated as
+            requested.
+        """
         return self._coverage_probability(alpha, which)
 
     def _coverage_probability(self, alpha: float = 0.05, which="global"):
@@ -325,9 +608,41 @@ class StateSpaceResults:
         else:
             raise ValueError("which must be 'smoothed' or 'filtered'")
 
+    @staticmethod
+    def _format_runtime_summary(parts) -> Tuple[str, str]:
+        """
+        Build a single "Runtime (a / b / ...): total (va / vb / ...)" summary
+        entry from labeled runtime components (name, seconds). The total is
+        always the sum of the given parts, so it can never drift out of
+        sync with what's shown next to it.
+        """
+        label = "Runtime (" + " / ".join(name for name, _ in parts) + "):"
+        total = sum(value for _, value in parts)
+        rendered = f"{total:.3g} (" + " / ".join(f"{value:.3g}" for _, value in parts) + ")"
+        return label, rendered
+
     # ---------- Diagnostics & summary ----------
     def diagnostics(self) -> Dict[str, float]:
-        """Return a small diagnostics dict computed on residuals (numpy)."""
+        """Compute standard residual-normality/autocorrelation diagnostics.
+
+        Flattens the (non-missing) residuals and computes:
+
+        - Jarque-Bera test statistic and p-value (``jb``/``jb_pvalue``)
+          for normality, based on sample skewness and kurtosis.
+        - Omnibus normality test statistic and p-value
+          (``omni``/``omni_pvalue``, ``statsmodels``'
+          ``omni_normtest``).
+        - Sample skewness and excess kurtosis (``skew``/``kurtosis``).
+        - Durbin-Watson statistic (``dw``) for first-order
+          autocorrelation (values near 2 indicate little
+          autocorrelation).
+
+        Returns
+        -------
+        dict of str to float
+            Keys ``jb``, ``jb_pvalue``, ``omni``, ``omni_pvalue``, ``dw``,
+            ``skew``, ``kurtosis``.
+        """
 
         err = getattr(self, "residuals", None)
         if err is None:
@@ -355,6 +670,20 @@ class StateSpaceResults:
 
 
     def generate_summary(self):
+        """Build the two small key/value tables (model identity/config
+        and fit runtime on the left, fit-quality/residual diagnostics on
+        the right) used by `summary`.
+
+        As a side effect, sets ``self.nobs``, ``self.nspace``,
+        ``self.ntime`` and ``self.missing`` from ``y_obs``.
+
+        Returns
+        -------
+        tuple of list
+            ``(gen_top_left, gen_top_right)``, each a list of
+            ``(label, [value])`` pairs suitable for
+            ``statsmodels.iolib.summary.Summary.add_table_2cols``.
+        """
 
         self.nobs = self.y_obs.size
         self.nspace, self.ntime = self.y_obs.shape
@@ -369,54 +698,55 @@ class StateSpaceResults:
 
 
         # top-left / top-right small tables
-        p, q, T = self.model.shape if hasattr(self.model, "shape") else [("N/A", "N/A", "N/A")]
+        p, q, T = self.model.shape if hasattr(self.model, "shape") else ("N/A", "N/A", "N/A")
 
-        top_left = dict(
+        runtime_label, runtime_value = self._format_runtime_summary(
             [
-                ("Model name:", lambda: [self.model.__class__.__name__]),
-                (
-                    "Model type:",
-                    lambda: [
-                        self.model.type if hasattr(self.model, "type") else "N/A"
-                    ],
-                ),
-                (
-                    "Model order:",
-                    lambda: [
-                        self.model.order if hasattr(self.model, "order") else "N/A"
-                    ],
-                ),
-                ("Dep. Variable:", lambda: [self.model.y_name[0] if hasattr(self.model, "y_name") else "N/A"]),
-                # ("Date:", lambda: [self.today]),
-                # ('Number of obs:', lambda: [self.nobs]),
-                # ('Number of series:', lambda: [self.nspace]),
-                # ('Time length:', lambda: [self.ntime]),
-                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
-                ("# missing:", lambda: [self.missing]),
-                ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
-                ("MSE:", lambda: [f"{self.mse():.2f}"]),
-                ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
-                # ("JAX backend:", lambda: [f"{jax.default_backend()}"]),
-                ("JAX devices:", lambda: [f"{jax.devices()}"]),
+                ("fl.", self.time_filter),
+                ("sm.", self.time_smoother),
+                ("ex.", self.time_expectation),
             ]
         )
 
-        self.time_total = self.time_filter + self.time_smoother + self.time_expectation
-        top_right = {
-            "Jarque-Bera:": lambda: [f"{stats['jb']:.2f} (pvalue: {stats['jb_pvalue']:.2f})"],
-            "Omnibus test:": lambda: [f"{stats['omni']:.2f} (pvalue: {stats['omni_pvalue']:.2f})"],
-            "Durbin-Watson:": lambda: [f"{stats['dw']:.2f}"],
-            "Skewness:": lambda: [f"{stats['skew']:.2f}"],
-            "Kurtosis:": lambda: [f"{stats['kurtosis']:.2f}"],
-            "Coverage Prob.:": lambda: [f"{self._coverage_probability():.2f}, (alpha = 0.05)"],
-            "Runtime total (s):":
+        # Left: identity/config of the model and how it was run.
+        top_left = dict(
+            [
+                ("Model name:", lambda: [self.model.__class__.__name__]),
+                ("Model type (order):",
                     lambda: [
-                        f"{self.time_total:.3g}"
+                        f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
                     ],
-            "Runtime filter (s):": lambda: [f"{self.time_filter:.3g}"],
-            "Runtime smoother (s):": lambda: [f"{self.time_smoother:.3g}"],
-            "Runtime expectation (s):": lambda: [f"{self.time_expectation:.3g}"],
-        }
+                ),
+                ("Dep. Variables:", lambda: [self.model.y_name if hasattr(self.model, "y_name") else "N/A"]),
+                ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
+                ("# missing:", lambda: [self.missing]),
+                ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
+                ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
+                (runtime_label, lambda v=runtime_value: [v]),
+            ]
+        )
+
+        # Right: fit quality and residual diagnostics. Bracketed "(x*)"
+        # values are the reference value expected for normal, uncorrelated
+        # residuals -- not achievable/meaningful targets for MSE/RMSE, so
+        # those are left unannotated.
+        alpha_cov = 0.05
+        top_right = dict(
+            [
+                ("MSE:", lambda: [f"{self.mse():.2f}"]),
+                ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
+                ("Coverage Prob.:", lambda a=alpha_cov: [
+                    f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"
+                    if getattr(self, "Sigma_y_hat", None) is not None
+                    else "N/A"
+                ]),
+                ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (0*) (pvalue: {stats['jb_pvalue']:.2f})"]),
+                ("Omnibus test:", lambda: [f"{stats['omni']:.2f} (0*) (pvalue: {stats['omni_pvalue']:.2f})"]),
+                ("Skewness:", lambda: [f"{stats['skew']:.2f} (0*)"]),
+                ("Kurtosis (excess):", lambda: [f"{stats['kurtosis']:.2f} (0*)"]),
+                ("Durbin-Watson:", lambda: [f"{stats['dw']:.2f} (2*)"]),
+            ]
+        )
 
         # Generate the dictionaly
         gen_top_left = []
@@ -430,15 +760,32 @@ class StateSpaceResults:
 
         return gen_top_left, gen_top_right
 
+    #: Footnote explaining the "(x*)" reference values shown next to the
+    #: residual diagnostics in `generate_summary()`.
+    _DIAGNOSTICS_NOTE = (
+        "(x*) reference value expected for normal, uncorrelated residuals "
+        "(or, for Coverage Prob., the nominal 1 - alpha)."
+    )
+
     def summary(self) -> Summary:
-        """Return a statsmodels Summary object with a brief report."""
+        """Build a ``statsmodels``-style structured summary of the fit:
+        model identity/shape/runtime, log-likelihood, MSE/RMSE, coverage
+        probability and residual diagnostics (Jarque-Bera, Omnibus,
+        skewness, kurtosis, Durbin-Watson).
+
+        Returns
+        -------
+        statsmodels.iolib.summary.Summary
+            Printable summary table; ``str()``/``repr()`` of this
+            results object render this summary.
+        """
         # Ensure numpy arrays for summary stats
 
         self.results = np.array([0])
-        
+
         gen_top_left, gen_top_right = self.generate_summary()
 
-        
+
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
@@ -449,6 +796,7 @@ class StateSpaceResults:
             yname=None,
             xname=None,
         )
+        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
 
         return smry
 
@@ -459,11 +807,25 @@ class StateSpaceResults:
         return str(self.summary())
 
     def as_dict(self) -> Dict[str, Any]:
-        """Return a plain dict with main results converted to NumPy where possible."""
+        """Return a plain dict snapshot of the main results.
+
+        Ensures all array attributes are NumPy arrays first (via
+        `to_numpy`). Useful for serialization or for passing results to
+        code that should not depend on the `StateSpaceResults` class.
+
+        Returns
+        -------
+        dict
+            Keys: ``y_obs``, ``y_hat``, ``Sigma_y_hat``, ``x_filtered``,
+            ``P_filtered``, ``x_smoothed``, ``P_smoothed``, ``llf``,
+            ``mse`` (global), ``rmse`` (global), ``diagnostics`` (see
+            `diagnostics`), ``S11``, ``S10``, ``S00``.
+        """
         self.to_numpy()
         return {
             "y_obs": self.y_obs,
             "y_hat": self.y_hat,
+            "Sigma_y_hat": self.Sigma_y_hat,
             "x_filtered": self.x_filtered,
             "P_filtered": self.P_filtered,
             "x_smoothed": self.x_smoothed,

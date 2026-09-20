@@ -88,7 +88,8 @@ git push -u origin feature/your-feature
 
 
 ## Local development & tests
-Recommended Python workflow (adjust if you use conda/poetry):
+Recommended Python workflow (adjust if you use conda/poetry — see the
+[README](README.md#installation) for the Conda setup):
 
 ```bash
 python -m venv .venv
@@ -100,34 +101,34 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-## Install pre-commit hooks:
+Run the tests:
 ```bash
-pip install pre-commit
-pre-commit install
-pre-commit run --all-files
+pytest
 ```
 
+Lint and type-check (the `dev` extra installs
+[Ruff](https://docs.astral.sh/ruff/), configured in `pyproject.toml`, and
+[mypy](https://mypy-lang.org/) for optional type checking):
+```bash
+ruff check .
+mypy src
+```
 
-## Formatting / linting tools used by the project (run before PR):
-
-- Black (formatter)
-- isort (imports)
-- Ruff/flake8 (linter)
-- Add project-specific commands to CI to ensure consistency.
+> Note: this repository does not yet have a `.pre-commit-config.yaml` or CI
+> workflow configured, so please run the commands above locally before
+> opening a PR.
 
 ## PR checklist
 - [ ] Target branch is `develop`
-- [ ] All tests pass locally and on CI
+- [ ] All tests pass locally (`pytest`)
 - [ ] Code covered by tests (unit/integration where appropriate)
-- [ ] Code formatted (black/isort) and linted (ruff/flake8)
+- [ ] Code linted (`ruff check .`)
 - [ ] Docstrings and user docs updated if public API changed
-- [ ] CHANGELOG entry if applicable
 - [ ] Small, focused scope per PR
 
 ## Review & merge
-- PRs will be reviewed by maintainers. Expect review requests and suggested changes.
-- CI must pass before merging.
-- Maintainers may rebase/squash or request that contributors squash changes prior to merge.
+- PRs will be reviewed by the maintainer. Expect review requests and suggested changes.
+- The maintainer may rebase/squash or request that contributors squash changes prior to merge.
 
 ## Datasets
 When contributing datasets include:
@@ -139,7 +140,7 @@ When contributing datasets include:
 - [ ] A small example/snippet and a script to ingest or validate the dataset
 - [ ] Tests or validation checks for expected fields and ranges
 
-Store datasets or pointers to large datasets in data/ or provide download scripts; avoid committing large binary data to the repo.
+Bundled datasets live under `src/geossm/datasets/`, registered via `geossm.datasets.load_dataset()`. Avoid committing large binary data to the repo — prefer download scripts or pointers for large datasets.
 
 ## Coding guidelines
 - Follow PEP 8 for Python
@@ -149,7 +150,9 @@ Store datasets or pointers to large datasets in data/ or provide download script
 
 ## Security and sensitive data
 - Do not include credentials, private keys, or personal data in commits or issues.
-- For security issues, contact maintainers privately before opening a public issue.
+- For security issues, contact the maintainer privately (see below) before opening a public issue.
 
-## Contact / Maintainers
-If you need help or to escalate, open an issue and tag @maintainers 
+## Contact / Maintainer
+**Jacopo Rodeschini** 
+
+For general questions or help, please open an [Issue](https://github.com/jacopoRodeschini/geossm/issues) first. 

@@ -117,8 +117,8 @@ print(mesh_io)
 
 # %% Create the covariance function
 
-cov_fun = matern_spde([circle], latlon=False, nu=1, var=2, rescale=4)
-cov_fun = cov_fun.setup(mesh_io)
+cov_fun = matern_spde(latlon=False, nu=1, var=2, rescale=4)
+cov_fun = cov_fun.setup(mesh_io, domain=circle)
 
 # PLot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
@@ -185,7 +185,7 @@ model = lrssm(
 print(model)
 
 # Set up the model cov. (univariate)
-model = model.setup(cov_fun=[cov_fun], domain_latent=[circle])
+model = model.setup(cov_fun=[cov_fun])
 print(model)
 
 # %% [Case 1] Create the model parameters and simulate the model

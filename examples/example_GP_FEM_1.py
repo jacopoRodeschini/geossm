@@ -114,7 +114,9 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22, embed=False):
 def minfun(par, H, spdeCov, yObs):
 
     n = len(yObs)
-    rescale = np.exp(par)
+    # par comes in as a length-1 array from scipy's optimizer; gstools'
+    # rescale setter requires a plain (0-d) Python scalar
+    rescale = float(np.exp(par).item())
 
     Q = spdeCov.precision(rescale=rescale)
 
@@ -146,10 +148,10 @@ def minfun(par, H, spdeCov, yObs):
 mesh_io = buildMesh(domain, lc=0.1, points=points, lc_buffer=1)
 
 # Create the covariance funcion
-cov_matern = spdeAppoxCov([domain], latlon=False, nu=1, var=1, rescale=1)
+cov_matern = spdeAppoxCov(latlon=False, nu=1, var=1, rescale=1)
 
 # set the mesh
-cov_matern = cov_matern.setup(mesh_io)
+cov_matern = cov_matern.setup(mesh_io, domain=domain)
 print(cov_matern)
 
 # plot the mesh
@@ -198,8 +200,8 @@ def estimate(n=100):
     mesh_io = buildMesh(domain, lc=0.15, points=points, lc_buffer=0.5)
 
     # Create the covariance funcion
-    cov_matern = spdeAppoxCov([domain], latlon=False, nu=1, var=1, rescale=1)
-    cov_matern = cov_matern.setup(mesh_io)
+    cov_matern = spdeAppoxCov(latlon=False, nu=1, var=1, rescale=1)
+    cov_matern = cov_matern.setup(mesh_io, domain=domain)
 
     # compute the H on the new points (while the mesh is fixed)
     count, notfind, H = cov_matern.fem_solver._compute_basis(points)

@@ -13,16 +13,16 @@ import scipy as sc
 import gstools as gs
 import meshio
 from scipy.spatial.distance import cdist
-from shapely.geometry import Point, Polygon
+from shapely.geometry import MultiPoint, MultiPolygon, Point, Polygon
+from shapely.ops import unary_union
 from gstools.covmodel import Matern
-from scipy.spatial import ConvexHull
+from gstools.tools.geometric import latlon2pos, chordal_to_great_circle
 from statsmodels.iolib.summary import Summary
 from datetime import datetime, timezone
 import time
 
 
 # % Utility functions
-
 
 def meshio_to_mfem_mesh(meshio_mesh):
     """
@@ -106,12 +106,116 @@ def meshio_to_mfem_mesh(meshio_mesh):
     return mfem_mesh
 
 
+def _validate_domain(domain):
+    """
+    Validate and normalize the ``domain`` argument shared by
+    :class:`FEMSolver` and :class:`spdeAppoxCov`.
+
+    ``domain`` describes the region(s) of scientific interest, one polygon
+    per region (e.g. one polygon per landmass for a multi-polygon country
+    such as Italy: Sicily, Sardinia, mainland). It accepts a single shapely
+    ``Polygon``, a single ``MultiPolygon``, or a list/tuple mixing either --
+    any ``MultiPolygon`` is expanded into its constituent polygons, so the
+    return value is always a flat tuple of ``Polygon`` objects.
+
+    ``domain`` is used only to classify *mesh* vertices as inner/outer (see
+    ``FEMSolver.isinner``) -- a vertex is inner if it is covered by *any*
+    single polygon in ``domain``, not by their convex hull.
+
+    ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
+    :math:`\\Omega` is implicitly defined by the mesh handed to
+    ``FEMSolver``/``spdeAppoxCov.setup()``. A reasonable default choice is
+    the convex hull of the union of the ``domain`` polygons (extended by an
+    offset to limit boundary effects), computed by ``_domain_hull(domain)``
+    and exposed as the ``domain_hull`` property on both classes. Neither
+    class enforces that the mesh matches this choice -- use
+    ``FEMSolver.covers_domain()`` to check.
+    """
+    if isinstance(domain, (Polygon, MultiPolygon)):
+        domain = [domain]
+    elif not isinstance(domain, (list, tuple)):
+        raise TypeError(
+            "domain must be a shapely Polygon/MultiPolygon, or a list/tuple of them"
+        )
+
+    polygons = []
+    for poly in domain:
+        if isinstance(poly, MultiPolygon):
+            polygons.extend(poly.geoms)
+        elif isinstance(poly, Polygon):
+            polygons.append(poly)
+        else:
+            raise ValueError(
+                "Each domain element must be a shapely Polygon or MultiPolygon, "
+                f"got {type(poly).__name__}"
+            )
+
+    if len(polygons) == 0:
+        raise ValueError("domain must contain at least one Polygon")
+
+    return tuple(polygons)
+
+
+def _domain_hull(domain):
+    """
+    Convex hull of the union of the ``domain`` polygons -- a reasonable
+    default choice of FEM computational domain :math:`\\Omega`, e.g. to pass
+    as ``boundary`` to ``buildMesh2d``. See ``_validate_domain``.
+    """
+    return unary_union(domain).convex_hull
+
+
 # % FEM solver class
 class FEMSolver:
+    r"""Low-level finite-element engine behind `spdeAppoxCov`.
+
+    Wraps a triangular mesh (e.g. built by `buildMesh2d`) in an MFEM
+    order-1 :math:`H^1` finite element space, and assembles the sparse
+    mass and stiffness matrices that `spdeAppoxCov.precision` combines
+    into the SPDE precision matrix. It also classifies mesh vertices as
+    "inner" (covered by `domain`, the region of scientific interest) or
+    "outer" (part of the surrounding buffer, whose role is only to push
+    the FEM's Neumann boundary effects away from `domain`), evaluates
+    basis functions at arbitrary points (`getBasis`), and reports mesh
+    quality diagnostics (`compute_stats`, `summary`).
+
+    Most users go through `spdeAppoxCov` instead, which builds and owns a
+    `FEMSolver` internally in `spdeAppoxCov.setup()`. `FEMSolver` is
+    exposed directly (e.g. via `spdeAppoxCov.fem_solver`) for lower-level
+    access to the mesh, the assembled matrices, and mesh diagnostics.
+
+    Notes
+    -----
+    Internally, the input `meshio.Mesh` is converted to an `mfem.Mesh` via
+    `meshio_to_mfem_mesh` (2D triangular meshes only); vertices and
+    elements are kept in the order given by the mesh, with no reordering
+    or optimisation performed by this class.
+    """
+
     def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
+        """
+        Parameters
+        ----------
+        meshio_obj : meshio.Mesh
+            The FEM mesh, covering the full computational domain
+            :math:`\\Omega` (e.g. `domain_hull`, the convex hull of the
+            union of `domain`).
+        domain : shapely.geometry.Polygon or MultiPolygon, or a list/tuple
+            of them, optional
+            Region(s) of scientific interest, used only to classify mesh
+            vertices as inner/outer (`isinner`); see `_validate_domain` for
+            the full contract. Defaults to the convex hull of the mesh
+            vertices, i.e. every vertex is treated as inner.
+        verbose : bool, optional
+            Whether to log progress messages.
+        stats : bool, optional
+            Whether to compute mesh quality statistics (angles, areas).
+        """
 
         # Validate inputs
         mesh = None
+        self.verbose = verbose
+        
         try:
             if meshio_obj is not None:
                 if not isinstance(meshio_obj, meshio.Mesh):
@@ -119,9 +223,9 @@ class FEMSolver:
                         f"meshio_obj must be meshio.Mesh, got {type(meshio_obj).__name__}"
                     )
                 # Convert to MFEM if needed (or keep as meshio)
-                self.print_info("Converting meshio.Mesh to mfem.Mesh...")
+                self._log("Converting meshio.Mesh to mfem.Mesh...")
                 mesh = meshio_to_mfem_mesh(meshio_obj)
-                self.print_info("Mesh conversion successful.")
+                self._log("Mesh conversion successful.")
 
         except Exception as e:
             raise RuntimeError(f"Error loading mesh: {str(e)}") from e
@@ -132,24 +236,20 @@ class FEMSolver:
             )
 
         if domain is not None:
-            if not isinstance(domain, (list, tuple)):
-                raise TypeError("domain must be a list of Polygon objects")
-            for poly in domain:
-                if not isinstance(poly, Polygon):
-                    raise ValueError(
-                        "Each domain element must be a shapely Polygon, "
-                        f"got {type(poly).__name__}"
-                    )
+            domain = _validate_domain(domain)
 
         # Store mesh
         self._mesh = mesh
-        self._domain = domain if domain is not None else ConvexHull(self.vertex[:, :2])
+
+        # Fall back to the convex hull of the mesh vertices so every vertex
+        # is treated as inner (no marginalisation) when no domain is given.
+        self._domain = domain if domain is not None else (MultiPoint(self.vertex[:, :2]).convex_hull,)
 
         # Compute the stats associate with the mesh (angles and areas of the triangles)
         if stats == True:
-            self.print_info("Computing mesh quality statistics:angles and areas (takes a while)...")
+            self._log("Computing mesh quality statistics:angles and areas (takes a while)...")
             self._angles, self._areas = self.compute_stats()
-            self.print_info("Mesh quality statistics computed successfully.")
+            self._log("Mesh quality statistics computed successfully.")
         else:
             self._angles, self._areas = None, None
         
@@ -157,11 +257,11 @@ class FEMSolver:
         if self._angles is not None and self._areas is not None:
             msg = f"Angles [min, mean, max] = [{self._angles.min():.2f}, {self._angles.mean():.2f}, {self._angles.max():.2f}] degrees \n"
             msg += f"Areas  [min, mean, max] = [{self._areas.min():.2f}, {self._areas.mean():.2f}, {self._areas.max():.2f}]"
-            self.print_info(msg)
+            self._log(msg)
 
         # Get warning if the mesh has bad quality (e.g. small angles)
         if self._angles is not None and self._angles.min() < 10:
-            self.print_info(
+            self._log(
                 f"Mesh has small angles (min angle = {self._angles.min():.2f} degrees). "
                 "This may lead to numerical instability. Consider refining the mesh or improving its quality."
             )
@@ -175,27 +275,42 @@ class FEMSolver:
         self._inner = None
 
         # Build finite element space
-        self.print_info("Building FE space and computing mass/stiffness matrices...")
+        self._log("Building FE space and computing mass/stiffness matrices...")
         self._fespace = self._build_fespace()
 
         # Classify vertices as inner or outer (boolean array)
         self._inner = self.isinner()
-        
+
+        # Warn if the mesh's convex hull does not fully cover the domain's
+        # (see `covers_domain`); this signals outer vertices may be missing
+        # near the region of interest, biasing the Neumann boundary approx.
+        if not self.covers_domain():
+            self._log(
+                "Mesh does not fully cover convex_hull(unary_union(domain)) "
+                "(see `covers_domain()`/`domain_hull`). Outer vertices needed "
+                "to push boundary effects away from the domain of interest "
+                "may be missing; consider rebuilding the mesh over `domain_hull`."
+            )
+
         # compute matrices now
-        self.print_info("Computing mass and stiffness matrices...")
+        self._log("Computing mass and stiffness matrices...")
         self._mass, self._stiff = self._compute_mass_stiff()
-        self.print_info("Computing mass and stiffness matrices... Done.")
-        self.print_info("FEMSolver initialization complete.")
+        self._log("Computing mass and stiffness matrices... Done.")
+        self._log("FEMSolver initialization complete.")
 
     @property
     def mesh(self):
+        """The underlying `mfem.Mesh` (converted from the input `meshio.Mesh`)."""
         return self._mesh
 
     @property
     def inner(self):
+        """Boolean array, one entry per `vertex`, True where the vertex is
+        classified as inner (covered by `domain`); see `isinner`."""
         return self._inner
 
     def _build_fespace(self):
+        """Build the order-1 H1 finite element space on `mesh`."""
 
         # Create a finite element space
         # Define a finite element space on the mesh. Here we use vector finite
@@ -212,7 +327,16 @@ class FEMSolver:
             raise RuntimeError(f"Failed to build finite element space: {str(e)}")
 
     def isinner(self, points=None):
-        """Classify vertices as interior or boundary based on domain."""
+        """
+        Classify vertices as inner or outer with respect to `domain`.
+
+        A point is inner if it is covered by *any single* polygon in
+        `domain` -- each polygon is tested on its own (not on the convex
+        hull of their union), so for a multi-polygon domain (e.g. Sicily,
+        Sardinia, mainland Italy) a mesh vertex sitting between two
+        landmasses, inside their shared convex hull but outside every
+        individual polygon, is classified as outer.
+        """
         # Use provided domain polygons
         if points is not None:
             phy_points = np.asarray(points, dtype=np.float64)
@@ -228,6 +352,8 @@ class FEMSolver:
         return inner
 
     def _compute_mass_stiff(self):
+        """Assemble the sparse mass and stiffness matrices on `fespace`,
+        restricted to `effective_dofs` rows/columns."""
         # Compute the mass and stiff matrix (static matrix -> computed just one time)
 
         # Get the Mass (C matrix in RUE-LINGDEN) and Stiffness matrix (G in RUE)
@@ -286,10 +412,42 @@ class FEMSolver:
         )
 
     def getBasis(self, phy_points=None):
+        """
+        Evaluate the FE basis functions at a set of physical points.
+
+        For each point, locates the mesh element that contains it and
+        evaluates every basis function of that element there, giving a
+        sparse "observation" matrix `H` such that ``H @ field_at_vertices``
+        interpolates the FEM field at `phy_points`.
+
+        Parameters
+        ----------
+        phy_points : (p, 2) array_like, optional
+            Physical-space points to evaluate the basis at. Defaults to
+            the mesh vertices (`vertex`), giving the identity-like mapping
+            used e.g. to sanity-check the FE space.
+
+        Returns
+        -------
+        count : int
+            Number of points for which a containing mesh element was
+            found (see `mfem.Mesh.FindPoints`).
+        notfindInx : ndarray of int
+            Indices (into `phy_points`) of points for which no containing
+            element could be found -- point search is not guaranteed to
+            succeed even for points that do lie inside the mesh.
+        H : scipy.sparse.csr_matrix, shape (p, effective_dofs)
+            Basis functions evaluated at each point, one row per point and
+            one column per (inner + outer) mesh vertex/DOF. Rows for
+            points in `notfindInx` are all zero. Entries below `1e-8` are
+            zeroed out for numerical stability.
+        """
         count, notfindInx, H = self._compute_basis(phy_points)
         return count, notfindInx, H
 
     def _compute_basis(self, phy_points=None, thr=1e-5):
+        """Core of `getBasis`; `thr` is currently unused (kept for future
+        thresholding of the returned basis values)."""
         # @Points = physical point
 
         # Create the list of pysical points
@@ -385,6 +543,30 @@ class FEMSolver:
         alpha_triangle=0.5,
         alpha_border=0.5,
     ):
+        """
+        Plot the mesh: all triangle edges, inner/outer vertices, boundary
+        edges (dashed red), and the `domain` polygon(s) (orange outline).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw on. A new figure/axes is created if not given.
+        figsize : tuple of float, default (10, 8)
+            Figure size, only used when `ax` is not given.
+        title : str, default "Title"
+            Plot title.
+        alpha_vertex : float, default 1
+            Transparency of the inner/outer vertex markers.
+        alpha_triangle : float, optional
+            Unused (kept for interface compatibility); triangle edges are
+            always drawn with a fixed alpha of 0.5.
+        alpha_border : float, default 0.5
+            Transparency of the dashed boundary-edge lines.
+
+        Returns
+        -------
+        matplotlib.axes.Axes
+        """
 
         # Convert the vertex array to a numpy array
         vertex = self.vertex
@@ -466,7 +648,20 @@ class FEMSolver:
         return ax
 
     def get_distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """
+        Flat Euclidean pairwise distance between `points` and the mesh
+        `vertex` coordinates (or between mesh vertices and themselves).
+
+        Parameters
+        ----------
+        points : (p, 2) array_like, optional
+            Query points. Defaults to `vertex`, giving the full
+            vertex-to-vertex distance matrix.
+
+        Returns
+        -------
+        ndarray, shape (nvertex, nvertex) or (p, nvertex)
+        """
         return (
             cdist(self.vertex, self.vertex)
             if points is None
@@ -474,7 +669,7 @@ class FEMSolver:
         )
 
     def distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """Alias for `get_distance`."""
 
         return self.get_distance(points=points)
 
@@ -518,6 +713,7 @@ class FEMSolver:
 
     @property
     def nvertex(self):
+        """Number of mesh vertices (= `effective_dofs`)."""
         return len(self.vertex)
 
     @property
@@ -527,6 +723,8 @@ class FEMSolver:
 
     @property
     def elements(self):
+        """(nelements, 3) ndarray of int -- vertex indices (into `vertex`)
+        making up each mesh triangle."""
         triangles = []
 
         for i in range(self.mesh.GetNE()):
@@ -541,6 +739,8 @@ class FEMSolver:
 
     @property
     def box(self):
+        """Mesh bounding box as ``[minx, miny, maxx, maxy]`` (rounded to 2
+        decimals)."""
 
         box  = self.mesh.GetBoundingBox()
         box = np.round(box, 2).tolist()
@@ -551,31 +751,58 @@ class FEMSolver:
 
     @property
     def domain(self):
+        """Tuple of `shapely.geometry.Polygon`: region(s) of scientific
+        interest used to classify vertices as inner/outer (see
+        `_validate_domain` / `isinner`)."""
         return self._domain
+
+    @property
+    def domain_hull(self):
+        """Convex hull of the union of `domain` -- see `_domain_hull`."""
+        return _domain_hull(self._domain)
+
+    def covers_domain(self):
+        """
+        Check that the mesh covers the FEM computational domain Ω.
+
+        Simple necessary (not sufficient) check: whether the convex hull of
+        the mesh vertices covers `domain_hull`, the convex hull of the union
+        of `domain`. Does not check the mesh's actual (possibly non-convex)
+        boundary shape, only its convex extent.
+        """
+        mesh_hull = MultiPoint(self.vertex[:, :2]).convex_hull
+        return mesh_hull.covers(self.domain_hull)
 
     # Property for number of boundary elements (mesh.GetNBE())
     @property
     def nbElements(self):
+        """Number of boundary elements (edges, for a 2D mesh)."""
         return self.mesh.GetNBE()
 
     @property
     def nbEdges(self):
+        """Total number of mesh edges."""
         return self.mesh.GetNEdges()
 
     @property
     def geoshape(self):
+        """MFEM geometry type of the mesh elements (e.g. triangle)."""
         return self.mesh.GetElementGeometry(0)
 
     @property
     def getBoundaryEdge(self):
+        """(nbElements, 2) ndarray of int -- vertex-index pairs for each
+        boundary edge."""
         boundaryEdge = []
-        for i in range(self.nbElement):
+        for i in range(self.nbElements):
             boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
 
         return np.array(boundaryEdge)
 
     @property
     def boundary_vertex(self, boolean=True):
+        """(nbElements, 2) ndarray of int -- vertex-index pairs of the
+        boundary elements (see `nbElements`)."""
         bdr_vertex = []
         for i in range(self.mesh.GetNBE()):
             bdr_vertex.append(self.mesh.GetBdrElement(i).GetVerticesArray())
@@ -590,11 +817,14 @@ class FEMSolver:
     # Property for the space dimension (fespace.GetVDim())
     @property
     def fespace_order(self):
+        """Vector dimension of `fespace` (1 for the scalar H1 space used here)."""
         return self._fespace.GetVDim()
 
     # Property for number of local degrees of freedom (fespace.GetNDofs())
     @property
     def ndofs(self):
+        """Number of scalar degrees of freedom in `fespace` (all mesh
+        vertices, before cutting to `effective_dofs`)."""
         return self._fespace.GetNDofs()
 
     @property
@@ -605,14 +835,19 @@ class FEMSolver:
     # Property for number of vector DOFs (fespace.GetVSize())
     @property
     def GetVSize(self):
+        """Total number of vector DOFs in `fespace` (`ndofs * fespace_order`)."""
         return self._fespace.GetVSize()
 
     @property
     def stiff(self):
+        """Sparse stiffness matrix :math:`G` (the `<grad(phi_i), grad(phi_j)>`
+        FEM Laplacian term), shape `(effective_dofs, effective_dofs)`."""
         return self._stiff
 
     @property
     def mass(self):
+        """Sparse (diagonal, lumped) mass matrix :math:`C`, shape
+        `(effective_dofs, effective_dofs)`."""
         return self._mass
 
     # Property for number of vertices (mesh.GetNV())
@@ -648,10 +883,27 @@ class FEMSolver:
 
     @property
     def shape(self):
+        """Tuple `(nvertex, nelements, nbElements)`."""
         return (self.nvertex, self.nelements, self.nbElements)
 
 
     def compute_angles(self, vertex, triangle):
+        """
+        The three interior angles (degrees) of a single triangle.
+
+        Parameters
+        ----------
+        vertex : (n, 2) array_like
+            Vertex coordinates array to index into.
+        triangle : array_like of int, length 3
+            Indices (into `vertex`) of the triangle's three corners.
+
+        Returns
+        -------
+        ndarray, shape (3,)
+            Angles at each of the three corners, in the same order as
+            `triangle`.
+        """
         A, B, C = vertex[triangle]
 
         def angle(a, b, c):
@@ -665,11 +917,38 @@ class FEMSolver:
         return np.array([angle(A, B, C), angle(B, C, A), angle(C, A, B)])
 
     def compute_area(self, vertex, triangle):
+        """
+        Area of a single triangle (shoelace formula).
+
+        Parameters
+        ----------
+        vertex : (n, 2) array_like
+            Vertex coordinates array to index into.
+        triangle : array_like of int, length 3
+            Indices (into `vertex`) of the triangle's three corners.
+
+        Returns
+        -------
+        float
+        """
         A, B, C = vertex[triangle]
         return 0.5 * abs(A[0] * (B[1] - C[1]) + B[0] * (C[1] - A[1]) + C[0] * (A[1] - B[1]))
 
 
     def compute_stats(self):
+        """
+        Interior angles and areas of every mesh triangle (via
+        `compute_angles`/`compute_area`); used by `__init__` (when
+        ``stats=True``) to populate `angles`/`areas` and warn about
+        poor-quality (small-angle) meshes.
+
+        Returns
+        -------
+        angles : (nelements, 3) ndarray
+            Interior angles (degrees) of each triangle.
+        areas : (nelements,) ndarray
+            Area of each triangle.
+        """
 
         # compute angles for all triangles
         angles = np.array([self.compute_angles(self.vertex, tri) for tri in self.elements])
@@ -682,28 +961,29 @@ class FEMSolver:
     
     @property
     def angles(self):
+        """(nelements, 3) ndarray of the triangles' interior angles
+        (degrees), or None if `__init__` was called with ``stats=False``."""
         return self._angles
-    
+
     @property
     def areas(self):
+        """(nelements,) ndarray of triangle areas, or None if `__init__`
+        was called with ``stats=False``."""
         return self._areas
-    
+
 
     def generate_summary(self):
+        """Build the (label, value) rows shown by `summary`, as two lists
+        of ``(str, [str])`` pairs (left and right columns)."""
         # compute the angles and areas of the triangles
 
         top_left = dict(
                     [
                         ("Solver. type:", lambda: [self.__class__.__name__]),
-                        #("Scale (kappa):", lambda: f"{self.rescale:.2f}"),
-                        #("Range (theta):", lambda: f"{np.sqrt(8)/self.range:.2f}"),
-                        #("Variance (s2):", lambda: f"{self.var:.2f}"),
-                        #("Nu:", lambda: f"{self.nu:.2f}"),
-                        ("Mesh vertex",lambda: [f"{self.nvertex}"]),
+                        ("Mesh vertex:",lambda: [f"{self.nvertex}"]),
                         ("Mesh triangles:", lambda: [f"{self.nelements}"]),
-                        ("Mesh lines:", lambda: [f"{self.nbElements}"]), 
-                        ("Mesh inner vertex (rank):", lambda: [f"{self.n_inner_points}"]),
-                        ("Mesh outer vertex:", lambda: [f"{self.n_outer_points}"]),   
+                        ("Mesh lines:", lambda: [f"{self.nbElements}"]),
+                        ("Mesh vertex (inner, outer):", lambda: [f"{self.n_inner_points}, {self.n_outer_points}"]),
                     ]
                 )
         if self.angles is None or self.areas is None:
@@ -712,15 +992,15 @@ class FEMSolver:
         else:
             top_left["Mesh angle [min, mean, max]:"] = lambda: [f"[{self.angles.min():.2f}, {self.angles.mean():.2f}, {self.angles.max():.2f}]"]
             top_left["Mesh area [min, mean, max]:"] = lambda: [f"[{self.areas.min():.2f}, {self.areas.mean():.2f}, {self.areas.max():.2f}]"]
-            
 
 
+        # "Mesh shape" is deliberately not repeated here -- it is just
+        # (nvertex, nelements, nbElements), already shown above.
         top_right = dict(
                     [
                         ("Box:", lambda: [f"{self.box}"]),
                         ("FE space order:", lambda: [f"{self.fespace_order}"]),
                         ("Mesh DOFs:", lambda: [f"{self.ndofs}"]),
-                        ("Mesh shape:", lambda: [f"{self.shape}"]),
                         ("Mass matrix shape:", lambda: [f"{self.mass.shape}"]),
                         ("Stiff matrix shape:", lambda: [f"{self.stiff.shape}"]),
                         ("Inner indx. (shape)", lambda: [f"{self.inner.shape}"]),
@@ -735,16 +1015,19 @@ class FEMSolver:
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
         return gen_top_left, gen_top_right
 
     def summary(self):
+        """Return a `statsmodels.iolib.summary.Summary` table of mesh/FE
+        diagnostics (vertex/element counts, angle & area ranges, DOFs,
+        matrix shapes, ...); also backs `__str__`."""
 
-        
+
         # Add the header to the summary
         gen_top_left, gen_top_right = self.generate_summary()
-        
+
         smry = Summary()
         smry.add_table_2cols(
             self,
@@ -758,14 +1041,8 @@ class FEMSolver:
         return smry
 
     def __str__(self):
-        
         return self.summary().as_text()
-
-    def __repr__(self):
-        # plot the mesh
-        self.plot_mesh(title="FEM Mesh Visualization")
-        return self.__str__()
-
+    
     def _is_verbose(self, verbose=None) -> bool:
         return self.verbose if verbose is None else verbose
 
@@ -774,7 +1051,7 @@ class FEMSolver:
             self.print_info(msg)
 
     def print_info(self, msg):
-
+        """Print `msg` prefixed with a UTC timestamp."""
         dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
         print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
@@ -876,43 +1153,49 @@ class FEMSolver:
 class spdeAppoxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
-     Notes
-     -----
-     This model is given by the following correlation function
+    See [Rasmussen2003]_ for background on the Matérn family of
+    covariance functions in the Gaussian-process setting that this class
+    approximates. Solves the SPDE :math:`(\kappa^2 - \Delta)^{\alpha/2} x = W` by a finite
+    element (FEM) discretisation with Neumann boundary conditions on a mesh
+    covering the domain (see `setup`), giving the sparse precision matrix
+    `precision()` -- optionally marginalised onto the "inner" vertices of
+    `domain` via `precision(marginal=True)`, which is what other models
+    (e.g. `LRStateSpaceModel`) should generally use.
 
-     Using Neumann boundary conditions
+    Notes
+    -----
+    `spdeAppoxCov` extends `gstools.covmodel.Matern`, but only `precision()`
+    (and `emp_range`, `sigma2k`, `distance()`) are re-defined in terms of the
+    FEM discretisation. The methods inherited unchanged from `Matern` --
+    `variogram`, `covariance`, `correlation`, `spectrum`, `spectral_density`,
+    and the `*_yadrenko` variants -- describe the *nominal*, stationary,
+    infinite-domain Matérn process that this SPDE approximates, using
+    `rescale` as :math:`\kappa`. They are exact only in the far interior of
+    the mesh, away from the boundary; they do **not** reflect the finite
+    mesh's boundary effects, nor the Schur-complement marginalisation used
+    by `precision(marginal=True)`. Use them for diagnostics/plotting
+    against the nominal target kernel, not as the exact model -- for that,
+    use `precision()`/`precision(marginal=True)`.
 
-     References
+    References
     ----------
     .. [Rasmussen2003] Rasmussen, C. E.,
            "Gaussian processes in machine learning." Summer school on
            machine learning. Springer, Berlin, Heidelberg, (2003)
-
-
     """
 
     def __init__(
-        self, domain, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0
+        self, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
     ):
+        """
+        Parameters
+        ----------
+        latlon, geo_scale, nu, var, rescale : see `gstools.covmodel.Matern`.
+        verbose : bool, optional
+            Whether to log progress messages.
+        """
 
-        # update the geo matern parameter
-        # self._nu = nu         # smoothness
-        # self._s2 = s2         # Marginal vari
-        # already store inside the matern superclass class
-        # self.rescale = rescale  # Rescale paramter
-        # self.nu = nu
-        # self.s2 = s2
-        # domain = list of shapely polygon that define the inner area (or multipolygon)
-
-        # list of the domain
-        # Validate domain
-        if not isinstance(domain, (list, tuple)):
-            raise TypeError("domain must be a list of Polygon objects")
-        if len(domain) == 0:
-            raise ValueError("domain must contain at least one Polygon")
-
-        self._domain = domain
-        self._ndomain = len(domain)
+        self.verbose = verbose
 
         # Mesh storage
         self._meshIO = None
@@ -921,6 +1204,7 @@ class spdeAppoxCov(Matern):
         self._fem_solver = None
 
         # Initialize parent Matern class
+        self._log(f"Initializing Matern covariance model (nu={nu}, rescale={rescale})...")
         super().__init__(
             dim=2,
             var=var,
@@ -935,15 +1219,30 @@ class spdeAppoxCov(Matern):
             spatial_dim=2,
             nu=nu,
         )
+        self._log("spdeAppoxCov initialization complete.")
 
     @property
     def meshIO(self):
+        """The `meshio.Mesh` passed to `setup`.
+
+        Raises
+        ------
+        RuntimeError
+            If `setup` hasn't been called yet.
+        """
         if self._meshIO is None:
             raise RuntimeError("Mesh not loaded. Call setup() with a mesh first.")
         return self._meshIO
 
     @property
     def fem_solver(self):
+        """The `FEMSolver` built by `setup` from `meshIO`/`domain`.
+
+        Raises
+        ------
+        RuntimeError
+            If `setup` hasn't been called yet.
+        """
         if self._fem_solver is None:
             raise RuntimeError("FEM solver not initialized. Call setup() first.")
         return self._fem_solver
@@ -960,17 +1259,30 @@ class spdeAppoxCov(Matern):
 
         return base
 
-    def setup(self, mesh_obj: meshio._mesh.Mesh, stats=True, verbose=True):
+    def setup(self, mesh_obj: meshio._mesh.Mesh, domain=None, stats=True):
         """
         Initialize the covariance model with a mesh.
 
         This method must be called after instantiation to set up the FEM
-        discretization. Provide either meshpath or mesh_obj, not both.
+        discretization.
 
         Parameters
         ----------
-        mesh_obj : meshio.Mesh, optional
+        mesh_obj : meshio.Mesh
             A meshio.Mesh object (already loaded in memory)
+        domain : shapely.geometry.Polygon or MultiPolygon, or a list/tuple
+            of them, optional
+            Region(s) of scientific interest, e.g. one polygon (or a single
+            MultiPolygon) per landmass for a multi-polygon country (Sicily,
+            Sardinia, mainland Italy). Any MultiPolygon is expanded into its
+            constituent polygons. Forwarded to `FEMSolver`, where it is used
+            only to classify mesh vertices as inner/outer -- see
+            `_validate_domain` for the full contract, including how it
+            differs from the FEM computational domain :math:`\\Omega`
+            (implicitly given by `mesh_obj`; see `domain_hull` for a
+            reasonable default choice used to build it). If omitted,
+            `FEMSolver` falls back to the convex hull of the mesh's own
+            vertices, i.e. every vertex is treated as inner.
         stats : bool, optional
             Whether to compute mesh quality statistics (default is True)
 
@@ -982,7 +1294,7 @@ class spdeAppoxCov(Matern):
         Raises
         ------
         ValueError
-            If neither or both arguments are provided
+            If `domain` is invalid (see `_validate_domain`)
         IOError
             If meshpath file cannot be read
         RuntimeError
@@ -993,7 +1305,15 @@ class spdeAppoxCov(Matern):
         >>> mesh = meshio.read("my_mesh.msh")
         >>> cov.setup(mesh_obj=mesh)
         """
+        # Validate domain (same contract as FEMSolver, see _validate_domain);
+        # left unvalidated (None) so FEMSolver applies its own
+        # convex-hull-of-vertices default.
+        domain = _validate_domain(domain) if domain is not None else None
+        self._log(f"Validated domain: {len(domain)} polygon(s)." if domain is not None
+                   else "No domain provided; defaulting to the mesh's own convex hull.")
+
         # Load mesh
+        self._log("Loading mesh for SPDE FEM discretization...")
         try:
             if mesh_obj is not None:
                 if not isinstance(mesh_obj, meshio.Mesh):
@@ -1006,7 +1326,9 @@ class spdeAppoxCov(Matern):
         # Initialize FEM solver
         try:
             self._meshIO = mesh_obj  # Store the mesh for potential reinitialization
-            self._fem_solver = FEMSolver(mesh_obj, domain=self._domain, verbose=verbose, stats=stats)
+            self._log("Initializing FEM solver...")
+            self._fem_solver = FEMSolver(mesh_obj, domain=domain, verbose=self.verbose, stats=stats)
+            self._log("FEM solver initialized.")
 
         except Exception as e:
             raise RuntimeError(f"Failed to initialize FEM solver: {str(e)}") from e
@@ -1045,31 +1367,110 @@ class spdeAppoxCov(Matern):
 
         return Q
 
-    def precision(self, rescale=None):
+    def precision(self, rescale=None, marginal=False):
         """
-        Compute the precision matrix (Q, sparse) for spatial process z with marginal variance
-        sigma2_process
+        Compute the precision matrix (Q) for the spatial process z with
+        marginal variance sigma2_process.
 
+        Parameters
+        ----------
+        rescale : float, optional
+            If given, updates `self.rescale` (the SPDE kappa) before
+            computing the precision matrix.
+        marginal : bool, optional
+            If True, return the precision matrix marginalised (via the
+            Schur complement, see `_schur_marginal_precision`) onto the
+            `domain` inner vertices only, integrating out the outer
+            (boundary) vertices -- i.e. the actual precision of the latent
+            field once the mesh's boundary effects have been removed, as
+            used e.g. by `LRStateSpaceModel`. Default: False, i.e. the full
+            FEM precision matrix over every mesh vertex (inner and outer).
+
+        Returns
+        -------
+        scipy.sparse matrix if `marginal=False`, else a dense numpy array
+            (the Schur complement is generally dense even though `Q` is
+            sparse).
         """
+        Q = self._compute_precision_spde(rescale)
+        if not marginal:
+            return Q
+        return self._schur_marginal_precision(Q, self.fem_solver.inner)
 
-        return self._compute_precision_spde(rescale)
+    @staticmethod
+    def _schur_marginal_precision(Q, inner_mask):
+        """
+        Marginal precision matrix of the "inner" (domain-of-interest)
+        vertices, `Q_11 - Q_12 @ inv(Q_22) @ Q_12.T`, via the Schur
+        complement of the full SPDE precision matrix `Q` with respect to
+        the "outer" (boundary) vertices.
+
+        Computes the middle term as `solve(Q_22, Q_12.T)` instead of
+        `inv(Q_22) @ Q_12.T`: solving directly for the (n_outer, n_inner)
+        right-hand side `Q_12.T` avoids the wasted work of inverting all of
+        Q_22 (an (n_outer, n_outer) matrix) when only its action on Q_12.T
+        is ever used, and is the more numerically stable formulation.
+        """
+        inx = np.asarray(inner_mask, dtype=bool)
+        Q_11 = Q[inx, :][:, inx]
+        Q_12 = Q[inx, :][:, ~inx]
+        Q_22 = Q[~inx, :][:, ~inx]
+
+        Q_22_dense = Q_22.toarray() if sp.issparse(Q_22) else Q_22
+        Q_12_dense = Q_12.toarray() if sp.issparse(Q_12) else Q_12
+
+        return Q_11 - Q_12 @ np.linalg.solve(Q_22_dense, Q_12_dense.T)
 
     def distance(self, points=None):
-        """Get the distance between the (vertex, points) or (vertex, vertex)"""
+        """
+        Pairwise distance between mesh vertices (or `points` and mesh
+        vertices).
 
-        return self._fem_solver.distance(points=points)
+        Honors `latlon`/`geo_scale` the same way the parent `Matern` model
+        does: great-circle distance (in `geo_scale` units) when
+        `latlon=True`, flat Euclidean distance on the raw mesh/point
+        coordinates otherwise.
+
+        Note this only affects distance-based diagnostics (e.g. comparing
+        against `variogram`/`covariance`, see the class Notes) -- the FEM
+        stiffness/mass matrices behind `precision()` are always assembled
+        directly on the raw mesh coordinates with a flat metric, regardless
+        of `latlon`. A raw lon/lat mesh under `latlon=True` therefore still
+        carries anisotropic distortion (up to ~cos(latitude)) in the FEM
+        operator that this distance correction does not fix; for a
+        geodesically accurate SPDE solve, build the mesh in a projected
+        (e.g. UTM/km) CRS instead.
+        """
+        if not self.latlon:
+            return self._fem_solver.distance(points=points)
+
+        vertex = self._fem_solver.vertex[:, :2]
+        query = vertex if points is None else np.asarray(points, dtype=np.float64)[:, :2]
+
+        # lon/lat (degrees) -> chordal 3D positions on a `geo_scale`-radius
+        # sphere -> honest great-circle distance, matching how the parent
+        # Matern's vario_yadrenko/cov_yadrenko/cor_yadrenko interpret `r`.
+        pos_vertex = latlon2pos([vertex[:, 1], vertex[:, 0]], radius=self.geo_scale)
+        pos_query = latlon2pos([query[:, 1], query[:, 0]], radius=self.geo_scale)
+        chordal = cdist(pos_query.T, pos_vertex.T)
+        return chordal_to_great_circle(chordal, radius=self.geo_scale)
 
     # property:: spatial process
     @property
     def emp_range(self):
-        """Return the empirical range paramiter"""
+        """Practical spatial correlation range of the Matérn field,
+        :math:`\\sqrt{8 \\nu} / \\kappa`, i.e. the same `rescale`-based
+        range formula used by the parent `Matern` model, expressed in the
+        distance units of `rescale`/`geo_scale`."""
         return np.sqrt(8 * self.nu) / self.rescale
 
     @property
     def sigma2k(self):
         """
-        Return the marginal variance of the standardise approximate spatial SPDE process
-        Variance of the aproximate field x(u). Eq. 2 and Eq. 9
+        Marginal variance of the standardized SPDE approximation, i.e. the
+        variance of the approximate field x(u) obtained from `rescale`
+        (:math:`\\kappa`) alone. Used by `_compute_precision_spde` as the
+        scalar multiplier of the precision matrix.
         """
         return sc.special.gamma(1) / (
             sc.special.gamma(2) * 4 * np.pi * (self.rescale**2)
@@ -1077,11 +1478,46 @@ class spdeAppoxCov(Matern):
 
     @property
     def domain(self):
-        return self._domain
+        """
+        Region(s) of scientific interest (see `_validate_domain`).
+        Delegates to `fem_solver.domain`, so it is only available once
+        `setup()` has been called -- `domain` is now a `setup()`-only
+        argument, since nothing reads it before the mesh exists.
+        """
+        return self._fem_solver.domain if self._fem_solver is not None else None
+
+    @property
+    def domain_hull(self):
+        """
+        Convex hull of the union of `domain` -- a reasonable default choice
+        of FEM computational domain Ω, e.g. to pass as `domain` to
+        `buildMesh2d` before calling `setup()`. See `_domain_hull`.
+
+        Raises
+        ------
+        RuntimeError
+            If `setup()` hasn't been called yet -- `domain` is unknown
+            until then.
+        """
+        if self.domain is None:
+            raise RuntimeError(
+                "Domain not set. Call setup(mesh_obj, domain=...) first."
+            )
+        return _domain_hull(self.domain)
+
+    def covers_domain(self):
+        """
+        Check that the mesh (set via `setup()`) covers `domain_hull`. See
+        `FEMSolver.covers_domain`.
+        """
+        return self.fem_solver.covers_domain()
 
 
     def generate_summary(self):
-        
+        """Build the (label, value) rows shown by `summary`, as two lists
+        of ``(str, [str])`` pairs (left and right columns); includes the
+        `fem_solver`'s own rows once `setup()` has been called."""
+
         top_left = dict(
                     [
                         ("Cov. type:", lambda: [self.__class__.__name__]),
@@ -1105,9 +1541,9 @@ class spdeAppoxCov(Matern):
 
         gen_top_right = []
         for item in top_right.keys():
-            gen_top_right.append((item, top_right[item]()))
+            gen_top_right.append((item, list(top_right[item]())))
 
-        
+
         if hasattr(self,"fem_solver"):
             gen_top_left_solver, gen_top_right_solver = self.fem_solver.generate_summary()
        
@@ -1118,12 +1554,15 @@ class spdeAppoxCov(Matern):
         return gen_top_left, gen_top_right
 
     def summary(self):
+        """Return a `statsmodels.iolib.summary.Summary` table of the model
+        (kappa/range/variance/nu) and, once `setup()` has been called, the
+        underlying `fem_solver`'s mesh diagnostics; also backs `__str__`."""
 
         gen_top_left, gen_top_right = self.generate_summary()
 
-        
+
         # Add the header to the summary
-        
+
         smry = Summary()
         smry.add_table_2cols(
             self,
@@ -1136,6 +1575,18 @@ class spdeAppoxCov(Matern):
   
         return smry
 
+
+    def _is_verbose(self, verbose=None) -> bool:
+        return self.verbose if verbose is None else verbose
+
+    def _log(self, msg: str, verbose=None) -> None:
+        if self._is_verbose(verbose):
+            self.print_info(msg)
+
+    def print_info(self, msg):
+        """Print `msg` prefixed with a UTC timestamp."""
+        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
+        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
     def __getstate__(self):
         # Create a dictionary of the object's state excluding non-picklable attributes

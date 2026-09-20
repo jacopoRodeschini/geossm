@@ -107,9 +107,9 @@ def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
 mesh_io = buildMesh(domain, 0.25, points, lc_buffer=1)
 print(mesh_io)
  
-# Create the covariance function  
-cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-cov_fun = cov_fun.setup(mesh_io)
+# Create the covariance function
+cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+cov_fun = cov_fun.setup(mesh_io, domain=domain)
 
 print(cov_fun.summary())
 cov_fun.fem_solver.plot_mesh()
@@ -179,8 +179,8 @@ plt.show()
 
 # %% Build the lrssm and set the covariance function
 
-model = lrssm(df=gdf, domain=[domain], verbose=True)
-model = model.setup(cov_fun=[cov_fun], domain_latent=[domain])
+model = lrssm(df=gdf, formulas=None, domain=[domain], verbose=True)
+model = model.setup(cov_fun=[cov_fun])
 print(model)
 
 # Set up the model cov. 
@@ -218,20 +218,20 @@ plt.show()
 # 0) Create the geopandas dataframe with the simulated data
 gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
-# 1) Create the covariance matrix 
-est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-est_cov_fun = est_cov_fun.setup(mesh_io)
+# 1) Create the covariance matrix
+est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2)
+est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
 # 2) Create the model
 model = lrssm(
-    df=gdf, 
-    formulas=["y_sim ~ 1"], 
-    domain=[domain], 
+    df=gdf,
+    formulas=["y_sim ~ 1"],
+    domain=[domain],
     verbose=True)
 
 
-# 3) Set up the model cov. 
-model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
+# 3) Set up the model cov.
+model = model.setup(cov_fun=[est_cov_fun])
 print(model)
 
 # 4) fit the model 
@@ -252,21 +252,21 @@ points_lr = points[inx, :]
 lr_mesh_io = buildMesh(domain, 0.5, points_lr, lc_buffer=0.5)
 print(lr_mesh_io)
 
-# 1) Create the covariance matrix 
-lr_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-lr_cov_fun = est_cov_fun.setup(lr_mesh_io)
+# 1) Create the covariance matrix
+lr_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2)
+lr_cov_fun = lr_cov_fun.setup(lr_mesh_io, domain=domain)
 print(lr_cov_fun.summary())
 
 # 2) Create the model
 lr_model = lrssm(
-    df=gdf, 
-    formulas=["y_sim ~ 1"], 
-    domain=[domain], 
+    df=gdf,
+    formulas=["y_sim ~ 1"],
+    domain=[domain],
     verbose=True)
 
 
-# 3) Set up the model cov. 
-lr_model = lr_model.setup(cov_fun=[lr_cov_fun], domain_latent=[domain])
+# 3) Set up the model cov.
+lr_model = lr_model.setup(cov_fun=[lr_cov_fun])
 print(model)
 
 # 4) fit the low-rank model 

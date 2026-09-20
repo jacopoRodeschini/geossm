@@ -77,6 +77,7 @@ plt.show()
 # %% Build the LRSSM model
 
 domain = [Polygon(buffer)]
+
 model = lrssm(agri, ["AQ_pm10 ~ 1 + WE_temp_2m"], verbose=True, domain=domain)
 
 print(model)
@@ -154,12 +155,16 @@ ax.set_xlabel("Longitude")
 ax.set_ylabel("Latitude")
 ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
-plt.show()
+# plt.show()
 
 
 # %% Set up the lrssm model (univiarte latent)
 
-# add the mesh object and the domain where the laten domain is defined
-# if None it is assumed to be the same of the observation
-model = model.setup(mesh_obj=[mesh_io], domain_latent=domain)
+from geossm.covmodel import spdeAppoxCov
+
+# build the latent covariance function on the mesh, then attach it to the model
+cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+model = model.setup(cov_fun=[cov_fun])
 print(model)
+print(model.backend)
+print(model.Xbeta.device)

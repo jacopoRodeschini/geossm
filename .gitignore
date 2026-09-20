@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# workflows
+.github/
+
 # C extensions
 *.so
 
@@ -78,6 +81,10 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+docs/build/
+# sphinx.ext.autosummary-generated API stub pages (regenerated at build
+# time via autosummary_generate=True; not meant to be version-controlled)
+docs/source/api/generated/
 
 # PyBuilder
 .pybuilder/
@@ -182,5 +189,5 @@ cython_debug/
 .pypirc
 
 # Test
-test/
+tests/
 
