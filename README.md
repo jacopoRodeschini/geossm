@@ -215,9 +215,6 @@ from geossm.covmodel import spdeAppoxCov
 
 # 1. Load a dataset and turn it into a GeoDataFrame
 agri, shape = df.load_dataset('agrimonia')
-coords = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
-agri['geometry'] = [Point(p[0], p[1]) for p in coords]
-agri = geodf.GeoDataFrame(agri, crs=4326)
 
 domain = list(shape.geometry[0].geoms)[0].boundary
 buffer = list(domain.buffer(0.3).boundary.geoms)[0]
@@ -275,8 +272,11 @@ python example_datasets_load.py
 
 ## Documentation
 
-Full API documentation and tutorials are available at:
-- **Source Code**: See the [src/geossm/](src/geossm/) directory
+The full documentation — installation, quick start, user guide, examples,
+and API reference — is built with [Sphinx](https://www.sphinx-doc.org/)
+and published to GitHub Pages at:
+**https://jacopoRodeschini.github.io/geossm/**
+
 - **Module Reference**:
   - `geossm.ssm` — Core state space modeling
   - `geossm.stmodel` — Spatiotemporal models (LRSSM, SSM variants)
@@ -289,6 +289,20 @@ For detailed information on specific functions and classes, use Python's built-i
 import geossm
 help(geossm.ssm.StateSpaceModel)
 ```
+
+### Building the docs locally
+
+```bash
+pip install -e ".[docs]"
+sphinx-build -b html docs/source docs/build/html
+python -m http.server --directory docs/build/html 8000  # then open http://localhost:8000
+```
+
+`docs/build/` is generated output and is not committed (see
+[.gitignore](.gitignore)). A GitHub Actions workflow
+([.github/workflows/docs.yml](.github/workflows/docs.yml)) builds the docs
+on every push/PR touching `docs/`, `src/`, or `examples/`, and deploys them
+to GitHub Pages on pushes to `main`.
 
 ## Contributing
 
