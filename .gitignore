@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# GitHub Actions
+# Github Actions
 .github/
 
 # C extensions
