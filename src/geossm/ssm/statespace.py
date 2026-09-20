@@ -2155,18 +2155,6 @@ class StateSpaceModel:
         state :math:`x_0`."""
         return self._Sigma0
 
-    @property
-    def yname(self):
-        """str: Name of the dependent variable ``y``, used in summaries.
-
-        Note: this is a second definition of the ``yname`` property
-        (see above); as the last one in the class body, it is the one
-        that actually takes effect, and since it defines no setter,
-        assigning ``model.yname = ...`` raises ``AttributeError``. Use
-        `set` (``model.set(yname=...)``) to change it instead.
-        """
-        return self._yname
-
     # ----------------- Pickle support -----------------
     def __getstate__(self):
         """Return a serializable state for pickling.
