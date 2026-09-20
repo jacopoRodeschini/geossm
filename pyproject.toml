@@ -60,17 +60,14 @@ test = [
 ]
 
 docs = [
-  "mkdocs>=1.6",
-  "mkdocs-material>=9.5",
-  "mkdocstrings[python]>=0.25"
+    "sphinx>=7.0",
+    "furo>=2024.1.29",
+    "sphinx-design>=0.5.0",
 ]
 
 dev = [
   "pytest>=8.0",
   "pytest-cov>=5.0",
-  "mkdocs>=1.6",
-  "mkdocs-material>=9.5",
-  "mkdocstrings[python]>=0.25",
   "ruff>=0.6",
   "mypy>=1.11",
   "build>=1.2",
