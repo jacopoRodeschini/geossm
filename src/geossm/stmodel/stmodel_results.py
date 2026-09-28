@@ -941,7 +941,7 @@ class LRStateSpaceResults(StateSpaceResults):
         h = jax.vmap(g_inv)(y.ravel()).reshape(y.shape)
         return np.asarray(h)
 
-    def back_transform(self, g_inv):
+    def back_transform(self, g_invs):
         """
         Map `y_hat_list`/`y_obs_list`/`y_pred_list` back to the response's
         original scale, and store the results as `y_hat_back_list`/
@@ -996,16 +996,29 @@ class LRStateSpaceResults(StateSpaceResults):
 
         Parameters
         ----------
-        g_inv : Callable[[float], float]
+        g_invs : Callable[[float], float] or list/tuple of callables
             The inverse of the response transform in the model formula
             (e.g. `jnp.exp` for a `np.log(y)` response), as a scalar ->
-            scalar JAX-traceable function.
+            scalar JAX-traceable function, or a list/tuple of such functions
+            matching the number of response variables.
         """
+
+        # check the len of g_invs and if it matches the number of response variables
+        if isinstance(g_invs, (list, tuple)):
+            if len(g_invs) != len(self.model.y_name):
+                raise ValueError(
+                    f"g_invs must be a single callable or a list/tuple of callables "
+                    f"matching the number of response variables ({len(self.model.y_name)}), "
+                    f"but got {len(g_invs)}."
+                )
+        else:
+            g_invs = [g_invs] * len(self.model.y_name)
+
 
         if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
             y_hat_back_list, Sigma_hat_back_list = [], []
-            for mu_i, Sigma_i in zip(self.y_hat_list, self.Sigma_y_hat_list):
-                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+            for mu_i, Sigma_i, g_i in zip(self.y_hat_list, self.Sigma_y_hat_list, g_invs):
+                m, S = self._delta_method(g_i, mu_i, Sigma_i)
                 y_hat_back_list.append(m)
                 Sigma_hat_back_list.append(S)
 
@@ -1014,7 +1027,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
         if self.y_obs_list is not None:
             self.y_obs_back_list = [
-                self._direct_transform(g_inv, y_i) for y_i in self.y_obs_list
+                self._direct_transform(g_i, y_i) for g_i, y_i in zip(g_invs, self.y_obs_list)
             ]
 
         if self.y_obs_back_list is not None and self.y_hat_back_list is not None:
@@ -1025,8 +1038,8 @@ class LRStateSpaceResults(StateSpaceResults):
 
         if self.y_pred_list is not None:
             y_pred_back_list, Sigma_pred_back_list = [], []
-            for mu_i, Sigma_i in zip(self.y_pred_list, self.Sigma_y_pred_list):
-                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+            for mu_i, Sigma_i, g_i in zip(self.y_pred_list, self.Sigma_y_pred_list, g_invs):
+                m, S = self._delta_method(g_i, mu_i, Sigma_i)
                 y_pred_back_list.append(m)
                 Sigma_pred_back_list.append(S)
             
