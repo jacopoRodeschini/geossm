@@ -513,32 +513,10 @@ class LRStateSpaceModel(StateSpaceModel):
                 raise ValueError(msg)
 
         if formulas is not None:
-
-            # Compute the design matrices
-            self._log("Building observation grid...")
-
-            # Each formula's own domain entry (if any) is forwarded to its
-            # DesignMatricesBuilder, which drops observed sites outside it
-            # (see `DesignMatricesBuilder._filter_domain`) before the design
-            # matrix is built.
-            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
-                self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
-            )
-
-            self._log("Building observation grid... Done.")
-
-            self._log("Building the design matrix...")
-
-            # self.train will be used later for estimation and for the results
-            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-            self.y_train, Xbeta = self._buildDesignMatrix(self.gridList)
-
-            # get response name
-            self.y_name = [g.y_name for g in self.gridList]
-            xbeta_names = [g.x_names for g in self.gridList]
-
-            self._log("Building the design matrix... Done.")
-
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders, \
+                self.y_train, Xbeta, self.y_name, \
+                xbeta_names = self.BuildDesignMatrix(df, formulas, verbose=verbose, domain=domain)
+        
         else:
             self._log("Formulas not provided. The model will be initialized without them")
 
@@ -600,6 +578,122 @@ class LRStateSpaceModel(StateSpaceModel):
         self.nlat = len(self._cov_matern)
 
         return self
+
+    def BuildDesignMatrix(self, df, formulas, verbose=None, domain=None):
+        # Compute the design matrices
+        self._log("Building observation grid...")
+
+        # Each formula's own domain entry (if any) is forwarded to its
+        # DesignMatricesBuilder, which drops observed sites outside it
+        # (see `DesignMatricesBuilder._filter_domain`) before the design
+        # matrix is built.
+        nvar, points, gridList, ndim, pdim, block_p, T, builders = (
+            self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
+        )
+
+        self._log("Building observation grid... Done.")
+
+        self._log("Building the design matrix...")
+
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        y_train, Xbeta = self._buildDesignMatrix(gridList)
+
+        # get response name
+        y_name = [g.y_name for g in gridList]
+        xbeta_names = [g.x_names for g in gridList]
+
+        self._log("Building the design matrix... Done.")
+        
+        return nvar, points, gridList, ndim, pdim, block_p, T, builders, y_train, Xbeta, y_name, xbeta_names 
+
+    def getDesignMatrix(self, df, verbose=None):
+        """
+        Build the design matrix for new (out-of-sample) locations/times --
+        e.g. a held-out test set -- exactly the way `predict()` builds it
+        internally, plus the response `y_obs`, so the result can be
+        compared directly against `predict()`'s output (e.g.
+        `y_obs - y_pred_list`).
+
+        Thin public wrapper around `_getPredictionDesignMatrix` (the single
+        source of truth also used by `predict()`) with
+        `include_response=True`: reuses each formula's already-fitted
+        `DesignMatricesBuilder` (`self.builders`) so stateful transforms
+        (e.g. `standardize()`) are evaluated with the *training* mean/std
+        rather than refit on `df`, and the model's own measurement-equation
+        domain (`self.domain`, fixed at `__init__` time) -- there is
+        nothing left to check here that `__init__` didn't already validate
+        once. Unlike `predict()`'s own use of it, `df` must contain the
+        response column(s) referenced by `self.formulas`.
+
+        Parameters
+        ----------
+        df : geopandas.GeoDataFrame
+            New locations/times, with the same columns required by the
+            model's formulas (including the response) and the same CRS as
+            the training data.
+        verbose : bool, optional
+            Overrides `self.verbose` for this call's logging.
+
+        Returns
+        -------
+        points : list of ndarray
+            One entry per response variable/formula, aligned with
+            `Xbeta`'s/`y_obs`'s rows for that variable (see
+            `_buildPredictionGrid`).
+        gridList : list of DesignMatrices
+            The per-formula `DesignMatrices` `Xbeta`/`y_obs` were built
+            from (timestamps, CRS, ...).
+        ndim : int
+            Total number of rows stacked across all response variables.
+        pdim : list of int
+            Per-variable row counts (`block_p[i+1] - block_p[i]`).
+        block_p : ndarray
+            Cumulative row-index boundaries, one more entry than `pdim`.
+        T : list of int
+            Per-variable number of time steps.
+        Xbeta : ndarray
+            Stacked, block-diagonal-by-variable fixed-effect design matrix
+            -- the same array `predict()` feeds through `H`/`beta` to
+            build `y_pred`.
+        y_obs : ndarray
+            Stacked response, one row per observation (same row order as
+            `Xbeta`), evaluated from `df` with the training `y_design_info`.
+        """
+        return self._getPredictionDesignMatrix(df, verbose=verbose, include_response=True)
+
+    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False):
+        """
+        Build the design matrix for new (out-of-sample) locations/times,
+        the way `predict()` needs it: reusing each formula's already-fitted
+        `DesignMatricesBuilder` (`self.builders`, see
+        `_buildPredictionGrid`) so stateful transforms (e.g.
+        `standardize()`) are evaluated with the *training* mean/std rather
+        than refit on `df`, and the model's own measurement-equation domain
+        (`self.domain`, fixed at `__init__` time).
+
+        `include_response`, if `True`, also evaluates the response and
+        returns it as a trailing `y_obs` array (`None` per-variable rows
+        become `NaN` if `df` is missing that variable's response) -- see
+        the public `getDesignMatrix`, the entry point for that case.
+        """
+        if verbose is None:
+            verbose = self.verbose
+
+        self._log("Building observation grid...")
+        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(
+            df, verbose=verbose, include_response=include_response
+        )
+        self._log("Building observation grid... Done.")
+
+        self._log("Building the design matrix...")
+        y_obs, Xbeta = self._buildDesignMatrix(gridList)
+        self._log("Building the design matrix... Done.")
+
+        if include_response:
+            return points, gridList, ndim, pdim, block_p, T, Xbeta, y_obs
+        return points, gridList, ndim, pdim, block_p, T, Xbeta
+
 
     @property
     def shape(self):
@@ -843,15 +937,17 @@ class LRStateSpaceModel(StateSpaceModel):
         Out-of-sample prediction of the response variable(s) at new
         locations/times, from an already-fitted model.
 
-        For each formula, builds a new design matrix/grid over `df` by
-        reusing the formula's fitted `DesignMatricesBuilder`
-        (`self.builders`, see `_buildPredictionGrid`) -- so stateful
-        transforms in the formula (e.g. `standardize()`) are evaluated with
-        the training mean/std rather than recomputed on `df` -- then maps
-        the fitted model's smoothed states (`modelresults.x_smoothed`,
+        For each formula, builds a new design matrix/grid over `df` via
+        `_getPredictionDesignMatrix` -- which reuses the formula's fitted
+        `DesignMatricesBuilder` (`self.builders`) so stateful transforms in
+        the formula (e.g. `standardize()`) are evaluated with the training
+        mean/std rather than recomputed on `df` -- then maps the fitted
+        model's smoothed states (`modelresults.x_smoothed`,
         `modelresults.P_smoothed`) through the new observation matrix `H`
         and design matrix to get the predictive mean and covariance (see
-        `_predict`).
+        `_predict`). Contrast with the public `getDesignMatrix`, which --
+        like `__init__` -- fits fresh transforms on `df` instead of reusing
+        the training ones.
 
         Parameters
         ----------
@@ -888,20 +984,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # and reuses its X_design_info so stateful transforms (e.g.
         # standardize()) are evaluated with the training mean/std rather
         # than recomputed on `df`.
-        self._log("Building observation grid...")
-
-        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(df, verbose=verbose)
-
-        self._log("Building Prediction grid... Done.")
-
-        self._log("Building the design matrix...")
-
-        # self.train will be used later for estimation and for the results
-        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        _, Xbeta_predict = self._buildDesignMatrix(gridList)
-        
-
-        self._log("Building the design matrix... Done.")
+        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(df, verbose=verbose)
 
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
@@ -2090,15 +2173,22 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T, builders
 
-    def _buildPredictionGrid(self, df, verbose=True):
+    def _buildPredictionGrid(self, df, verbose=True, include_response=False):
         """
         Build the design matrices for new (prediction) locations/times, one
         per formula, reusing each formula's fitted `DesignMatricesBuilder`
         (`self.builders`, set in `__init__`) so stateful transforms (e.g.
         standardize()) reuse training statistics instead of being recomputed
         on `df`.
+
+        `include_response`, if `True`, also evaluates each formula's
+        response on `df` (see `DesignMatricesBuilder.build_predict`) -- `df`
+        must then contain the response column(s).
         """
-        dfs = [b.build_predict(df, verbose=verbose, domain=d) for b, d in zip(self.builders, self.domain)]
+        dfs = [
+            b.build_predict(df, verbose=verbose, domain=d, include_response=include_response)
+            for b, d in zip(self.builders, self.domain)
+        ]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
