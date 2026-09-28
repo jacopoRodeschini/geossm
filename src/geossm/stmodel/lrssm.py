@@ -628,10 +628,17 @@ class LRStateSpaceModel(StateSpaceModel):
 
         Parameters
         ----------
-        df : geopandas.GeoDataFrame
+        df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times, with the same columns required by the
             model's formulas (including the response) and the same CRS as
-            the training data.
+            the training data. A single GeoDataFrame is used for every
+            formula (e.g. a shared held-out set); a list with one
+            GeoDataFrame per formula (see `_asPredictionDataFrames`) lets
+            each response variable be compared at its own, different set
+            of locations -- e.g. `model.getDesignMatrix([gdf_no2_test,
+            gdf_pm10_test])` for a bivariate model, one test set per
+            pollutant, instead of a single combined `df` that would give
+            every formula the union of both pollutants' locations.
         verbose : bool, optional
             Overrides `self.verbose` for this call's logging.
 
@@ -945,17 +952,20 @@ class LRStateSpaceModel(StateSpaceModel):
         model's smoothed states (`modelresults.x_smoothed`,
         `modelresults.P_smoothed`) through the new observation matrix `H`
         and design matrix to get the predictive mean and covariance (see
-        `_predict`). Contrast with the public `getDesignMatrix`, which --
-        like `__init__` -- fits fresh transforms on `df` instead of reusing
-        the training ones.
+        `_predict`). The public `getDesignMatrix` builds this same design
+        matrix (plus the response `y_obs`) for inspection/comparison
+        outside of `predict()`.
 
         Parameters
         ----------
-        df : geopandas.GeoDataFrame
+        df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times to predict at, with the same columns
             required by the model's formulas (minus the response, which is
             not needed for prediction) and the same CRS as the training
-            data.
+            data. A single GeoDataFrame is used for every formula (e.g. a
+            shared regular grid); a list with one GeoDataFrame per formula
+            (see `_asPredictionDataFrames`) predicts each response variable
+            at its own, different set of locations instead.
         modelresults : LRStateSpaceResults
             Results of a previous `fit()` call, providing the estimated
             parameters (`modelresults.params`) and smoothed states used to
@@ -2173,6 +2183,27 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T, builders
 
+    def _asPredictionDataFrames(self, df):
+        """
+        Normalize `df` (as accepted by `predict`/`getDesignMatrix`) to a
+        list of GeoDataFrames, one per formula/builder (`self.builders`).
+
+        A single GeoDataFrame is broadcast to every formula (the same
+        locations/times are used to predict every response variable, e.g.
+        a shared regular grid). A list/tuple is used as-is, one entry per
+        formula -- e.g. to predict/compare each response variable at its
+        own, different set of held-out locations -- and must have exactly
+        one entry per formula.
+        """
+        if isinstance(df, (list, tuple)):
+            if len(df) != len(self.builders):
+                raise ValueError(
+                    f"Number of dataframes ({len(df)}) must match number of "
+                    f"formulas ({len(self.builders)})"
+                )
+            return list(df)
+        return [df] * len(self.builders)
+
     def _buildPredictionGrid(self, df, verbose=True, include_response=False):
         """
         Build the design matrices for new (prediction) locations/times, one
@@ -2181,13 +2212,20 @@ class LRStateSpaceModel(StateSpaceModel):
         standardize()) reuse training statistics instead of being recomputed
         on `df`.
 
+        `df` may be a single GeoDataFrame (broadcast to every formula) or a
+        list with one GeoDataFrame per formula (see
+        `_asPredictionDataFrames`) -- e.g. to predict each response
+        variable at its own set of locations rather than a shared one.
+
         `include_response`, if `True`, also evaluates each formula's
-        response on `df` (see `DesignMatricesBuilder.build_predict`) -- `df`
-        must then contain the response column(s).
+        response on its dataframe (see `DesignMatricesBuilder.build_predict`)
+        -- that dataframe must then contain the response column.
         """
+        dfs_in = self._asPredictionDataFrames(df)
+
         dfs = [
-            b.build_predict(df, verbose=verbose, domain=d, include_response=include_response)
-            for b, d in zip(self.builders, self.domain)
+            b.build_predict(d, verbose=verbose, domain=dom, include_response=include_response)
+            for b, d, dom in zip(self.builders, dfs_in, self.domain)
         ]
 
         T = [gr.T for gr in dfs]
