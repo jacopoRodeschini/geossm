@@ -703,11 +703,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
         self._log("Building the design matrix...")
         y_list, Xbeta_list = self._buildDesignMatrix(gridList)
-        y_obs, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+        
         self._log("Building the design matrix... Done.")
 
         if include_response:
-            return points, gridList, ndim, pdim, block_p, T, Xbeta, y_obs
+            return points, T, Xbeta_list, y_list
+
+        _, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+
         return points, gridList, ndim, pdim, block_p, T, Xbeta
 
 
