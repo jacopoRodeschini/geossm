@@ -9,7 +9,7 @@ import time
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
-from geossm.utils import _on_device
+from geossm.utils import _on_device, split_by_block
 
 
 ArrayLike = Optional[Any]
@@ -122,13 +122,23 @@ class LRStateSpaceResults(StateSpaceResults):
       Hessian, via `jax.hessian` on the model's log-likelihood), `bse`,
       `tvalues`, `pvalues`, `conf_int`, `aic`/`bic`.
     - Out-of-sample prediction: `predict` (thin wrapper around
-      `LRStateSpaceModel.predict`, storing `y_pred_list`/
-      `Sigma_y_pred_list` on this object).
+      `LRStateSpaceModel.predict`, storing `y_pred`/`Sigma_y_pred` on this
+      object).
     - Back-transformation of predictions/fitted values to the response's
       original scale via the delta method (`back_transform`), when the
       model formula applies a transform to the response (e.g. `np.log`).
     - Export to `geopandas.GeoDataFrame` (`to_geo`).
     - A `statsmodels`-style textual report (`summary`).
+
+    Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
+    (in-sample fitted), `y_obs_list` (training observations),
+    `residuals_list`, and -- after `.predict()` -- `y_pred_list`/
+    `Sigma_y_pred_list`, are all lazy `@property` views splitting the
+    corresponding stacked array (`y_hat`, `y_obs`, `residuals`, `y_pred`)
+    one entry per response variable. After `.back_transform()`, their
+    original-scale counterparts `y_hat_back_list`, `y_obs_back_list`,
+    `residuals_back_list`, and `y_pred_back_list` are plain attributes
+    (genuine computations, not free slices of a stacked array).
 
     Typical usage, continuing from `LRStateSpaceModel.fit()`::
 
@@ -146,8 +156,6 @@ class LRStateSpaceResults(StateSpaceResults):
         params: ModelParams = None,
         nstats: list = None,
         options: FitOptions = None,
-        y_hat_list: list = None,
-        Sigma_y_hat_list: list = None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -171,15 +179,15 @@ class LRStateSpaceResults(StateSpaceResults):
         options : FitOptions, optional
             The `FitOptions` the model was fit with (stored as-is, for
             reference).
-        y_hat_list, Sigma_y_hat_list : list of ndarray, optional
-            Per-response-variable in-sample fitted mean/covariance,
-            split from the stacked `y_hat`/`Sigma_y_hat` (passed via
-            `**kwargs`, see the base class) along `block_p`.
         block_p : array-like, optional
-            Cumulative index boundaries splitting the stacked arrays into
-            one block per response variable (`block_p[i]:block_p[i+1]`
-            selects variable `i`); snapshotted here rather than read live
-            off `model.block_p`, which is mutable.
+            Cumulative index boundaries splitting the stacked training
+            arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
+            the base class) into one block per response variable
+            (`block_p[i]:block_p[i+1]` selects variable `i`); snapshotted
+            here rather than read live off `model.block_p`, which is
+            mutable. Drives the `y_hat_list`/`Sigma_y_hat_list`/
+            `y_obs_list`/`residuals_list` properties (see
+            `geossm.utils.split_by_block`).
         points_hat, timestamps_hat, crs_hat : list / list / CRS, optional
             Training grid (sites, timestamps) and CRS, one entry per
             response variable, snapshotted for `to_geo()`.
@@ -201,16 +209,14 @@ class LRStateSpaceResults(StateSpaceResults):
         self.nstats = nstats
         self.options = options
 
-        # Per-variable views (one entry per response variable, i.e. length
-        # `model.nvar`) of the base class's stacked `y_hat`/`Sigma_y_hat`,
-        # split along `block_p` -- see `_split_by_block`. `block_p` is
-        # snapshotted here (not read live off `self.model.block_p`) since
-        # that attribute is mutable and would go stale for this results
-        # object the next time `fit()`/`setup()` runs on this model instance.
-        self.y_hat_list = y_hat_list
-        self.Sigma_y_hat_list = Sigma_y_hat_list
+        # Cumulative per-response-variable index boundaries for the
+        # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
+        # `residuals`); snapshotted here (not read live off
+        # `self.model.block_p`) since that attribute is mutable and would
+        # go stale for this results object the next time `fit()`/`setup()`
+        # runs on this model instance. Drives the `y_hat_list`/
+        # `Sigma_y_hat_list`/`y_obs_list`/`residuals_list` properties below.
         self.block_p = block_p
-        self._residuals_list = None  # cache for the residuals_list property
 
         # Training grid (one entry per response variable), snapshotted for
         # the same reason as block_p above -- used by `.to_geo()`.
@@ -227,24 +233,34 @@ class LRStateSpaceResults(StateSpaceResults):
         self.runtime_tot_estep = 0.0
         self.runtime_tot_mstep = 0.0
 
-        # Out-of-sample prediction (populated by .predict(); per-variable
-        # views, distinct from `y_hat`/`y_hat_list`, which hold the
-        # in-sample filtered/fitted values used for residuals).
+        # Out-of-sample prediction (populated by .predict()): stacked
+        # arrays, distinct from `y_hat`/`Sigma_y_hat`, which hold the
+        # in-sample filtered/fitted values used for residuals. Their own
+        # `block_p_pred` is snapshotted separately from `block_p` (the
+        # training grid's) since the prediction grid can have a different
+        # number of points per response variable. `y_pred_list`/
+        # `Sigma_y_pred_list` (below) are derived properties from these.
         self.points_pred = None
-        self.y_pred_list = None
-        self.Sigma_y_pred_list = None
+        self.block_p_pred = None
+        self.y_pred = None
+        self.Sigma_y_pred = None
         self.tdelta_pred = None
         self.timestamps_pred = None
         self.crs_pred = None
 
         # Original-scale (back-transformed) counterparts of y_hat_list/
-        # y_pred_list, populated by .back_transform() -- see that method's
-        # docstring. Per-variable views only, mirroring y_hat_list/y_pred_list
-        # (no stacked y_hat_back/Sigma_y_hat_back).
+        # y_obs_list/y_pred_list/residuals_list, populated by
+        # .back_transform() -- see that method's docstring. Per-variable
+        # views only (no stacked *_back counterparts): unlike the plain
+        # `_list` views, these are genuine computations (delta method, or
+        # a direct transform), not free slices of a stacked array, so they
+        # are plain attributes rather than properties.
         self.y_hat_back_list = None
         self.Sigma_y_hat_back_list = None
+        self.y_obs_back_list = None
         self.y_pred_back_list = None
         self.Sigma_y_pred_back_list = None
+        self.residuals_back_list = None
 
         self.llf_path = None  # log-likelihood across EM iterations
 
@@ -641,9 +657,10 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         Compute out-of-sample predictions based on smoothed states and model
         parameters. `self.model.predict` stores them directly on this
-        results object (`points_pred`, `y_pred_list`, `Sigma_y_pred_list`,
-        `tdelta_pred`, `timestamps_pred`, `crs_pred` -- one entry per
-        response variable) and returns `self`, so predictions travel with
+        results object (`points_pred`, `block_p_pred`, `y_pred`,
+        `Sigma_y_pred`, `tdelta_pred`, `timestamps_pred`, `crs_pred`; the
+        per-variable views `y_pred_list`/`Sigma_y_pred_list` are then
+        derived properties) and returns `self`, so predictions travel with
         the fitted model and can be reused by other methods (e.g.
         `.to_geo()`, plotting, summaries) without re-running prediction.
 
@@ -662,23 +679,84 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         return self.model.predict(df, modelresults=self, verbose=verbose)
 
+    # ---- Per-variable ("_list") views -----------------------------------
+    #
+    # Every `*_list` property below is a lazy, uncached view of an
+    # already-stored stacked array, split one entry per response variable
+    # via `geossm.utils.split_by_block`. Row-slicing a contiguous array
+    # returns a view rather than a copy, so these are effectively free in
+    # memory/compute -- no caching is needed, and none is done.
+    #
+    # In-sample:   y_hat / Sigma_y_hat   -> y_hat_list / Sigma_y_hat_list
+    #              y_obs                 -> y_obs_list
+    #              residuals             -> residuals_list
+    # Out-of-sample (after .predict()):
+    #              y_pred / Sigma_y_pred -> y_pred_list / Sigma_y_pred_list
+    #
+    # Original-scale counterparts (y_hat_back_list, y_obs_back_list,
+    # y_pred_back_list, residuals_back_list, ...) are genuine computations
+    # (delta method / direct transform) rather than free slices, so they
+    # are plain attributes populated by `back_transform()` instead.
+
+    @property
+    def y_hat_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `y_hat` (in-sample fitted mean), split along
+        `block_p`."""
+        if self.y_hat is None or self.block_p is None:
+            return None
+        y_list, _ = split_by_block(self.y_hat, self.block_p, self.Sigma_y_hat)
+        return y_list
+
+    @property
+    def Sigma_y_hat_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `Sigma_y_hat` (in-sample fitted covariance),
+        split along `block_p` (diagonal blocks only)."""
+        if self.y_hat is None or self.Sigma_y_hat is None or self.block_p is None:
+            return None
+        _, Sigma_list = split_by_block(self.y_hat, self.block_p, self.Sigma_y_hat)
+        return Sigma_list
+
+    @property
+    def y_obs_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `y_obs` (training observations), split along
+        `block_p`."""
+        if self.y_obs is None or self.block_p is None:
+            return None
+        return split_by_block(self.y_obs, self.block_p)
 
     @property
     def residuals_list(self):
-        """
-        Per-variable view of the base class's stacked `residuals`
-        (`y_obs - y_hat`), split along `block_p` -- the in-sample
-        counterpart of `y_hat_list`/`Sigma_y_hat_list`.
-        """
-        if self._residuals_list is None:
-            res = self.residuals
-            if res is None or self.block_p is None:
-                return None
-            block_p = np.asarray(self.block_p)
-            self._residuals_list = [
-                res[block_p[i]:block_p[i + 1], :] for i in range(len(block_p) - 1)
-            ]
-        return self._residuals_list
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `residuals` (`y_obs - y_hat`), split along
+        `block_p`."""
+        if self.residuals is None or self.block_p is None:
+            return None
+        return split_by_block(self.residuals, self.block_p)
+
+    @property
+    def y_pred_list(self):
+        """list of ndarray : Per-response-variable view of `y_pred`
+        (out-of-sample prediction mean, set by `.predict()`), split along
+        `block_p_pred` -- the prediction grid's own block boundaries,
+        since the prediction grid can have a different number of points
+        per response variable than the training grid."""
+        if self.y_pred is None or self.block_p_pred is None:
+            return None
+        y_list, _ = split_by_block(self.y_pred, self.block_p_pred, self.Sigma_y_pred)
+        return y_list
+
+    @property
+    def Sigma_y_pred_list(self):
+        """list of ndarray : Per-response-variable view of `Sigma_y_pred`
+        (out-of-sample prediction covariance, set by `.predict()`), split
+        along `block_p_pred` (diagonal blocks only)."""
+        if self.y_pred is None or self.Sigma_y_pred is None or self.block_p_pred is None:
+            return None
+        _, Sigma_list = split_by_block(self.y_pred, self.block_p_pred, self.Sigma_y_pred)
+        return Sigma_list
 
     def _pred_summary_stats(self):
         """
@@ -851,14 +929,39 @@ class LRStateSpaceResults(StateSpaceResults):
 
         return np.asarray(mean_back), np.asarray(Sigma_back)
 
+    @staticmethod
+    def _direct_transform(g_inv, y):
+        """
+        Apply `g_inv` elementwise to an observed value `y` (shape `(n,
+        T)`), with no delta-method correction -- unlike `_delta_method`,
+        `y` here is a point (an actual observation), not the mean of an
+        estimated distribution, so there is no variance to propagate.
+        """
+        y = jnp.asarray(y)
+        h = jax.vmap(g_inv)(y.ravel()).reshape(y.shape)
+        return np.asarray(h)
+
     def back_transform(self, g_inv):
         """
-        Map `y_hat_list`/`y_pred_list` (and their model-implied covariance)
-        back to the response's original scale, via the second-order delta
-        method (see `_delta_method`), applied per response variable, and
-        store the results as `y_hat_back_list`/`Sigma_y_hat_back_list` and --
-        if `.predict()` has been run -- `y_pred_back_list`/
-        `Sigma_y_pred_back_list`.
+        Map `y_hat_list`/`y_obs_list`/`y_pred_list` back to the response's
+        original scale, and store the results as `y_hat_back_list`/
+        `Sigma_y_hat_back_list`, `y_obs_back_list`, and -- if `.predict()`
+        has been run -- `y_pred_back_list`/`Sigma_y_pred_back_list`.
+        Also derives `residuals_back_list` (`y_obs_back_list -
+        y_hat_back_list`, elementwise per response variable) once both are
+        available.
+
+        `y_hat_list`/`y_pred_list` are the mean of an estimated
+        distribution (with a model-implied covariance), so they go through
+        the second-order delta method (see `_delta_method`), applied per
+        response variable. `y_obs_list` is instead a point observation, so
+        it is transformed directly (`g_inv(y_obs)`, see `_direct_transform`)
+        -- there is no variance to propagate, and no meaningful way to
+        transform `residuals_list` (`y_obs - y_hat`) directly, since
+        `g_inv` of a residual is not itself a residual on the original
+        scale; `residuals_back_list` is instead built by back-transforming
+        `y_obs`/`y_hat` separately and then differencing, as is standard
+        practice.
 
         This relies on the transformed response being asymptotically
         Normal (the model's own assumption), so the delta method's local,
@@ -908,6 +1011,17 @@ class LRStateSpaceResults(StateSpaceResults):
 
             self.y_hat_back_list = y_hat_back_list
             self.Sigma_y_hat_back_list = Sigma_hat_back_list
+
+        if self.y_obs_list is not None:
+            self.y_obs_back_list = [
+                self._direct_transform(g_inv, y_i) for y_i in self.y_obs_list
+            ]
+
+        if self.y_obs_back_list is not None and self.y_hat_back_list is not None:
+            self.residuals_back_list = [
+                y_i - yhat_i
+                for y_i, yhat_i in zip(self.y_obs_back_list, self.y_hat_back_list)
+            ]
 
         if self.y_pred_list is not None:
             y_pred_back_list, Sigma_pred_back_list = [], []
