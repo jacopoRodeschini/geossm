@@ -514,9 +514,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
         if formulas is not None:
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders, \
-                self.y_train, Xbeta, self.y_name, \
-                xbeta_names = self.BuildDesignMatrix(df, formulas, verbose=verbose, domain=domain)
-        
+                self.y_train, Xbeta, self.y_name, xbeta_names, \
+                self.y_train_list, self.Xbeta_list = self.BuildDesignMatrix(
+                    df, formulas, verbose=verbose, domain=domain
+                )
+
         else:
             self._log("Formulas not provided. The model will be initialized without them")
 
@@ -597,15 +599,19 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # self.train will be used later for estimation and for the results
         # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        y_train, Xbeta = self._buildDesignMatrix(gridList)
+        y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+        y_train, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
 
         # get response name
         y_name = [g.y_name for g in gridList]
         xbeta_names = [g.x_names for g in gridList]
 
         self._log("Building the design matrix... Done.")
-        
-        return nvar, points, gridList, ndim, pdim, block_p, T, builders, y_train, Xbeta, y_name, xbeta_names 
+
+        return (
+            nvar, points, gridList, ndim, pdim, block_p, T, builders,
+            y_train, Xbeta, y_name, xbeta_names, y_list, Xbeta_list,
+        )
 
     def getDesignMatrix(self, df, verbose=None):
         """
@@ -669,6 +675,8 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         return self._getPredictionDesignMatrix(df, verbose=verbose, include_response=True)
 
+    
+
     def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False):
         """
         Build the design matrix for new (out-of-sample) locations/times,
@@ -694,7 +702,8 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Building observation grid... Done.")
 
         self._log("Building the design matrix...")
-        y_obs, Xbeta = self._buildDesignMatrix(gridList)
+        y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+        y_obs, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
         self._log("Building the design matrix... Done.")
 
         if include_response:
@@ -803,6 +812,7 @@ class LRStateSpaceModel(StateSpaceModel):
         if formulas is None:
             formulas = self.formulas
             Xbeta = self.Xbeta
+            Xbeta_list = self.Xbeta_list
             xbeta_names = self.xbeta_names
             y_name = self.y_name
             nvar = self.nvar
@@ -824,8 +834,9 @@ class LRStateSpaceModel(StateSpaceModel):
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
             self._log("Building the design matrix...")
-            y, Xbeta = self._buildDesignMatrix(gridList)
-            
+            y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+            y, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+
             y_name = [g.y_name for g in gridList]
             xbeta_names = [g.x_names for g in gridList]
 
@@ -919,11 +930,19 @@ class LRStateSpaceModel(StateSpaceModel):
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
+        # Per-variable/per-latent-factor views, so callers don't have to
+        # re-slice y_sim/x_sim by hand with block_p/block_q themselves.
+        y_sim_list = self._split_by_block(y_sim, block_p)
+        x_sim_list = self._split_by_block(x_sim, block_q)
+
         info = {}
         info['formulas'] = formulas
         info['y_name'] = y_name
         info['xbeta_names'] = xbeta_names
         info['Xbeta'] = Xbeta
+        info['Xbeta_list'] = Xbeta_list
+        info['y_sim_list'] = y_sim_list
+        info['x_sim_list'] = x_sim_list
         info['params'] = params
         info['points'] = points
         info['T'] = T
@@ -1028,7 +1047,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Per-variable views, one entry per response variable, aligned with
         # block_p
         y_pred_list, Sigma_y_pred_list = self._split_by_block(
-            y_pred_full, Sigma_y_pred_full, block_p
+            y_pred_full, block_p, Sigma_y_pred_full
         )
 
         modelresults.points_pred = points
@@ -1042,24 +1061,31 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return modelresults
 
-    def _split_by_block(self, y_full, Sigma_full, block_p):
+    def _split_by_block(self, y_full, block, Sigma_full=None):
         """
-        Split a stacked mean array `y_full` (shape `(P, T)`) and its stacked
-        covariance `Sigma_full` (shape `(P, P, T)`) into one entry per
-        response variable, using the cumulative index boundaries `block_p`
-        (length `nvar + 1`, `block_p[i]:block_p[i+1]` selects variable `i`'s
-        rows). The `i`-th entries of the returned lists hold, respectively,
-        variable `i`'s own rows of `y_full` and its own diagonal block of
-        `Sigma_full` (cross-variable covariance is dropped).
+        Split a stacked array `y_full` (shape `(P, T)`) into one entry per
+        block, using the cumulative index boundaries `block` (length
+        `n_blocks + 1`, `block[i]:block[i+1]` selects block `i`'s rows) --
+        e.g. `block_p` to split by response variable, or `block_q` to split
+        by latent factor.
+
+        If a stacked covariance `Sigma_full` (shape `(P, P, T)`) is also
+        given, its per-block diagonal blocks are returned alongside
+        `y_full`'s (cross-block covariance is dropped) and a `(y_list,
+        Sigma_list)` pair is returned; otherwise only `y_list` is returned.
         """
-        block_p = np.asarray(block_p)
-        y_list, Sigma_list = [], []
-        for i in range(len(block_p) - 1):
-            y_list.append(y_full[block_p[i]:block_p[i + 1], :])
-            Sigma_list.append(
-                Sigma_full[block_p[i]:block_p[i + 1], block_p[i]:block_p[i + 1], :]
-            )
-        return y_list, Sigma_list
+        block = np.asarray(block)
+        y_list = []
+        Sigma_list = [] if Sigma_full is not None else None
+        for i in range(len(block) - 1):
+            s0, s1 = block[i], block[i + 1]
+            y_list.append(y_full[s0:s1, :])
+            if Sigma_full is not None:
+                Sigma_list.append(Sigma_full[s0:s1, s0:s1, :])
+
+        if Sigma_full is not None:
+            return y_list, Sigma_list
+        return y_list
 
     @_on_device
     def _predict(self, H, x_T, P_T, Xbeta, beta):
@@ -1337,7 +1363,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # attribute is mutable and would go stale for this results object
         # the next time `fit()`/`setup()` runs on this same model instance.
         y_hat_list, Sigma_y_hat_list = self._split_by_block(
-            y_hat_full, Sigma_y_hat_full, block_p
+            y_hat_full, block_p, Sigma_y_hat_full
         )
 
         # Training grid (points/timestamps/CRS), one entry per response
@@ -2243,7 +2269,7 @@ class LRStateSpaceModel(StateSpaceModel):
         variables via `block_diag_3D`) into the model-wide arrays consumed
         by `StateSpaceModel`."""
 
-        Ylist = [grid.y for grid in gridList if grid.y is not None]
+        y_list = [grid.y for grid in gridList if grid.y is not None]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
         Xbeta_list = [grid.X for grid in gridList if grid.X is not None]
@@ -2257,8 +2283,12 @@ class LRStateSpaceModel(StateSpaceModel):
         # Y_test_list = [yi[index, :] for yi, index in zip(Ylist, itest)]
         # Xbeta_test_list = [xi[index, :, :] for xi, index in zip(Xlist, itest)]
 
-        if len(Ylist) > 0:
-            y_train = jnp.vstack(Ylist) 
+        
+        return y_list, Xbeta_list
+
+    def _stackDesignMatrix(self, y_list, Xbeta_list):
+        if len(y_list) > 0:
+            y_train = jnp.vstack(y_list) 
         else:
             y_train = None
 
@@ -2269,8 +2299,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Y_test = np.vstack(Y_test_list)
         # Xbeta_test = block_diag_3D(Xbeta_test_list)
-
         return y_train, Xbeta_train
+
 
     def logger(self, stats, beta_decimals=2, scalar_decimals=2, relat_decimals=5):
         """
