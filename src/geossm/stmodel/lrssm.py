@@ -35,7 +35,7 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend, _on_device
+from geossm.utils import _select_device, _to_backend, _on_device, split_by_block
 
 
 from shapely.geometry import MultiPoint
@@ -935,8 +935,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Per-variable/per-latent-factor views, so callers don't have to
         # re-slice y_sim/x_sim by hand with block_p/block_q themselves.
-        y_sim_list = self._split_by_block(y_sim, block_p)
-        x_sim_list = self._split_by_block(x_sim, block_q)
+        y_sim_list = split_by_block(y_sim, block_p)
+        x_sim_list = split_by_block(x_sim, block_q)
 
         info = {}
         info['formulas'] = formulas
@@ -1000,7 +1000,8 @@ class LRStateSpaceModel(StateSpaceModel):
         -------
         LRStateSpaceResults
             The same `modelresults` object, with `points_pred`,
-            `y_pred_list`, `Sigma_y_pred_list`, `tdelta_pred`,
+            `y_pred`/`Sigma_y_pred` (and their per-variable views
+            `y_pred_list`/`Sigma_y_pred_list`), `tdelta_pred`,
             `timestamps_pred`, and `crs_pred` populated (one entry per
             response variable, except `tdelta_pred`/`crs_pred`).
 
@@ -1047,15 +1048,15 @@ class LRStateSpaceModel(StateSpaceModel):
         # Predict the response variable (stacked across all variables)
         y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta)
 
-        # Per-variable views, one entry per response variable, aligned with
-        # block_p
-        y_pred_list, Sigma_y_pred_list = self._split_by_block(
-            y_pred_full, block_p, Sigma_y_pred_full
-        )
-
+        # block_p for the *prediction* grid, snapshotted separately from
+        # modelresults.block_p (the training grid's) since the prediction
+        # grid can have a different number of points per response
+        # variable -- used to split y_pred/Sigma_y_pred into
+        # y_pred_list/Sigma_y_pred_list (see LRStateSpaceResults).
         modelresults.points_pred = points
-        modelresults.y_pred_list = y_pred_list
-        modelresults.Sigma_y_pred_list = Sigma_y_pred_list
+        modelresults.block_p_pred = block_p
+        modelresults.y_pred = y_pred_full
+        modelresults.Sigma_y_pred = Sigma_y_pred_full
         modelresults.tdelta_pred = tdelta
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
@@ -1064,32 +1065,6 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return modelresults
 
-    def _split_by_block(self, y_full, block, Sigma_full=None):
-        """
-        Split a stacked array `y_full` (shape `(P, T)`) into one entry per
-        block, using the cumulative index boundaries `block` (length
-        `n_blocks + 1`, `block[i]:block[i+1]` selects block `i`'s rows) --
-        e.g. `block_p` to split by response variable, or `block_q` to split
-        by latent factor.
-
-        If a stacked covariance `Sigma_full` (shape `(P, P, T)`) is also
-        given, its per-block diagonal blocks are returned alongside
-        `y_full`'s (cross-block covariance is dropped) and a `(y_list,
-        Sigma_list)` pair is returned; otherwise only `y_list` is returned.
-        """
-        block = np.asarray(block)
-        y_list = []
-        Sigma_list = [] if Sigma_full is not None else None
-        for i in range(len(block) - 1):
-            s0, s1 = block[i], block[i + 1]
-            y_list.append(y_full[s0:s1, :])
-            if Sigma_full is not None:
-                Sigma_list.append(Sigma_full[s0:s1, s0:s1, :])
-
-        if Sigma_full is not None:
-            return y_list, Sigma_list
-        return y_list
-
     @_on_device
     def _predict(self, H, x_T, P_T, Xbeta, beta):
         """
@@ -1097,7 +1072,7 @@ class LRStateSpaceModel(StateSpaceModel):
         single source of truth used both for in-sample fitted values
         (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
         result into per-variable views is a separate, explicit step (see
-        `self._split_by_block`), left to the caller.
+        `geossm.utils.split_by_block`), left to the caller.
         """
         self._log("Start Prediction the SSM...")
 
@@ -1361,14 +1336,6 @@ class LRStateSpaceModel(StateSpaceModel):
         beta_est = est_params.beta.value
         y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(H, x_T, P_T, Xbeta, beta_est)
 
-        # Per-variable views (one entry per response variable), snapshotted
-        # here rather than derived later from `self.model.block_p` -- that
-        # attribute is mutable and would go stale for this results object
-        # the next time `fit()`/`setup()` runs on this same model instance.
-        y_hat_list, Sigma_y_hat_list = self._split_by_block(
-            y_hat_full, block_p, Sigma_y_hat_full
-        )
-
         # Training grid (points/timestamps/CRS), one entry per response
         # variable -- snapshotted here for the same reason as block_p above:
         # self.points/self.gridList are mutable and would go stale for this
@@ -1389,9 +1356,12 @@ class LRStateSpaceModel(StateSpaceModel):
             y_hat=y_hat_full,
             Sigma_y_hat=Sigma_y_hat_full,
             tdelta_hat=tdelta_hat,
-            # per-variable views (one entry per response variable)
-            y_hat_list=y_hat_list,
-            Sigma_y_hat_list=Sigma_y_hat_list,
+            # block_p: snapshotted here rather than left to be read live
+            # off `self.block_p` -- that attribute is mutable and would go
+            # stale for this results object the next time `fit()`/`setup()`
+            # runs on this same model instance. Per-variable views
+            # (y_hat_list, ...) are derived from this + the stacked arrays
+            # above as lazy properties on LRStateSpaceResults.
             block_p=block_p,
             points_hat=points_hat,
             timestamps_hat=timestamps_hat,
