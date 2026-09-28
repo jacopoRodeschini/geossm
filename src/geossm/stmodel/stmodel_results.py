@@ -476,11 +476,16 @@ class LRStateSpaceResults(StateSpaceResults):
         ndarray : Standard errors of the free parameters, as a flat 1D
         array (`sqrt` of the diagonal of `compute_cov_params()`, clipped at
         0 to guard against small negative values from numerical noise), in
-        the same flat order as `theta_hat`. Triggers the Hessian
-        computation on first access if not already cached.
+        the same flat order as `theta_hat`.
+
+        Does *not* trigger the Hessian computation: if `compute_cov_params()`
+        hasn't been called yet, returns a NaN-filled array of the same
+        shape instead. Call `compute_cov_params()` explicitly to get real
+        standard errors.
         """
-        cov = self.compute_cov_params()
-        return np.sqrt(np.clip(np.asarray(jnp.diag(cov)), a_min=0.0, a_max=None))
+        if self._cov_params is None:
+            return np.full(self.theta_hat.shape, np.nan)
+        return np.sqrt(np.clip(np.asarray(jnp.diag(self._cov_params)), a_min=0.0, a_max=None))
 
     @property
     def bse(self):
@@ -489,7 +494,15 @@ class LRStateSpaceResults(StateSpaceResults):
         into a `ModelParams` structure (one array per parameter, stored in
         each `Param.bse`) via `_vector_to_bse_params`, mirroring the shape
         of `self.params`. Fixed parameters get `bse=None`.
+
+        Does *not* trigger the Hessian computation: if `compute_cov_params()`
+        hasn't been called yet, returns NaN placeholders (see
+        `_nan_bse_params`) instead. Call `compute_cov_params()` explicitly
+        to get real standard errors.
         """
+        if self._cov_params is None:
+            return self._nan_bse_params()
+
         # structured ModelParams with bse stored in each Param
         if getattr(self, "_bse_params", None) is None:
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
@@ -532,7 +545,8 @@ class LRStateSpaceResults(StateSpaceResults):
     @property
     def tvalues(self):
         """ndarray : t-statistics (`theta_hat / bse_vector`) for the free
-        parameters, in the same flat order as `theta_hat`."""
+        parameters, in the same flat order as `theta_hat`. NaN until
+        `compute_cov_params()` has been called (see `bse_vector`)."""
         t, _, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
         return t
 
@@ -540,13 +554,15 @@ class LRStateSpaceResults(StateSpaceResults):
     def pvalues(self):
         """ndarray : Two-sided p-values for the free parameters (Student-t
         with `df_resid` degrees of freedom), in the same flat order as
-        `theta_hat`."""
+        `theta_hat`. NaN until `compute_cov_params()` has been called (see
+        `bse_vector`)."""
         _, p, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
         return p
 
     def conf_int(self, alpha=0.05):
         """
-        Confidence intervals for the free parameters.
+        Confidence intervals for the free parameters. NaN until
+        `compute_cov_params()` has been called (see `bse_vector`).
 
         Parameters
         ----------
@@ -1013,11 +1029,9 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         name_width = 15
 
-        if self._hessian is not None or self._cov_params is not None:
-            bse_struct = self.bse  # structured ModelParams with bse fields
-        else:
-            # show point estimates with NaN placeholders for bse/t/p/CI.
-            bse_struct = self._nan_bse_params()
+        # structured ModelParams with bse fields; NaN placeholders if
+        # compute_cov_params() hasn't been called yet (see `bse`).
+        bse_struct = self.bse
 
         gen_top_left, gen_top_right = self.generate_summary()
         
