@@ -326,3 +326,45 @@ def getHardware():
         f"Available Memory: {available_memory:.2f} GB\n"
     )
     return info
+
+
+# %% [Utils] Minimal key/value formatting, shared by every class's __repr__
+
+def format_info_table(items, indent=0):
+    """Format a list of (key, value) tuples into a clean aligned string.
+
+    Pure string formatting only (no attribute access, no computation) so
+    it's safe to use from a `__repr__`: every value must already be a
+    plain, cheaply-obtained scalar/string/list by the time it's passed
+    in here.
+
+    Parameters
+    ----------
+    items : list of tuple
+        ``[(key, value), ...]``; a list-valued `value` is joined with
+        ``", "``.
+    indent : int, default 0
+        Number of spaces to indent each row.
+
+    Returns
+    -------
+    str
+        Nicely formatted multi-line string.
+    """
+    if not items:
+        return ""
+
+    max_key_len = max(len(str(k)) for k, _ in items)
+
+    lines = []
+    pad = " " * indent
+
+    for key, value in items:
+        key = str(key).rstrip(":") + ":"
+
+        if isinstance(value, list):
+            value = ", ".join(map(str, value))
+
+        lines.append(f"{pad}{key:<{max_key_len + 1}} {value}")
+
+    return "\n".join(lines)
