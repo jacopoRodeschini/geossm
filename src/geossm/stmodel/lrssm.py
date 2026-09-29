@@ -2381,29 +2381,9 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         return history
 
-
-    def generate_summary(self, print_full=True):
-        """
-        Build the left/right key-value rows used by `summary()`'s header
-        table: model name/type/shape, then (if `print_full=True`) one
-        "Grid ..." section per response variable's `DesignMatrices` and one
-        "Latent. ..." section per latent covariance function, each via that
-        object's own `generate_summary`.
-
-        Parameters
-        ----------
-        print_full : bool, default True
-            If `False`, only the top model-level rows are returned (used
-            when this table is embedded elsewhere, e.g. by
-            `LRStateSpaceResults.generate_summary`, without repeating the
-            per-grid/per-covariance detail).
-
-        Returns
-        -------
-        gen_top_left, gen_top_right : list of (str, list)
-            Two lists of `(label, [value])` rows, of equal length.
-        """
-
+    
+    def generate_summary_header(self):
+        
         # top-left / top-right small tables
         p = self.shape[0] if hasattr(self, "shape") else "N/A"
         q = self.shape[1] if hasattr(self, "shape") else "N/A"
@@ -2461,7 +2441,33 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         elif len_empty < 0:
             gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
 
-        if not print_full:
+        return gen_top_left, gen_top_right
+
+    def generate_summary(self, print_short=False):
+        """
+        Build the left/right key-value rows used by `summary()`'s header
+        table: model name/type/shape, then (if `print_full=True`) one
+        "Grid ..." section per response variable's `DesignMatrices` and one
+        "Latent. ..." section per latent covariance function, each via that
+        object's own `generate_summary`.
+
+        Parameters
+        ----------
+        print_full : bool, default True
+            If `False`, only the top model-level rows are returned (used
+            when this table is embedded elsewhere, e.g. by
+            `LRStateSpaceResults.generate_summary`, without repeating the
+            per-grid/per-covariance detail).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, of equal length.
+        """
+
+
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        if not print_short:
             return gen_top_left, gen_top_right
 
         else:  
@@ -2529,7 +2535,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             
             return gen_top_left, gen_top_right 
 
-    def summary(self, print_full=True) -> Summary:
+    def summary(self, print_short=False) -> Summary:
         """
         Return a `statsmodels`-style structured summary of the model
         (before fitting -- for the fitted results' own summary, see
@@ -2552,7 +2558,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         self.model = SimpleNamespace()
 
         # Generate the summary tables
-        gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
+        gen_top_left, gen_top_right = self.generate_summary(print_short=print_short)
 
         # Add the header to the summary
         smry = Summary()
@@ -2576,6 +2582,31 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             )
 
         return smry
+
+    def __str__(self):
+        """Return a human-readable summary of the model (see `summary`)."""
+        return str(self.summary(print_short=False))
+
+    def __repr__(self):
+        """Return a human-readable summary of the model (see `summary`)."""
+
+        self.model = SimpleNamespace()
+
+        # Generate the summary tables
+        gen_top_left, gen_top_right = self.generate_summary_header()
+
+        # Add the header to the summary
+        smry = Summary()
+        smry.add_table_2cols(
+            self,
+            title="LR State Space Model",
+            gleft=gen_top_left,
+            gright=gen_top_right,
+            yname= self.yname if self.yname is not None else "None",
+            xname= self.xbeta_names if self.xbeta_names is not None else "None",
+        )
+
+        return print(smry)
 
     def format_info_table(self, items, indent=0):
         """
