@@ -35,7 +35,7 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend, _on_device, split_by_block
+from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table
 
 
 from shapely.geometry import MultiPoint
@@ -2588,59 +2588,20 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         return str(self.summary(print_short=False))
 
     def __repr__(self):
-        """Return a human-readable summary of the model (see `summary`)."""
-
-        self.model = SimpleNamespace()
-
-        # Generate the summary tables
+        """Cheap, side-effect-free representation for interactive use
+        (model name/type/shape/backend only, from `generate_summary_header`)
+        -- see `summary()`/`str()` for the full, more expensive report
+        (per-grid/per-covariance detail). Does not touch `self.model` or
+        any other state, unlike `summary()`.
+        """
         gen_top_left, gen_top_right = self.generate_summary_header()
+        items = [
+            (key, value)
+            for key, value in gen_top_left + gen_top_right
+            if str(key).strip()
+        ]
+        return f"{self.__class__.__name__}\n" + format_info_table(items, indent=2)
 
-        # Add the header to the summary
-        smry = Summary()
-        smry.add_table_2cols(
-            self,
-            title="LR State Space Model",
-            gleft=gen_top_left,
-            gright=gen_top_right,
-            yname= self.yname if self.yname is not None else "None",
-            xname= self.xbeta_names if self.xbeta_names is not None else "None",
-        )
-
-        return print(smry)
-
-    def format_info_table(self, items, indent=0):
-        """
-        Format a list of (key, value) tuples into a clean aligned string.
-
-        Parameters
-        ----------
-        items : list of tuples
-            [(key, value), ...]
-        indent : int
-            Number of spaces to indent each row.
-
-        Returns
-        -------
-        str
-            Nicely formatted multi-line string.
-        """
-        # Compute longest key for alignment
-        max_key_len = max(len(str(k)) for k, _ in items)
-
-        lines = []
-        pad = " " * indent
-
-        for key, value in items:
-            key = str(key).rstrip(":") + ":"
-
-            # Convert lists to readable string
-            if isinstance(value, list):
-                value = ", ".join(map(str, value))
-
-            lines.append(f"{pad}{key:<{max_key_len+1}} {value}")
-
-        return "\n".join(lines)
- 
     def _is_verbose(self, verbose=None) -> bool:
         """Resolve an optional per-call `verbose` override against `self.verbose`."""
         return self.verbose if verbose is None else verbose
