@@ -13,6 +13,7 @@ a printable summary.
 
 from __future__ import annotations
 from typing import Optional, Any, Tuple, Dict
+import warnings
 
 import numpy as np
 from scipy.stats import norm
@@ -24,6 +25,38 @@ import jax
 from geossm.utils import _select_device
 
 ArrayLike = Optional[Any]
+
+# Below this magnitude, a negative variance is treated as floating-point
+# roundoff (e.g. from P @ H.T-style covariance propagation) rather than a
+# real modeling problem, and is silently clipped to 0.
+_VARIANCE_NEG_TOL = 1e-8
+
+
+def _safe_sqrt_variance(var: np.ndarray, *, context: str = "") -> np.ndarray:
+    """Elementwise square root of a variance array that never lets NumPy
+    raise its blanket "invalid value encountered in sqrt" warning.
+
+    Negative entries within `_VARIANCE_NEG_TOL` of 0 are clipped to 0
+    (ordinary floating-point noise). Entries that are NaN, +/-inf, or
+    negative beyond that tolerance are replaced with NaN - they likely
+    indicate a real numerical issue (e.g. a singular/ill-conditioned
+    covariance) - and are reported once via a single, explicit
+    `RuntimeWarning` naming `context`, instead of the unqualified one
+    NumPy would otherwise raise from deep inside `sqrt`.
+    """
+    var = np.asarray(var, dtype=float)
+    bad = ~np.isfinite(var) | (var < -_VARIANCE_NEG_TOL)
+    if np.any(bad):
+        where = f" in {context}" if context else ""
+        warnings.warn(
+            f"Non-finite or negative variance encountered{where}; "
+            f"{np.count_nonzero(bad)} of {var.size} value(s) set to NaN.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    safe = np.where(bad, np.nan, np.clip(var, 0, None))
+    with np.errstate(invalid="ignore"):
+        return np.sqrt(safe)
 
 
 class StateSpaceResults:
@@ -479,7 +512,7 @@ class StateSpaceResults:
         lower = np.zeros_like(mean)
         upper = np.zeros_like(mean)
         for t in range(mean.shape[1]):
-            std = np.sqrt(np.diag(cov[:, :, t]))
+            std = _safe_sqrt_variance(np.diag(cov[:, :, t]), context="conf_int_state")
             lower[:, t] = mean[:, t] - z * std
             upper[:, t] = mean[:, t] + z * std
 
@@ -554,7 +587,7 @@ class StateSpaceResults:
             if prediction and R_diag_matrix is not None:
                 var_y = var_y + R_diag_matrix
 
-            std_t = np.sqrt(np.diag(var_y))
+            std_t = _safe_sqrt_variance(np.diag(var_y), context="conf_int_y")
             lower[:, t] = y_hat[:, t] - z * std_t
             upper[:, t] = y_hat[:, t] + z * std_t
         return lower, upper
