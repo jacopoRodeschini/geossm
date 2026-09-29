@@ -2,7 +2,7 @@ from statsmodels.iolib.summary import Summary
 from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import Param, ModelParams, FitOptions
-from geossm.ssm import StateSpaceResults
+from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
 from types import SimpleNamespace
 from scipy import stats
 import time
@@ -490,9 +490,9 @@ class LRStateSpaceResults(StateSpaceResults):
     def bse_vector(self):
         """
         ndarray : Standard errors of the free parameters, as a flat 1D
-        array (`sqrt` of the diagonal of `compute_cov_params()`, clipped at
-        0 to guard against small negative values from numerical noise), in
-        the same flat order as `theta_hat`.
+        array (`sqrt` of the diagonal of `compute_cov_params()`, via
+        `_safe_sqrt_variance` to guard against small negative/NaN values
+        from numerical noise), in the same flat order as `theta_hat`.
 
         Does *not* trigger the Hessian computation: if `compute_cov_params()`
         hasn't been called yet, returns a NaN-filled array of the same
@@ -501,7 +501,7 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         if self._cov_params is None:
             return np.full(self.theta_hat.shape, np.nan)
-        return np.sqrt(np.clip(np.asarray(jnp.diag(self._cov_params)), a_min=0.0, a_max=None))
+        return _safe_sqrt_variance(np.asarray(jnp.diag(self._cov_params)), context="bse_vector")
 
     @property
     def bse(self):
@@ -770,8 +770,8 @@ class LRStateSpaceResults(StateSpaceResults):
         std_all = []
         for sigma in self.Sigma_y_pred_list:
             sigma = np.asarray(sigma)
-            var = np.clip(np.diagonal(sigma, axis1=0, axis2=1), 0.0, None)  # (T, n_i)
-            std_all.append(np.sqrt(var).ravel())
+            var = np.diagonal(sigma, axis1=0, axis2=1)  # (T, n_i)
+            std_all.append(_safe_sqrt_variance(var, context="_pred_summary_stats").ravel())
         std_all = np.concatenate(std_all) if std_all else np.array([np.nan])
 
         return {
@@ -824,8 +824,8 @@ class LRStateSpaceResults(StateSpaceResults):
         def add_columns(names, ys, sigmas, col_prefix):
             for name, y, sigma in zip(names, ys, sigmas):
                 y = np.asarray(y)
-                var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
-                std = np.sqrt(var)
+                var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
+                std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
                 data[f"y_{col_prefix}_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
                 data[f"std_{col_prefix}_{name}"] = std.ravel()
 
