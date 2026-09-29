@@ -695,7 +695,7 @@ class DesignMatrices:
         return (
             f"DesignMatrices("
             f"N={self.N}, b={self.b}, T={self.T}, "
-            f"dtype={self.dtype}')"
+            f"dtype={self.dtype})"
         )
 
 
