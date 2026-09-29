@@ -22,7 +22,7 @@ from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date
 import jax
-from geossm.utils import _select_device
+from geossm.utils import _select_device, format_info_table
 
 ArrayLike = Optional[Any]
 
@@ -279,6 +279,17 @@ class StateSpaceResults:
 
         # convert arrays if needed
         self.to_numpy()
+
+        # ---- cheap observation-shape stats, computed once here (not
+        # lazily inside generate_summary()) so they're already available
+        # to __repr__ and to any direct caller, without requiring
+        # summary()/generate_summary() to have run first. ----
+        if self.y_obs is not None:
+            self.nobs = self.y_obs.size
+            self.nspace, self.ntime = self.y_obs.shape
+            self.missing = int(np.sum(np.isnan(self.y_obs)))
+        else:
+            self.nobs = self.nspace = self.ntime = self.missing = None
 
     @property
     def backend(self):
@@ -724,9 +735,6 @@ class StateSpaceResults:
         and fit runtime on the left, fit-quality/residual diagnostics on
         the right) used by `summary`.
 
-        As a side effect, sets ``self.nobs``, ``self.nspace``,
-        ``self.ntime`` and ``self.missing`` from ``y_obs``.
-
         Returns
         -------
         tuple of list
@@ -735,10 +743,8 @@ class StateSpaceResults:
             ``statsmodels.iolib.summary.Summary.add_table_2cols``.
         """
 
-        self.nobs = self.y_obs.size
-        self.nspace, self.ntime = self.y_obs.shape
-        self.missing = np.sum(np.isnan(self.y_obs))
-        
+        # nobs/nspace/ntime/missing are set in __init__ (see there for why).
+
         # Compute residual diagnostics
         err = getattr(self, "residuals", None)
         if err is None:
@@ -850,11 +856,45 @@ class StateSpaceResults:
 
         return smry
 
+    def generate_summary_header(self):
+        """Cheap identity/shape rows (dep. variable, shape, observed/
+        missing counts, log-likelihood, backend/dtype) - all pure
+        attribute lookups set at construction time, with none of
+        `generate_summary()`'s residual diagnostics or coverage
+        probability. Used by `__repr__` (via `format_info_table`).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, matching the other
+            `generate_summary*` methods' return shape.
+        """
+        y_hat = getattr(self, "y_hat", None)
+        p, T = y_hat.shape if y_hat is not None else ("N/A", "N/A")
+        llf = getattr(self, "llf", None)
+        gen_top_left = [
+            ("Dep. Variable:", [getattr(self, "yname", None) or "N/A"]),
+            ("Shape (p, T):", [f"({p}, {T})"]),
+        ]
+        gen_top_right = [
+            ("Obs (missing):", [f"{self.nobs} ({self.missing})" if self.nobs is not None else "N/A"]),
+            ("Log-Likelihood:", [f"{llf:.5g}" if llf is not None else "N/A"]),
+            ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
+        ]
+        return gen_top_left, gen_top_right
+
     def __str__(self):
         return str(self.summary())
 
     def __repr__(self):
-        return str(self.summary())
+        """Cheap, side-effect-free representation for interactive use
+        (see `generate_summary_header`) - see `summary()`/`str()` for the
+        full diagnostic report (residual tests, coverage probability, ...).
+        """
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        return f"{self.__class__.__name__}\n" + format_info_table(
+            gen_top_left + gen_top_right, indent=2
+        )
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict snapshot of the main results.

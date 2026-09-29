@@ -37,7 +37,7 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device
+from geossm.utils import _select_device, _to_backend, _on_device, format_info_table
 
 
 def _itype_for(dtype):
@@ -2411,10 +2411,41 @@ class StateSpaceModel:
   
         return smry
 
+    def generate_summary_header(self):
+        """Cheap identity/shape rows (name, type/order, dep. variable,
+        shape, backend/dtype) - the subset of `generate_summary()` that's
+        pure attribute lookups, with no per-matrix computation. Used by
+        `__repr__` (via `format_info_table`) so that a bare console/Jupyter
+        display never touches `R`/`Q`/`F`/`x0`/`Sigma0`.
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, matching the other
+            `generate_summary*` methods' return shape.
+        """
+        p, q, T = self.shape if hasattr(self, "shape") else ("N/A", "N/A", "N/A")
+        gen_top_left = [
+            ("Model type (order):", [f"{getattr(self, 'type', 'N/A')}, {getattr(self, 'order', 'N/A')}"]),
+            ("Dep. Variable:", [getattr(self, "y_name", None) or "N/A"]),
+        ]
+        gen_top_right = [
+            ("Shape (p, q, T):", [f"(p = {p}, q = {q}, T = {T})"]),
+            ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
+        ]
+        return gen_top_left, gen_top_right
+
     def __str__(self):
         """String representation of the model."""
 
         return str(self.summary())
 
     def __repr__(self):
-        return self.__str__()
+        """Cheap, side-effect-free representation for interactive use
+        (see `generate_summary_header`) - see `summary()`/`str()` for the
+        full report (includes mean system-matrix diagonals).
+        """
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        return f"{self.__class__.__name__}\n" + format_info_table(
+            gen_top_left + gen_top_right, indent=2
+        )
