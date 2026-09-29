@@ -1138,7 +1138,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
         
-        smr = self.summary(print_full = False)
+        smr = self.summary(print_short=True)
         if self.verbose:
             print(smr)
         self._log("Starting the estimation of the model parameters using EM algorithm...")
