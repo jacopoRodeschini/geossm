@@ -638,11 +638,11 @@ class StateSpaceResults:
         if key in cache:
             return cache[key]
 
-        result = self.__compute_coverage_probability(alpha, which)
+        result = self._compute_coverage_probability(alpha, which)
         cache[key] = result
         return result
 
-    def __compute_coverage_probability(self, alpha: float, which: str):
+    def _compute_coverage_probability(self, alpha: float, which: str):
         y_true = self.y_obs
 
         lower, upper = self.conf_int_y(alpha, prediction=True)
