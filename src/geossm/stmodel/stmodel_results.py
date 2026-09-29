@@ -9,7 +9,7 @@ import time
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
-from geossm.utils import _on_device, split_by_block
+from geossm.utils import _on_device, split_by_block, format_info_table
 
 
 ArrayLike = Optional[Any]
@@ -1047,6 +1047,38 @@ class LRStateSpaceResults(StateSpaceResults):
             self.Sigma_y_pred_back_list = Sigma_pred_back_list
 
         return self
+
+    
+    def generate_summary_header(self):
+        """
+        Cheap identity/fit rows: the base class's header (see
+        `StateSpaceResults.generate_summary_header`) plus EM iteration
+        count and AIC/BIC -- all pure attribute lookups/cheap arithmetic,
+        none of `generate_summary()`'s residual diagnostics, coverage
+        probability, or (if `.predict()` has run) prediction summary.
+        Used by `__repr__` (inherited from the base class, via
+        `format_info_table`).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, of equal length.
+        """
+        gen_top_left, gen_top_right = super().generate_summary_header()
+
+        # aic/bic raise AttributeError before llf is set (i.e. before
+        # LRStateSpaceModel.fit() has run) -- __repr__ must never raise,
+        # so fall back to "N/A" rather than propagate that.
+        
+        if not hasattr(self, "aic") or not hasattr(self, "bic"):
+            aic_bic = "N/A"
+        else:
+            aic_bic = f"{self.aic:.4g}, {self.bic:.4g}"
+
+        gen_top_left = gen_top_left + [("EM iterations:", [f"{self.iterations}"])]
+        gen_top_right = gen_top_right + [("AIC, BIC:", [aic_bic])]
+
+        return gen_top_left, gen_top_right
 
     def generate_summary(self):
         """
