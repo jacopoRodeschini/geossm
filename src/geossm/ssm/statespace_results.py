@@ -622,10 +622,27 @@ class StateSpaceResults:
         """
         Compute empirical coverage probability of prediction intervals.
 
+        Memoized per ``(alpha, which)`` on the instance: `Sigma_y_hat`/
+        `y_hat` are snapshotted once at fit time and never mutated
+        afterwards (see `conf_int_y`), so the result can't go stale.
+        This keeps `__repr__`/`__str__`/`summary()` - which call this via
+        `generate_summary()` on every render - from recomputing (and
+        re-triggering `conf_int_y`'s ``sqrt``) on every print.
+
         -------
         float
             Coverage probability in [0, 1].
         """
+        cache = self.__dict__.setdefault("_coverage_probability_cache", {})
+        key = (float(alpha), which)
+        if key in cache:
+            return cache[key]
+
+        result = self.__compute_coverage_probability(alpha, which)
+        cache[key] = result
+        return result
+
+    def __compute_coverage_probability(self, alpha: float, which: str):
         y_true = self.y_obs
 
         lower, upper = self.conf_int_y(alpha, prediction=True)
