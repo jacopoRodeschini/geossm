@@ -1308,7 +1308,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 delta_lik < 0 or jnp.isnan(delta_lik) or jnp.isinf(delta_lik)
             ):
                 msg = self._log_warning_emstep(delta_lik, niter)
-                self._log(msg)
+                # self._log(msg)
                 warnings.warn(
                     msg + ". The EM algorithm was stopped and the last valid "
                     "estimate is returned (convergence=False).",
