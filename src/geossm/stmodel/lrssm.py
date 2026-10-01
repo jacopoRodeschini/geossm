@@ -28,6 +28,7 @@ from functools import partial
 
 from datetime import datetime, timezone
 import time
+import warnings
 from jax.scipy.linalg import block_diag
 from scipy.linalg import block_diag as scyp_block_diag
 import jax
@@ -1210,6 +1211,8 @@ class LRStateSpaceModel(StateSpaceModel):
         tdelta_Edet = np.zeros(3)
         tdelta_Mdet = np.zeros(3)
         nstat = []  # list to store the results of each iteration
+        converged = False  # True only if the relative tolerance was met
+        last_valid = None  # snapshot of the last valid (params, E-step outputs)
 
         # Log the initial state before starting the EM iterations
         nstat = self._log_iteration(
@@ -1298,14 +1301,28 @@ class LRStateSpaceModel(StateSpaceModel):
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Check if the step is valid (i.e. the log-likelihood is increasing) and update the parameters accordingly
-            if delta_lik < 0 or jnp.isnan(delta_lik) or jnp.isinf(delta_lik):
+            # Check if the step is valid (i.e. the log-likelihood is not decreasing).
+            # Skipped at the first iteration: logL_prev is a placeholder (0), so
+            # delta_lik is not a real likelihood increment.
+            if niter > 1 and (
+                delta_lik < 0 or jnp.isnan(delta_lik) or jnp.isinf(delta_lik)
+            ):
                 msg = self._log_warning_emstep(delta_lik, niter)
                 self._log(msg)
+                warnings.warn(
+                    msg + ". The EM algorithm was stopped and the last valid "
+                    "estimate is returned (convergence=False).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
-                # stop the EM algorithm if the log-likelihood is decreasing or not valid
+                # restore the last valid estimate and its E-step outputs
+                est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
                 break
-            
+
+            # snapshot the current (valid) parameters and their E-step outputs
+            last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
+
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
             logL_prev = logL_cur
@@ -1331,11 +1348,23 @@ class LRStateSpaceModel(StateSpaceModel):
                 print(msg)
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
-            if niter == max_iter or abs(relat_lik) <= tol_relat:
+            if abs(relat_lik) <= tol_relat:
+                converged = True
+                flag = False
+            elif niter == max_iter:
+                warnings.warn(
+                    "The EM algorithm reached max_iter={} without meeting "
+                    "tol_relat={}.".format(max_iter, tol_relat),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 flag = False
 
 
-        self._log("EM algorithm converged after {} iterations.".format(niter))
+        if converged:
+            self._log("EM algorithm converged after {} iterations.".format(niter))
+        else:
+            self._log("EM algorithm stopped after {} iterations without converging.".format(niter))
         self._log("Final log-likelihood: {}.".format(logL_cur))
         self._log("Create the results object...")
 
@@ -1357,6 +1386,7 @@ class LRStateSpaceModel(StateSpaceModel):
             params=est_params,
             nstats=nstat,
             options=options,
+            convergence=converged,
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)

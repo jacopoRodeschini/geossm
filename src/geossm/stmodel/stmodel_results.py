@@ -156,6 +156,7 @@ class LRStateSpaceResults(StateSpaceResults):
         params: ModelParams = None,
         nstats: list = None,
         options: FitOptions = None,
+        convergence: bool = None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -179,6 +180,12 @@ class LRStateSpaceResults(StateSpaceResults):
         options : FitOptions, optional
             The `FitOptions` the model was fit with (stored as-is, for
             reference).
+        convergence : bool, optional
+            `True` if the EM algorithm stopped because the relative
+            log-likelihood tolerance (`tol_relat`) was met; `False` if it
+            stopped for any other reason (`max_iter` reached, or a
+            decreasing/NaN/Inf log-likelihood, in which case the last
+            valid estimate is kept).
         block_p : array-like, optional
             Cumulative index boundaries splitting the stacked training
             arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
@@ -208,6 +215,7 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.nstats = nstats
         self.options = options
+        self.convergence = convergence
 
         # Cumulative per-response-variable index boundaries for the
         # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
@@ -1075,8 +1083,14 @@ class LRStateSpaceResults(StateSpaceResults):
         else:
             aic_bic = f"{self.aic:.4g}, {self.bic:.4g}"
 
-        gen_top_left = gen_top_left + [("EM iterations:", [f"{self.iterations}"])]
-        gen_top_right = gen_top_right + [("AIC, BIC:", [aic_bic])]
+        gen_top_left = gen_top_left + [
+            ("EM iterations:", [f"{self.iterations}"]),
+            ("Converged:", [f"{self.convergence}"]),
+        ]
+        gen_top_right = gen_top_right + [
+            ("AIC, BIC:", [aic_bic]),
+            ("", [""]),
+        ]
 
         return gen_top_left, gen_top_right
 
