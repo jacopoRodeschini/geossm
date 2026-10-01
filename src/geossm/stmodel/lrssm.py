@@ -1138,9 +1138,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
         
-        smr = self.summary(print_short=True)
         if self.verbose:
-            print(smr)
+            print(self._get_summary_table())
         self._log("Starting the estimation of the model parameters using EM algorithm...")
 
         
@@ -1299,6 +1298,14 @@ class LRStateSpaceModel(StateSpaceModel):
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
+            # Check if the step is valid (i.e. the log-likelihood is increasing) and update the parameters accordingly
+            if delta_lik < 0 or jnp.isnan(delta_lik) or jnp.isinf(delta_lik):
+                msg = self._log_warning_emstep(delta_lik, niter)
+                self._log(msg)
+
+                # stop the EM algorithm if the log-likelihood is decreasing or not valid
+                break
+            
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
             logL_prev = logL_cur
@@ -2275,6 +2282,24 @@ class LRStateSpaceModel(StateSpaceModel):
         return y_train, Xbeta_train
 
 
+    def _log_warning_emstep(self, delta_lik, niter):
+        msg = ""
+        if delta_lik < 0:
+            msg = "Warning: the log-likelihood decreased in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+        elif jnp.isnan(delta_lik):
+            msg = "Warning: the log-likelihood is NaN in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+        elif jnp.isinf(delta_lik):
+            msg = "Warning: the log-likelihood is Inf in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+
+        return msg
+                
+
     def logger(self, stats, beta_decimals=2, scalar_decimals=2, relat_decimals=5):
         """
         Format one EM iteration's statistics (as built by `_log_iteration`)
@@ -2587,13 +2612,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         """Return a human-readable summary of the model (see `summary`)."""
         return str(self.summary(print_short=False))
 
-    def __repr__(self):
-        """Cheap, side-effect-free representation for interactive use
-        (model name/type/shape/backend only, from `generate_summary_header`)
-        -- see `summary()`/`str()` for the full, more expensive report
-        (per-grid/per-covariance detail). Does not touch `self.model` or
-        any other state, unlike `summary()`.
-        """
+    def _get_summary_table(self):
         gen_top_left, gen_top_right = self.generate_summary_header()
         items = [
             (key, value)
@@ -2601,6 +2620,15 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             if str(key).strip()
         ]
         return f"{self.__class__.__name__}\n" + format_info_table(items, indent=2)
+
+    def __repr__(self):
+        """Cheap, side-effect-free representation for interactive use
+        (model name/type/shape/backend only, from `generate_summary_header`)
+        -- see `summary()`/`str()` for the full, more expensive report
+        (per-grid/per-covariance detail). Does not touch `self.model` or
+        any other state, unlike `summary()`.
+        """
+        return self._get_summary_table()
 
     def _is_verbose(self, verbose=None) -> bool:
         """Resolve an optional per-call `verbose` override against `self.verbose`."""
