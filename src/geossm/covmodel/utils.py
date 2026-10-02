@@ -994,12 +994,14 @@ def _size_conforming_subset(points, h_pts, alpha, eligible):
     return np.array(chosen, dtype=int)
 
 
-def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None):
+def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None, algorithm=6):
     """Frontal-Delaunay triangulation of the polygon `coords` whose local
     element size follows the grid field `h` (sampled at nodes `xs` x `ys`),
     passed to gmsh as a background PostView field so it is evaluated in C++
     rather than through a Python callback. Points in `embed` ((k, 2), strictly
-    inside the polygon) become fixed mesh vertices."""
+    inside the polygon) become fixed mesh vertices. `algorithm` is gmsh's
+    2D algorithm: 6 (Frontal-Delaunay, best angles) or 5 (Delaunay, which
+    samples steep size fields more reliably)."""
     initialized_here = not gmsh.isInitialized()
     if initialized_here:
         gmsh.initialize()
@@ -1035,7 +1037,7 @@ def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None):
         gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-        gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay
+        gmsh.option.setNumber("Mesh.Algorithm", algorithm)
         gmsh.model.mesh.generate(2)
 
         node_tags, xyz, _ = gmsh.model.mesh.getNodes()
@@ -1052,9 +1054,16 @@ def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None):
     lookup[node_tags.astype(int)] = np.arange(len(node_tags))
     triangles = lookup[tri_nodes.astype(int)].reshape(-1, 3)
     used, triangles = np.unique(triangles, return_inverse=True)
+    triangles = triangles.reshape(-1, 3)
     vertices = xyz.reshape(-1, 3)[used]
     vertices[:, 2] = 0.0
-    return meshio.Mesh(points=vertices, cells=[("triangle", triangles.reshape(-1, 3))])
+
+    # counter-clockwise orientation (gmsh follows the boundary ring's, which
+    # shapely may give clockwise)
+    p0, p1, p2 = (vertices[triangles[:, k], :2] for k in range(3))
+    cw = (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1]) - (p1[:, 1] - p0[:, 1]) * (p2[:, 0] - p0[:, 0]) < 0
+    triangles[cw] = triangles[cw][:, ::-1]
+    return meshio.Mesh(points=vertices, cells=[("triangle", triangles)])
 
 
 def buildMesh2d_density_new(
@@ -1111,7 +1120,10 @@ def buildMesh2d_density_new(
        predicted count :math:`(2/\sqrt3)\int_D h_g^{-2}`, then on the vertex
        count of the actual gmsh mesh, until it is within `tol` of `R`.
     5. *Meshing.* gmsh's Frontal-Delaunay mesher on the buffered convex hull,
-       with :math:`h_g` as a background size field.
+       with :math:`h_g` as a background size field. If it returns fewer than
+       half the vertices the field predicts (it can miss small fine regions
+       of a steep field, e.g. with a large `gradation`), gmsh's Delaunay
+       mesher is used instead, which samples the field more reliably.
     6. *Anchoring* (only with `anchor_spacing` = :math:`\alpha`). Before
        meshing, a subset :math:`A` of `points` is chosen greedily, densest
        first, so that :math:`|a - a'| \ge \alpha (h_g(a) + h_g(a'))/2` for
@@ -1270,14 +1282,14 @@ def buildMesh2d_density_new(
             if abs(n_pred - target_n) <= 0.25 * tol * target_n:
                 break
             kappa *= np.sqrt(n_pred / target_n)
-        return xs, ys, mask, delta, f, size_field, kappa, h
+        return xs, ys, mask, delta, dA, f, size_field, kappa, h
 
     if grid_size is None:
         # coarse pass to locate the smallest element, then a grid with at
         # least 3 cells across it
-        _, _, mask, _, _, _, _, h = _calibrated_fields(200)
+        _, _, mask, _, _, _, _, _, h = _calibrated_fields(200)
         grid_size = int(np.clip(np.ceil(3 * extent / h[mask].min()), 200, 1500))
-    xs, ys, mask, delta, f, _size_field, kappa, h = _calibrated_fields(grid_size)
+    xs, ys, mask, delta, dA, f, _size_field, kappa, h = _calibrated_fields(grid_size)
 
     if h[mask].min() < 2 * delta:
         warnings.warn(
@@ -1313,12 +1325,21 @@ def buildMesh2d_density_new(
     # (4b)+(5)+(6) mesh, then correct kappa on the actual vertex count
     history = []
     best = None
+    algorithm = 6  # Frontal-Delaunay: best angles
     for _ in range(max_iter):
         anchors = _anchors(h)
-        mesh = _gmsh_mesh_from_size_grid(
-            coords, xs, ys, h, embed=None if anchors is None else points[anchors]
-        )
+        embed = None if anchors is None else points[anchors]
+        mesh = _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=embed, algorithm=algorithm)
         n = _n_inside(mesh)
+        n_pred = _VERTEX_DENSITY_2D * np.sum(h[mask] ** -2.0) * dA
+        if algorithm == 6 and n < 0.5 * n_pred:
+            # Frontal-Delaunay can miss small fine regions of a steep field
+            # (e.g. large `gradation`) and return far fewer vertices than the
+            # field asks for, making N(kappa) discontinuous; Delaunay samples
+            # the field at every circumcenter and does not, so switch to it
+            algorithm = 5
+            mesh = _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=embed, algorithm=algorithm)
+            n = _n_inside(mesh)
         history.append((float(kappa), n))
         if best is None or abs(n - target_n) < abs(best[1] - target_n):
             best = (mesh, n, kappa, h, anchors)
@@ -1362,6 +1383,7 @@ def buildMesh2d_density_new(
         # distance from each of `points` to its nearest mesh vertex
         "point_distance": cKDTree(mesh.points[:, :2]).query(points)[0],
         "anchors": anchors,
+        "algorithm": algorithm,
     }
     return mesh, convex_hull, info
 
