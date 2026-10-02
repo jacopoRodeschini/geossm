@@ -6,6 +6,9 @@ import numpy as np
 import pygmsh
 import shapely
 from scipy.cluster.vq import kmeans2
+from scipy.ndimage import gaussian_filter
+from scipy.sparse import coo_matrix
+from scipy.sparse.csgraph import dijkstra
 from scipy.spatial import cKDTree, Delaunay, QhullError
 from scipy.spatial.distance import cdist
 from shapely.geometry import MultiPoint, MultiPolygon, Polygon
@@ -927,6 +930,372 @@ def buildMesh2d_new(
         seed=seed,
         **_DENSITY_METHODS[method],
     )
+
+
+# Vertices per unit of int h^{-2}: an equilateral triangulation of edge h has
+# area sqrt(3)/2 h^2 per vertex (6 triangles of area sqrt(3)/4 h^2 around a
+# vertex, each shared by 3 vertices), hence N ~ (2/sqrt(3)) int_D h^{-2} ds.
+_VERTEX_DENSITY_2D = 2.0 / np.sqrt(3.0)
+
+
+def _gradient_limit(h, delta, gradation):
+    """Largest g-Lipschitz field below `h` on a regular grid of spacing
+    `delta`: h_g(x) = min_y { h(y) + g |x - y| } (Persson, 2006), with |x - y|
+    the 8-neighbor grid-graph distance (overestimates the Euclidean one by at
+    most ~8%). Computed exactly as a single-source shortest path from a
+    virtual source linked to every node y with weight h(y). `h` may be +inf
+    (no own constraint); every node then inherits one from its neighbors."""
+    ny, nx = h.shape
+    n = nx * ny
+    idx = np.arange(n).reshape(ny, nx)
+
+    rows, cols, wts = [], [], []
+    for di, dj in ((0, 1), (1, 0), (1, 1), (1, -1)):
+        j0, j1 = max(0, -dj), nx - max(0, dj)
+        a = idx[: ny - di, j0:j1].ravel()
+        b = idx[di:, j0 + dj : j1 + dj].ravel()
+        w = gradation * delta * np.hypot(di, dj)
+        rows += [a, b]
+        cols += [b, a]
+        wts += [np.full(len(a), w), np.full(len(a), w)]
+
+    finite = np.flatnonzero(np.isfinite(h.ravel()))
+    rows.append(np.full(len(finite), n))
+    cols.append(finite)
+    wts.append(h.ravel()[finite])
+
+    graph = coo_matrix(
+        (np.concatenate(wts), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(n + 1, n + 1),
+    ).tocsr()
+    dist = dijkstra(graph, directed=True, indices=n)
+    return dist[:n].reshape(ny, nx)
+
+
+def _gmsh_mesh_from_size_grid(coords, xs, ys, h):
+    """Frontal-Delaunay triangulation of the polygon `coords` whose local
+    element size follows the grid field `h` (sampled at nodes `xs` x `ys`),
+    passed to gmsh as a background PostView field so it is evaluated in C++
+    rather than through a Python callback."""
+    initialized_here = not gmsh.isInitialized()
+    if initialized_here:
+        gmsh.initialize()
+    gmsh.option.setNumber("General.Terminal", 0)
+    gmsh.model.add("buildMesh2d_density_new")
+    view = None
+    try:
+        geo = gmsh.model.geo
+        ptags = [geo.addPoint(x, y, 0.0) for x, y in coords]
+        ltags = [geo.addLine(ptags[i], ptags[(i + 1) % len(ptags)]) for i in range(len(ptags))]
+        geo.addPlaneSurface([geo.addCurveLoop(ltags)])
+        geo.synchronize()
+
+        # background triangulation of the size grid (two triangles per cell),
+        # in gmsh's list format: x1 x2 x3 y1 y2 y3 z1 z2 z3 v1 v2 v3
+        X, Y = np.meshgrid(xs, ys)
+        idx = np.arange(X.size).reshape(X.shape)
+        a, b = idx[:-1, :-1].ravel(), idx[:-1, 1:].ravel()
+        c, d = idx[1:, 1:].ravel(), idx[1:, :-1].ravel()
+        tri = np.vstack([np.column_stack([a, b, c]), np.column_stack([a, c, d])])
+        xf, yf, hf = X.ravel(), Y.ravel(), h.ravel()
+        data = np.hstack([xf[tri], yf[tri], np.zeros(tri.shape), hf[tri]])
+
+        view = gmsh.view.add("size")
+        gmsh.view.addListData(view, "ST", len(tri), data.ravel())
+        field = gmsh.model.mesh.field.add("PostView")
+        gmsh.model.mesh.field.setNumber(field, "ViewTag", view)
+        gmsh.model.mesh.field.setAsBackgroundMesh(field)
+
+        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
+        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
+        gmsh.option.setNumber("Mesh.Algorithm", 6)  # Frontal-Delaunay
+        gmsh.model.mesh.generate(2)
+
+        node_tags, xyz, _ = gmsh.model.mesh.getNodes()
+        _, tri_nodes = gmsh.model.mesh.getElementsByType(2)
+    finally:
+        if view is not None:
+            gmsh.view.remove(view)
+        gmsh.model.remove()
+        if initialized_here:
+            gmsh.finalize()
+
+    # gmsh node tags -> contiguous indices, dropping nodes no triangle uses
+    lookup = np.full(int(node_tags.max()) + 1, -1)
+    lookup[node_tags.astype(int)] = np.arange(len(node_tags))
+    triangles = lookup[tri_nodes.astype(int)].reshape(-1, 3)
+    used, triangles = np.unique(triangles, return_inverse=True)
+    vertices = xyz.reshape(-1, 3)[used]
+    vertices[:, 2] = 0.0
+    return meshio.Mesh(points=vertices, cells=[("triangle", triangles.reshape(-1, 3))])
+
+
+def buildMesh2d_density_new(
+    points,
+    lowrank=None,
+    n_vertices=None,
+    domain=None,
+    intensity=None,
+    bandwidth=None,
+    eps=0.1,
+    gradation=0.25,
+    offset=None,
+    outer_ratio=2.0,
+    grid_size=None,
+    min_angle=21.0,
+    tol=0.02,
+    max_iter=10,
+    return_info=False,
+):
+    r"""
+    Build a 2D triangular mesh with a vertex budget `R`, whose local element
+    size follows the intensity of `points` through the Persson-Strang sizing
+    function
+
+    .. math::
+
+        h(s) = \kappa \, \rho_\varepsilon(s)^{-1/2}, \qquad
+        \rho_\varepsilon = (1 - \varepsilon)\, \hat f + \varepsilon / |D|,
+
+    where :math:`\hat f = \hat\lambda / \hat\Lambda(D)` is the normalized
+    intensity of `points` on the interest domain `D` (so
+    :math:`\rho_\varepsilon = \lambda_\varepsilon / \Lambda_\varepsilon(D)`).
+
+    Steps:
+
+    1. *Intensity.* :math:`\hat\lambda` is a Gaussian kernel estimate with
+       Diggle's edge correction, :math:`\hat\lambda(s) = \sum_i k_b(s - s_i)
+       / \int_D k_b(s - u)\,du`, computed by convolution on a background grid
+       (see `grid_size`), or any user `intensity`.
+    2. *Sizing.* Since a near-equilateral mesh with size field `h` has
+       :math:`N \approx (2/\sqrt3)\int_D h^{-2}` vertices in `D`, taking
+       :math:`\kappa = \sqrt{2 / (\sqrt3 R)}` recovers exactly
+       :math:`h = (c R \lambda_\varepsilon / \Lambda_\varepsilon(D))^{-1/2}`,
+       :math:`c = \sqrt3/2`.
+    3. *Gradation.* `h` is replaced by the largest `gradation`-Lipschitz field
+       below it, :math:`h_g(x) = \min_y \{\kappa h(y) + g |x - y|\}`, so the
+       ratio of neighboring element sizes is at most about :math:`1 + g`
+       (smooth transitions, hence shape-regular elements). Outside `D` (the
+       `offset` buffer) `h` is defined by this extension alone, capped at
+       `outer_ratio` times its largest value in `D`.
+    4. *Budget.* :math:`\kappa` is found by the fixed-point iteration
+       :math:`\kappa \leftarrow \kappa \sqrt{N(\kappa) / R}`, first on the
+       predicted count :math:`(2/\sqrt3)\int_D h_g^{-2}`, then on the vertex
+       count of the actual gmsh mesh, until it is within `tol` of `R`.
+    5. *Meshing.* gmsh's Frontal-Delaunay mesher on the buffered convex hull,
+       with :math:`h_g` as a background size field.
+
+    Consistency: because :math:`\rho_\varepsilon \ge \varepsilon/|D|`,
+    :math:`\sup_D h \le \sqrt{2|D| / (\sqrt3\,\varepsilon R)} \to 0` as
+    :math:`R \to \infty` (gradation only lowers `h`), while
+    :math:`\sup h / \inf h \le \sqrt{\sup\rho_\varepsilon / \inf\rho_\varepsilon}`
+    stays bounded independently of `R`.
+
+    Parameters
+    ----------
+    points : (n, 2) array_like
+        Observed locations.
+    lowrank : float, optional
+        Value in (0, 1]. Sets the budget to ``R = round(lowrank * len(points))``
+        vertices inside `D`, as in `buildMesh2d_density`.
+    n_vertices : int, optional
+        The budget `R` directly. Give exactly one of `lowrank` and
+        `n_vertices`. Unlike `lowrank`, it may exceed ``len(points)``.
+    domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
+        The interest domain `D`; see `buildMesh2d`. Defaults to the convex
+        hull of `points`. The vertex budget counts vertices inside `D` only.
+    intensity : callable, optional
+        ``intensity(xy) -> (m,)`` non-negative values at the ``(m, 2)``
+        locations `xy`, replacing the kernel estimate (e.g. a fitted
+        point-process intensity). Only proportionality matters.
+    bandwidth : float, optional
+        Gaussian kernel bandwidth `b`. Defaults to Scott's rule,
+        ``n**(-1/6) * sqrt((var_x + var_y) / 2)``. Ignored with `intensity`.
+    eps : float, default 0.1
+        Uniform mixing weight in (0, 1]: the fraction of the budget spread
+        evenly over `D`. Must be positive for consistency (``h_max -> 0``);
+        it also bounds the size ratio between sparse and dense regions.
+    gradation : float, default 0.25
+        Lipschitz constant `g` of the size field (Persson's gradient limit).
+        Smaller values give smoother transitions at the cost of a weaker
+        density contrast for a fixed budget.
+    offset : float, optional
+        Buffer added around `D`'s convex hull. Defaults to 1/15 of the
+        domain's bounding-box diagonal.
+    outer_ratio : float, default 2.0
+        Cap on element size in the buffer, relative to the largest one in `D`.
+    grid_size : int, optional
+        Background-grid resolution (cells along the longer side) for the
+        intensity and size fields. Defaults to at least 3 cells across the
+        smallest element (between 200 and 1500); a warning is raised if an
+        explicit value is too coarse to resolve it.
+    min_angle : float, default 21.0
+        Soft target for the minimum interior angle (degrees); a warning is
+        raised if the mesh does not reach it.
+    tol : float, default 0.02
+        Relative tolerance on the vertex-count target.
+    max_iter : int, default 10
+        Maximum number of gmsh mesh generations used to calibrate `kappa`.
+    return_info : bool, default False
+        Also return a dict of diagnostics (size and intensity fields on the
+        background grid, `kappa`, calibration history, minimum angle).
+
+    Returns
+    -------
+    mesh : meshio.Mesh
+    convex_hull : shapely.geometry.Polygon
+        The (buffered) convex hull the mesh was built over.
+    info : dict
+        Only if `return_info` is True.
+    """
+    if (lowrank is None) == (n_vertices is None):
+        raise ValueError("give exactly one of `lowrank` and `n_vertices`.")
+    if not (0 < eps <= 1):
+        raise ValueError("eps must be in (0, 1].")
+    if gradation <= 0:
+        raise ValueError("gradation must be positive.")
+
+    points, n_input, interest_domain, convex_hull, coords, _, _, offset, _ = (
+        _prepare_domain(points, domain, None, None, offset, 0.0)
+    )
+    if lowrank is not None:
+        if not (0 < lowrank <= 1):
+            raise ValueError("lowrank must be in (0, 1].")
+        target_n = max(3, round(lowrank * n_input))
+    else:
+        target_n = max(3, int(n_vertices))
+
+    minx, miny, maxx, maxy = convex_hull.bounds
+    extent = max(maxx - minx, maxy - miny)
+    shapely.prepare(interest_domain)
+    if intensity is None and bandwidth is None:
+        bandwidth = len(points) ** (-1 / 6) * np.sqrt(points.var(axis=0).mean())
+
+    def _calibrated_fields(n_cells):
+        # Background grid (nodes) covering the buffered hull with one spare
+        # cell on each side, so gmsh never queries the size field outside it.
+        delta = extent / n_cells
+        xs = minx - delta + delta * np.arange(int(np.ceil((maxx - minx) / delta)) + 3)
+        ys = miny - delta + delta * np.arange(int(np.ceil((maxy - miny) / delta)) + 3)
+        X, Y = np.meshgrid(xs, ys)
+        mask = shapely.contains_xy(interest_domain, X, Y)
+        if mask.sum() < 10:
+            raise ValueError("domain is too small for the background grid; increase grid_size.")
+        dA = delta**2
+        area_D = mask.sum() * dA
+
+        # (1) intensity on D, normalized to a density f (int_D f = 1)
+        if intensity is not None:
+            lam = np.zeros(X.shape)
+            lam[mask] = np.asarray(intensity(np.column_stack([X[mask], Y[mask]])), dtype=float)
+            if np.any(lam < 0) or not np.all(np.isfinite(lam)):
+                raise ValueError("`intensity` must return finite, non-negative values.")
+        else:
+            ix = np.rint((points[:, 0] - xs[0]) / delta).astype(int)
+            iy = np.rint((points[:, 1] - ys[0]) / delta).astype(int)
+            ok = (ix >= 0) & (ix < len(xs)) & (iy >= 0) & (iy < len(ys))
+            counts = np.zeros(X.shape)
+            np.add.at(counts, (iy[ok], ix[ok]), 1.0)
+            sigma = bandwidth / delta
+            smoothed = gaussian_filter(counts, sigma, mode="constant")
+            # Diggle edge correction e(s) = int_D k_b(s - u) du; floored so
+            # thin slivers of D don't blow up the estimate
+            edge = gaussian_filter(mask.astype(float), sigma, mode="constant")
+            lam = np.where(mask, smoothed / np.maximum(edge, 0.05), 0.0)
+        total = lam[mask].sum() * dA
+        if total <= 0:
+            raise ValueError("the intensity vanishes on the whole domain.")
+        f = lam / total
+
+        # (2) reference size field h0 = rho_eps^{-1/2} on D, unconstrained
+        # outside
+        rho = (1 - eps) * f + eps / area_D
+        h0 = np.full(X.shape, np.inf)
+        h0[mask] = rho[mask] ** -0.5
+
+        def size_field(kappa):
+            # (3) gradation, then the cap on the outer buffer
+            hg = _gradient_limit(kappa * h0, delta, gradation)
+            return np.minimum(hg, outer_ratio * hg[mask].max())
+
+        # (4a) calibrate kappa on the predicted count; without gradation
+        # this is exactly kappa = sqrt(c / R), gradation only adds vertices
+        kappa = np.sqrt(_VERTEX_DENSITY_2D / target_n)
+        for _ in range(20):
+            h = size_field(kappa)
+            n_pred = _VERTEX_DENSITY_2D * np.sum(h[mask] ** -2.0) * dA
+            if abs(n_pred - target_n) <= 0.25 * tol * target_n:
+                break
+            kappa *= np.sqrt(n_pred / target_n)
+        return xs, ys, mask, delta, f, size_field, kappa, h
+
+    if grid_size is None:
+        # coarse pass to locate the smallest element, then a grid with at
+        # least 3 cells across it
+        _, _, mask, _, _, _, _, h = _calibrated_fields(200)
+        grid_size = int(np.clip(np.ceil(3 * extent / h[mask].min()), 200, 1500))
+    xs, ys, mask, delta, f, _size_field, kappa, h = _calibrated_fields(grid_size)
+
+    if h[mask].min() < 2 * delta:
+        warnings.warn(
+            f"buildMesh2d_density_new: the smallest element size "
+            f"({h[mask].min():.3g}) is below two background-grid cells "
+            f"({2 * delta:.3g}); increase `grid_size` to resolve the size field."
+        )
+
+    def _n_inside(mesh):
+        pts = mesh.points
+        return int(shapely.contains_xy(interest_domain, pts[:, 0], pts[:, 1]).sum())
+
+    # (4b)+(5) mesh, then correct kappa on the actual vertex count
+    history = []
+    best = None
+    for _ in range(max_iter):
+        mesh = _gmsh_mesh_from_size_grid(coords, xs, ys, h)
+        n = _n_inside(mesh)
+        history.append((float(kappa), n))
+        if best is None or abs(n - target_n) < abs(best[1] - target_n):
+            best = (mesh, n, kappa, h)
+        if abs(n - target_n) <= max(1, tol * target_n):
+            break
+        kappa *= np.sqrt(n / target_n)
+        h = _size_field(kappa)
+
+    mesh, n_inside, kappa, h = best
+    if abs(n_inside - target_n) > max(1, tol * target_n):
+        warnings.warn(
+            f"buildMesh2d_density_new: reached {n_inside} vertices inside the "
+            f"interest domain (target {target_n}, tol={tol}); consider a "
+            "larger `max_iter`."
+        )
+    angle = _mesh_min_angle(mesh)
+    if angle < min_angle:
+        warnings.warn(
+            f"buildMesh2d_density_new: minimum interior angle is {angle:.1f} "
+            f"deg < min_angle={min_angle} deg. Consider a smaller `gradation` "
+            "or a larger `grid_size`."
+        )
+
+    if not return_info:
+        return mesh, convex_hull
+    info = {
+        "target_n": target_n,
+        "n_inside": n_inside,
+        "n_total": len(mesh.points),
+        "kappa": float(kappa),
+        "history": history,
+        "min_angle": angle,
+        "bandwidth": bandwidth,
+        "grid_x": xs,
+        "grid_y": ys,
+        "domain_mask": mask,
+        "density": f,
+        "size_field": h,
+        "h_max_D": float(h[mask].max()),
+        "h_min_D": float(h[mask].min()),
+    }
+    return mesh, convex_hull, info
 
 
 def _prune_low_degree(vertices, triangles, min_degree, max_iter=50):

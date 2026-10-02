@@ -1,13 +1,14 @@
 # covariance model sub module for geossm
 
 from .covmodels import spdeAppoxCov, FEMSolver
-from .utils import buildMesh2d, buildMesh2d_density, buildMesh2d_new, buildMeshGrid2d
+from .utils import buildMesh2d, buildMesh2d_density, buildMesh2d_density_new, buildMesh2d_new, buildMeshGrid2d
 
 __all__ = [
     "spdeAppoxCov",
     "FEMSolver",
     "buildMesh2d",
     "buildMesh2d_density",
+    "buildMesh2d_density_new",
     "buildMesh2d_new",
     "buildMeshGrid2d",
 ]
