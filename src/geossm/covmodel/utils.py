@@ -6,6 +6,7 @@ import numpy as np
 import pygmsh
 import shapely
 from scipy.cluster.vq import kmeans2
+from scipy.interpolate import RegularGridInterpolator
 from scipy.ndimage import gaussian_filter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
@@ -972,11 +973,33 @@ def _gradient_limit(h, delta, gradation):
     return dist[:n].reshape(ny, nx)
 
 
-def _gmsh_mesh_from_size_grid(coords, xs, ys, h):
+def _size_conforming_subset(points, h_pts, alpha, eligible):
+    """Greedy subset of `points` that is well spaced w.r.t. the size field:
+    any two chosen points a, a' satisfy |a - a'| >= alpha (h(a) + h(a')) / 2,
+    and every eligible point not chosen lies closer than that to a chosen one
+    (maximality). Points are visited densest first (smallest h; ties by input
+    order), as in variable-radius Poisson-disk sampling. Returns indices."""
+    order = np.lexsort((np.arange(len(points)), h_pts))
+    tree = cKDTree(points)
+    blocked = ~eligible
+    h_cap = h_pts.max()
+    chosen = []
+    for i in order:
+        if blocked[i]:
+            continue
+        chosen.append(i)
+        nb = np.asarray(tree.query_ball_point(points[i], alpha * 0.5 * (h_pts[i] + h_cap)))
+        d = np.linalg.norm(points[nb] - points[i], axis=1)
+        blocked[nb[d < alpha * 0.5 * (h_pts[i] + h_pts[nb])]] = True
+    return np.array(chosen, dtype=int)
+
+
+def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None):
     """Frontal-Delaunay triangulation of the polygon `coords` whose local
     element size follows the grid field `h` (sampled at nodes `xs` x `ys`),
     passed to gmsh as a background PostView field so it is evaluated in C++
-    rather than through a Python callback."""
+    rather than through a Python callback. Points in `embed` ((k, 2), strictly
+    inside the polygon) become fixed mesh vertices."""
     initialized_here = not gmsh.isInitialized()
     if initialized_here:
         gmsh.initialize()
@@ -987,8 +1010,11 @@ def _gmsh_mesh_from_size_grid(coords, xs, ys, h):
         geo = gmsh.model.geo
         ptags = [geo.addPoint(x, y, 0.0) for x, y in coords]
         ltags = [geo.addLine(ptags[i], ptags[(i + 1) % len(ptags)]) for i in range(len(ptags))]
-        geo.addPlaneSurface([geo.addCurveLoop(ltags)])
+        surf = geo.addPlaneSurface([geo.addCurveLoop(ltags)])
+        etags = [geo.addPoint(x, y, 0.0) for x, y in (embed if embed is not None else [])]
         geo.synchronize()
+        if etags:
+            gmsh.model.mesh.embed(0, etags, 2, surf)
 
         # background triangulation of the size grid (two triangles per cell),
         # in gmsh's list format: x1 x2 x3 y1 y2 y3 z1 z2 z3 v1 v2 v3
@@ -1043,6 +1069,7 @@ def buildMesh2d_density_new(
     offset=None,
     outer_ratio=2.0,
     grid_size=None,
+    anchor_spacing=None,
     min_angle=21.0,
     tol=0.02,
     max_iter=10,
@@ -1085,6 +1112,15 @@ def buildMesh2d_density_new(
        count of the actual gmsh mesh, until it is within `tol` of `R`.
     5. *Meshing.* gmsh's Frontal-Delaunay mesher on the buffered convex hull,
        with :math:`h_g` as a background size field.
+    6. *Anchoring* (only with `anchor_spacing` = :math:`\alpha`). Before
+       meshing, a subset :math:`A` of `points` is chosen greedily, densest
+       first, so that :math:`|a - a'| \ge \alpha (h_g(a) + h_g(a'))/2` for
+       :math:`a, a' \in A` and every other point is closer than that to some
+       anchor. :math:`A` is embedded as fixed vertices and gmsh fills the rest
+       of the domain from the same size field. Because :math:`A` is spaced
+       according to :math:`h_g`, the size field, budget calibration and
+       gradation are unchanged, while every point :math:`s` is either a vertex
+       or within :math:`\alpha h_g(s) / (1 - \alpha g / 2)` of one.
 
     Consistency: because :math:`\rho_\varepsilon \ge \varepsilon/|D|`,
     :math:`\sup_D h \le \sqrt{2|D| / (\sqrt3\,\varepsilon R)} \to 0` as
@@ -1130,6 +1166,12 @@ def buildMesh2d_density_new(
         intensity and size fields. Defaults to at least 3 cells across the
         smallest element (between 200 and 1500); a warning is raised if an
         explicit value is too coarse to resolve it.
+    anchor_spacing : float, optional
+        If given (typically 0.6-1.0), co-locate mesh vertices with a
+        size-conforming subset of `points` (step 6). Smaller values anchor
+        more points and bound the point-to-vertex distance more tightly, at
+        the cost of anchors closer together than the size field asks for
+        (worse angles). ``None`` (default) leaves vertex placement to gmsh.
     min_angle : float, default 21.0
         Soft target for the minimum interior angle (degrees); a warning is
         raised if the mesh does not reach it.
@@ -1248,21 +1290,44 @@ def buildMesh2d_density_new(
         pts = mesh.points
         return int(shapely.contains_xy(interest_domain, pts[:, 0], pts[:, 1]).sum())
 
-    # (4b)+(5) mesh, then correct kappa on the actual vertex count
+    if anchor_spacing is not None:
+        if anchor_spacing <= 0:
+            raise ValueError("anchor_spacing must be positive.")
+        # anchors must sit strictly inside the meshed polygon, far enough
+        # from its boundary vertices not to force slivers there
+        mesh_polygon = Polygon(coords)
+        inside_polygon = shapely.contains_xy(mesh_polygon, points[:, 0], points[:, 1])
+        boundary_dist = shapely.distance(mesh_polygon.exterior, shapely.points(points))
+
+    def _anchors(h):
+        if anchor_spacing is None:
+            return None
+        # points outside the grid are outside the meshed polygon too, hence
+        # never eligible; the fill value only keeps them out of the way
+        h_pts = RegularGridInterpolator(
+            (ys, xs), h, bounds_error=False, fill_value=float(h.max())
+        )(points[:, ::-1])
+        eligible = inside_polygon & (boundary_dist >= anchor_spacing * h_pts)
+        return _size_conforming_subset(points, h_pts, anchor_spacing, eligible)
+
+    # (4b)+(5)+(6) mesh, then correct kappa on the actual vertex count
     history = []
     best = None
     for _ in range(max_iter):
-        mesh = _gmsh_mesh_from_size_grid(coords, xs, ys, h)
+        anchors = _anchors(h)
+        mesh = _gmsh_mesh_from_size_grid(
+            coords, xs, ys, h, embed=None if anchors is None else points[anchors]
+        )
         n = _n_inside(mesh)
         history.append((float(kappa), n))
         if best is None or abs(n - target_n) < abs(best[1] - target_n):
-            best = (mesh, n, kappa, h)
+            best = (mesh, n, kappa, h, anchors)
         if abs(n - target_n) <= max(1, tol * target_n):
             break
         kappa *= np.sqrt(n / target_n)
         h = _size_field(kappa)
 
-    mesh, n_inside, kappa, h = best
+    mesh, n_inside, kappa, h, anchors = best
     if abs(n_inside - target_n) > max(1, tol * target_n):
         warnings.warn(
             f"buildMesh2d_density_new: reached {n_inside} vertices inside the "
@@ -1294,6 +1359,9 @@ def buildMesh2d_density_new(
         "size_field": h,
         "h_max_D": float(h[mask].max()),
         "h_min_D": float(h[mask].min()),
+        # distance from each of `points` to its nearest mesh vertex
+        "point_distance": cKDTree(mesh.points[:, :2]).query(points)[0],
+        "anchors": anchors,
     }
     return mesh, convex_hull, info
 
