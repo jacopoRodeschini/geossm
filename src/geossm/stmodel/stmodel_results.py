@@ -273,11 +273,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self.Sigma_y_pred_back_list = None
         self.residuals_back_list = None
 
-        # Areal (polygon) predictive covariance from the last
-        # .to_poly(..., uncertainty=True) call, one (m, m, T) array per
-        # response variable -- see that method's docstring.
-        self.Sigma_y_poly_list = None
-
         self.llf_path = None  # log-likelihood across EM iterations
 
         # Inference (see attributes and methods below)
@@ -1001,6 +996,14 @@ class LRStateSpaceResults(StateSpaceResults):
         variances divided by `n_k` assumes independence (underestimating
         it, increasingly so for denser grids).
 
+        Only the diagonal of `Sigma_poly` is computed and returned (the
+        `std_<var>` columns): the cross-covariances between polygons (its
+        off-diagonal) are not provided. The per-polygon std is therefore
+        correct for each polygon on its own, but not sufficient for
+        quantities combining several polygons (e.g. the uncertainty of a
+        sum/difference of regions, or a joint confidence region), which
+        would need the full `W Sigma_t W'`.
+
         Notes
         -----
         - `Sigma_y_pred` is the state-driven covariance `H P_t H'`: it
@@ -1032,10 +1035,8 @@ class LRStateSpaceResults(StateSpaceResults):
             Aggregate the original-scale predictions instead. Requires
             `.back_transform(g_invs)` to have been run after `.predict()`.
         uncertainty : bool, default False
-            Also compute the areal predictive std (`std_<var>` columns) and
-            store the full areal covariance, one `(m, m, T)` array per
-            response variable (rows/cols ordered as `poly_id`), in
-            `self.Sigma_y_poly_list` (overwritten at each call).
+            Also compute the areal predictive std of each polygon mean
+            (`std_<var>` columns), `sqrt(diag(W Sigma_t W'))`.
 
         Returns
         -------
@@ -1080,7 +1081,6 @@ class LRStateSpaceResults(StateSpaceResults):
         out.insert(0, "poly_id", rows)
         out.insert(1, "timestamp", np.repeat(ts, m))
 
-        Sigma_poly_list = [] if uncertainty else None
         for name, points, y, Sigma in zip(y_names, self.points_pred, y_list, Sigma_list):
             col = f"{name}{suffix}"
             W, counts = self._areal_weights(points, polygons)
@@ -1101,22 +1101,16 @@ class LRStateSpaceResults(StateSpaceResults):
             out[col] = y_poly.T.ravel()
 
             if uncertainty:
+                # diag(W Sigma_t W') = rowsum(W * (W Sigma_t)), without
+                # forming the (m, m) cross-polygon covariance
                 Sigma = np.asarray(Sigma)
-                Sigma_poly = np.empty((m, m, T))
+                var = np.empty((T, m))
                 for t in range(T):
                     WS = W @ Sigma[:, :, t]  # (m, n)
-                    Sigma_poly[:, :, t] = (W @ WS.T).T  # W Sigma_t W'
-                var = np.diagonal(Sigma_poly, axis1=0, axis2=1)  # (T, m)
+                    var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
                 std = _safe_sqrt_variance(var, context="to_poly")
                 std[:, empty] = np.nan  # after the sqrt: already warned above
                 out[f"std_{col}"] = std.ravel()
-
-                Sigma_poly[empty, :, :] = np.nan
-                Sigma_poly[:, empty, :] = np.nan
-                Sigma_poly_list.append(Sigma_poly)
-
-        if uncertainty:
-            self.Sigma_y_poly_list = Sigma_poly_list
 
         geom = polygons.geometry.name
         out = out[[c for c in out.columns if c != geom] + [geom]]
