@@ -6,6 +6,7 @@ from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
 from types import SimpleNamespace
 from scipy import stats
 import time
+import warnings
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
@@ -127,7 +128,8 @@ class LRStateSpaceResults(StateSpaceResults):
     - Back-transformation of predictions/fitted values to the response's
       original scale via the delta method (`back_transform`), when the
       model formula applies a transform to the response (e.g. `np.log`).
-    - Export to `geopandas.GeoDataFrame` (`to_geo`).
+    - Export to `geopandas.GeoDataFrame` (`to_geo`), and change of
+      support from the prediction points to polygons (`to_poly`).
     - A `statsmodels`-style textual report (`summary`).
 
     Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
@@ -148,6 +150,7 @@ class LRStateSpaceResults(StateSpaceResults):
         results = results.predict(new_df) # out-of-sample prediction
         results = results.back_transform(g_inv=jnp.exp)  # if y = np.log(...)
         geo = results.to_geo()
+        areal = results.to_poly("regions.shp", uncertainty=True)
     """
 
     def __init__(
@@ -269,6 +272,11 @@ class LRStateSpaceResults(StateSpaceResults):
         self.y_pred_back_list = None
         self.Sigma_y_pred_back_list = None
         self.residuals_back_list = None
+
+        # Areal (polygon) predictive covariance from the last
+        # .to_poly(..., uncertainty=True) call, one (m, m, T) array per
+        # response variable -- see that method's docstring.
+        self.Sigma_y_poly_list = None
 
         self.llf_path = None  # log-likelihood across EM iterations
 
@@ -897,6 +905,222 @@ class LRStateSpaceResults(StateSpaceResults):
             )
 
         return {"hat": gdf_hat, "pred": gdf_pred}
+
+    @staticmethod
+    def _as_polygon_gdf(polys, crs):
+        """
+        Normalize the `polys` argument of `to_poly` -- a list of shapely
+        (Multi)Polygons, a single (Multi)Polygon, a GeoSeries/GeoDataFrame,
+        or a path to a vector file (e.g. a shapefile) -- into a
+        GeoDataFrame with a 0..m-1 index, reprojected to `crs` (the
+        prediction grid's CRS). Geometries without a CRS (plain shapely
+        objects, or a file/frame with no CRS set) are assumed to already
+        be in `crs`.
+        """
+        import geopandas as geopd
+        from os import PathLike
+        from shapely.geometry.base import BaseGeometry
+
+        if isinstance(polys, (str, PathLike)):
+            gdf = geopd.read_file(polys)
+        elif isinstance(polys, geopd.GeoDataFrame):
+            gdf = polys.copy()
+        elif isinstance(polys, geopd.GeoSeries):
+            gdf = geopd.GeoDataFrame(geometry=polys)
+        elif isinstance(polys, BaseGeometry):
+            gdf = geopd.GeoDataFrame(geometry=[polys])
+        else:
+            gdf = geopd.GeoDataFrame(geometry=list(polys))
+
+        if len(gdf) == 0:
+            raise ValueError("to_poly() requires at least one polygon.")
+
+        geom_type = gdf.geom_type
+        if not geom_type.isin(["Polygon", "MultiPolygon"]).all():
+            bad = sorted(set(geom_type[~geom_type.isin(["Polygon", "MultiPolygon"])].astype(str)))
+            raise ValueError(
+                f"to_poly() requires Polygon/MultiPolygon geometries, but got {bad}."
+            )
+
+        if gdf.crs is None:
+            gdf = gdf.set_crs(crs) if crs is not None else gdf
+        elif crs is not None and gdf.crs != crs:
+            gdf = gdf.to_crs(crs)
+
+        return gdf.reset_index(drop=True)
+
+    @staticmethod
+    def _areal_weights(points, polygons):
+        """
+        Sparse averaging matrix `W` (shape `(m, n)`) mapping the `n`
+        prediction points to the `m` polygons: `W[k, j] = 1 / n_k` if point
+        `j` falls in polygon `k` (boundary included), else 0, with `n_k`
+        the number of points in polygon `k`. A point on a boundary shared
+        by two polygons contributes to both. Rows of polygons containing
+        no point are all-zero; `n_k` (returned alongside) flags them.
+        """
+        import geopandas as geopd
+        from scipy import sparse
+
+        points = np.asarray(points)
+        pts = geopd.points_from_xy(points[:, 0], points[:, 1], crs=polygons.crs)
+        # (2, k) positional pairs: row 0 -> point, row 1 -> polygon
+        pt_idx, poly_idx = polygons.sindex.query(pts, predicate="intersects")
+
+        m, n = len(polygons), points.shape[0]
+        counts = np.bincount(poly_idx, minlength=m)
+        W = sparse.csr_matrix(
+            (1.0 / counts[poly_idx], (poly_idx, pt_idx)), shape=(m, n)
+        )
+        return W, counts
+
+    def to_poly(self, polys, back_transform=False, uncertainty=False):
+        """
+        Change of support: aggregate the point predictions of `.predict()`
+        to areal (polygon) predictions, approximating the block mean
+        `Y(B) = 1/|B| * integral_B Y(s) ds` of each polygon `B` by the
+        average of the predicted values at the prediction points inside it.
+
+        The intended workflow is to predict on a dense grid first, then
+        aggregate::
+
+            results = results.predict(fine_grid)
+            gdf = results.to_poly("regions.shp", uncertainty=True)
+
+        Since the average is linear, with `W` the `(m, n)` averaging
+        matrix (`W[k, j] = 1/n_k` for the `n_k` points in polygon `k`), the
+        areal predictive mean and covariance are, per time step `t`:
+
+            y_poly[:, t]       = W @ y_pred[:, t]
+            Sigma_poly[:, :, t] = W @ Sigma_pred[:, :, t] @ W.T
+
+        The full point covariance is required for the areal variance: the
+        std of a polygon mean is `sqrt(w_k' Sigma w_k)`, which includes the
+        cross-covariances between points. Averaging the point stds instead
+        assumes perfect correlation (overestimating it), and averaging the
+        variances divided by `n_k` assumes independence (underestimating
+        it, increasingly so for denser grids).
+
+        Notes
+        -----
+        - `Sigma_y_pred` is the state-driven covariance `H P_t H'`: it
+          excludes the measurement error (whose contribution to a block
+          mean vanishes as `s2e / n_k`, so it is correctly left out of the
+          areal signal) and the estimation uncertainty of `beta`.
+        - The discrete average approximates the areal integral only when
+          the prediction points are dense and roughly uniform within each
+          polygon; polygons containing no point get NaN (with a warning).
+        - Only the per-time-step covariance is available, so the
+          uncertainty of temporal aggregates (e.g. an annual polygon mean)
+          cannot be derived from these outputs.
+        - Cross-variable covariance is dropped (as in `Sigma_y_pred_list`):
+          each response variable is aggregated independently.
+        - With `back_transform=True` the original-scale point predictions
+          (`y_pred_back_list`/`Sigma_y_pred_back_list`, from the delta
+          method) are averaged, i.e. the polygon mean of the original-scale
+          process -- not `g_inv` of the polygon mean on the model scale.
+
+        Parameters
+        ----------
+        polys : list of shapely (Multi)Polygon, GeoSeries, GeoDataFrame, or path
+            The target polygons, or a path to a vector file (e.g. a
+            shapefile) readable by `geopandas.read_file`. Reprojected to the
+            prediction CRS (`crs_pred`) if needed; geometries without a CRS
+            are assumed to already be in it. The attribute columns of a
+            GeoDataFrame/file are carried over to the output.
+        back_transform : bool, default False
+            Aggregate the original-scale predictions instead. Requires
+            `.back_transform(g_invs)` to have been run after `.predict()`.
+        uncertainty : bool, default False
+            Also compute the areal predictive std (`std_<var>` columns) and
+            store the full areal covariance, one `(m, m, T)` array per
+            response variable (rows/cols ordered as `poly_id`), in
+            `self.Sigma_y_poly_list` (overwritten at each call).
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            One row per (polygon, timestamp), with columns `poly_id`,
+            `timestamp`, the input polygon attributes, then, per response
+            variable `<var>` in `model.y_name`: `n_points_<var>`
+            (prediction points in the polygon), `<var>` (areal mean), and
+            `std_<var>` (if `uncertainty=True`) -- the last two suffixed
+            `_back` if `back_transform=True` -- and `geometry` last.
+        """
+        import geopandas as geopd
+
+        if self.y_pred_list is None:
+            raise ValueError("to_poly() requires predictions: run `.predict(df)` first.")
+
+        if back_transform:
+            if self.y_pred_back_list is None:
+                raise ValueError(
+                    "to_poly(back_transform=True) requires back-transformed "
+                    "predictions: run `.back_transform(g_invs)` after `.predict(df)`."
+                )
+            y_list, Sigma_list, suffix = self.y_pred_back_list, self.Sigma_y_pred_back_list, "_back"
+        else:
+            y_list, Sigma_list, suffix = self.y_pred_list, self.Sigma_y_pred_list, ""
+
+        y_names = self.model.y_name
+        ts = self.timestamps_pred[0]
+        for name, t in zip(y_names, self.timestamps_pred):
+            if len(t) != len(ts) or not np.array_equal(np.asarray(t), np.asarray(ts)):
+                raise ValueError(
+                    f"to_poly() requires every response variable to share the same "
+                    f"prediction timestamps, but '{name}' differs from '{y_names[0]}'."
+                )
+
+        polygons = self._as_polygon_gdf(polys, self.crs_pred)
+        m, T = len(polygons), len(ts)
+
+        # Long format (row-major over (T, m)), matching to_geo()'s layout
+        rows = np.tile(np.arange(m), T)
+        out = polygons.iloc[rows].reset_index(drop=True)
+        out.insert(0, "poly_id", rows)
+        out.insert(1, "timestamp", np.repeat(ts, m))
+
+        Sigma_poly_list = [] if uncertainty else None
+        for name, points, y, Sigma in zip(y_names, self.points_pred, y_list, Sigma_list):
+            col = f"{name}{suffix}"
+            W, counts = self._areal_weights(points, polygons)
+            empty = counts == 0
+            if empty.any():
+                warnings.warn(
+                    f"to_poly(): {int(empty.sum())} of {m} polygon(s) contain no "
+                    f"prediction point for '{name}'; their values are set to NaN. "
+                    f"Use a denser prediction grid.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+            y_poly = np.asarray(W @ np.asarray(y), dtype=float)  # (m, T)
+            y_poly[empty, :] = np.nan
+
+            out[f"n_points_{name}"] = np.tile(counts, T)
+            out[col] = y_poly.T.ravel()
+
+            if uncertainty:
+                Sigma = np.asarray(Sigma)
+                Sigma_poly = np.empty((m, m, T))
+                for t in range(T):
+                    WS = W @ Sigma[:, :, t]  # (m, n)
+                    Sigma_poly[:, :, t] = (W @ WS.T).T  # W Sigma_t W'
+                var = np.diagonal(Sigma_poly, axis1=0, axis2=1)  # (T, m)
+                std = _safe_sqrt_variance(var, context="to_poly")
+                std[:, empty] = np.nan  # after the sqrt: already warned above
+                out[f"std_{col}"] = std.ravel()
+
+                Sigma_poly[empty, :, :] = np.nan
+                Sigma_poly[:, empty, :] = np.nan
+                Sigma_poly_list.append(Sigma_poly)
+
+        if uncertainty:
+            self.Sigma_y_poly_list = Sigma_poly_list
+
+        geom = polygons.geometry.name
+        out = out[[c for c in out.columns if c != geom] + [geom]]
+        return geopd.GeoDataFrame(out, geometry=geom, crs=polygons.crs)
 
     @staticmethod
     def _delta_method(g_inv, mu, Sigma):
