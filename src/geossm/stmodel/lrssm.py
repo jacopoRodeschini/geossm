@@ -1235,6 +1235,7 @@ class LRStateSpaceModel(StateSpaceModel):
             print(msg)
 
         # Start EM iteration
+        decreased = False  # flag to indicate if the log-likelihood decreased
         while flag:
             niter += 1
 
