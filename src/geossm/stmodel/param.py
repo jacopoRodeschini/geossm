@@ -47,11 +47,20 @@ class FitOptions:
         `max_iter` is reached).
     verbose : bool, default True
         If `True`, log per-iteration progress during `fit`.
+    force_iter : bool, default False
+        If `False`, `fit` enforces a monotonically increasing
+        log-likelihood: it stops at the first decrease and returns the last
+        valid estimate. If `True`, a decrease only triggers a warning and
+        the EM iterations continue (useful when poor initial values make
+        the log-likelihood oscillate at the start). A NaN/Inf
+        log-likelihood always stops the algorithm and returns the last
+        valid estimate.
     """
 
     max_iter: int = 20
     tol_relat: float = 1e-3
     verbose: bool = True
+    force_iter: bool = False
 
     def __str__(self):
         lines = ["FitOptions:"]

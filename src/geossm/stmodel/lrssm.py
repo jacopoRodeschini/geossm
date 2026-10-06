@@ -1148,6 +1148,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
+        force_iter = options.force_iter if options is not None else False
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1301,26 +1302,32 @@ class LRStateSpaceModel(StateSpaceModel):
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Check if the step is valid (i.e. the log-likelihood is not decreasing).
-            # Skipped at the first iteration: logL_prev is a placeholder (0), so
-            # delta_lik is not a real likelihood increment.
-            if niter > 1 and (
-                delta_lik < 0 or jnp.isnan(delta_lik) or jnp.isinf(delta_lik)
-            ):
-                msg = self._log_warning_emstep(delta_lik, niter)
-                # self._log(msg)
-                warnings.warn(
-                    msg + ". The EM algorithm was stopped and the last valid "
-                    "estimate is returned (convergence=False).",
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
+            # Check if the step is valid. Skipped at the first iteration:
+            # logL_prev is a placeholder (0), so delta_lik is not a real
+            # likelihood increment. NaN/Inf always stop the algorithm; a
+            # decrease stops it only if force_iter is False.
+            if niter > 1:
+                invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
+                decreased = bool(delta_lik < 0)
+                if invalid or (decreased and not force_iter):
+                    msg = self._log_warning_emstep(delta_lik, niter)
+                    self._log(msg)
+                    warnings.warn(
+                        msg + ". The EM algorithm was stopped and the last valid "
+                        "estimate is returned (convergence=False).",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
 
-                # restore the last valid estimate and its E-step outputs
-                est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
-                break
+                    # restore the last valid estimate and its E-step outputs
+                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
+                    break
+                if decreased:
+                    msg = self._log_warning_emstep(delta_lik, niter)
+                    self._log(msg + " (force_iter=True: continuing)")
+                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
-            # snapshot the current (valid) parameters and their E-step outputs
+            # snapshot the current (finite) parameters and their E-step outputs
             last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
 
             # Update the paramiters to be used in the next EM iteration
