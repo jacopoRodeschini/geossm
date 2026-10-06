@@ -1322,11 +1322,7 @@ class LRStateSpaceModel(StateSpaceModel):
                     # restore the last valid estimate and its E-step outputs
                     est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
                     break
-                if decreased:
-                    #msg = self._log_warning_emstep(delta_lik, niter)
-                    self._log(msg + " (force_iter=True: continuing)")
-                    warnings.warn(msg, RuntimeWarning, stacklevel=2)
-
+            
             # snapshot the current (finite) parameters and their E-step outputs
             last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
 
@@ -1351,13 +1347,18 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # print the results of the iteration
             if self.verbose:
-                msg = self.logger(nstat[-1])
+                msg = self.logger(nstat[-1])       
+                if decreased:
+                    msg += "\n (force_iter=True: continuing)"
+               
                 print(msg)
+               
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if abs(relat_lik) <= tol_relat:
                 converged = True
                 flag = False
+            
             elif niter == max_iter:
                 warnings.warn(
                     "The EM algorithm reached max_iter={} without meeting "
