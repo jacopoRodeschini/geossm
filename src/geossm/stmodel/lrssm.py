@@ -1323,7 +1323,7 @@ class LRStateSpaceModel(StateSpaceModel):
                     est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
                     break
                 if decreased:
-                    msg = self._log_warning_emstep(delta_lik, niter)
+                    #msg = self._log_warning_emstep(delta_lik, niter)
                     self._log(msg + " (force_iter=True: continuing)")
                     warnings.warn(msg, RuntimeWarning, stacklevel=2)
 
