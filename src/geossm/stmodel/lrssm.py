@@ -962,7 +962,7 @@ class LRStateSpaceModel(StateSpaceModel):
         return y_sim, x_sim, info, tdelta    
     
     @_on_device
-    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True, std=False):
+    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True, std=True):
         """
         Out-of-sample prediction of the response variable(s) at new
         locations/times, from an already-fitted model.
@@ -979,7 +979,7 @@ class LRStateSpaceModel(StateSpaceModel):
         matrix (plus the response `y_obs`) for inspection/comparison
         outside of `predict()`.
 
-        Parametersuncertainty
+        Parameters
         ----------
         df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times to predict at, with the same columns
@@ -996,13 +996,18 @@ class LRStateSpaceModel(StateSpaceModel):
         verbose : bool, default True
             Verbosity for the observation-grid/design-matrix construction
             logging.
+        std : bool, default True
+            If `False`, skip the predictive covariance `Sigma_y_pred`
+            (left as `None`) -- useful when the ``(p, p, T)`` array does
+            not fit in device memory.
 
         Returns
         -------
         LRStateSpaceResults
             The same `modelresults` object, with `points_pred`,
             `y_pred`/`Sigma_y_pred` (and their per-variable views
-            `y_pred_list`/`Sigma_y_pred_list`), `tdelta_pred`,
+            `y_pred_list`/`Sigma_y_pred_list`; `Sigma_y_pred` is `None`
+            if `std=False`), `tdelta_pred`,
             `timestamps_pred`, and `crs_pred` populated (one entry per
             response variable, except `tdelta_pred`/`crs_pred`).
 
@@ -1071,8 +1076,9 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
         # Predict the response variable (stacked across all variables)
-
-        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta, std)
+        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(
+            H, x_T, P_T, Xbeta_predict, beta, std=std
+        )
 
         # block_p for the *prediction* grid, snapshotted separately from
         # modelresults.block_p (the training grid's) since the prediction
@@ -1092,13 +1098,15 @@ class LRStateSpaceModel(StateSpaceModel):
         return modelresults
 
     @_on_device
-    def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=False):
+    def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """
         Core SSM prediction, stacked across all response variables -- the
         single source of truth used both for in-sample fitted values
         (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
         result into per-variable views is a separate, explicit step (see
-        `geossm.utils.split_by_block`), left to the caller.
+        `geossm.utils.split_by_block`), left to the caller. With
+        `std=False` the predictive covariance is skipped and returned as
+        `None` (see `StateSpaceModel.predict`).
         """
         self._log("Start Prediction the SSM...")
 
@@ -1110,8 +1118,6 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
         return y_hat_full, Sigma_y_hat_full, tdelta
-
-    
 
     @_on_device
     def fit(
@@ -1176,6 +1182,7 @@ class LRStateSpaceModel(StateSpaceModel):
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
         force_iter = options.force_iter if options is not None else False
+        std = options.std if options is not None else True
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1406,7 +1413,9 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # predict the respose variable using the fitted model parameters
         beta_est = est_params.beta.value
-        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(H, x_T, P_T, Xbeta, beta_est)
+        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(
+            H, x_T, P_T, Xbeta, beta_est, std=std
+        )
 
         # Training grid (points/timestamps/CRS), one entry per response
         # variable -- snapshotted here for the same reason as block_p above:

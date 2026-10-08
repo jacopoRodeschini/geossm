@@ -726,27 +726,22 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
 @jit
 @_highest_matmul_precision
 def _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta):
-    """Compute predicted observations and their plug-in state-driven
-    predictive covariance from smoothed (or filtered) states.
+    """Compute predicted observations from smoothed (or filtered) states.
 
     .. math::
-        \\hat y_t &= X_t \\beta + H x_{t|T} \\\\
-        \\Sigma_{\\hat y, t} &= H P_{t|T} H^T
+        \\hat y_t = X_t \\beta + H x_{t|T}
 
-    ``Sigma_y_hat`` only propagates the state's own posterior
-    uncertainty through ``H``; it does not add the observation noise
-    covariance ``R``. Callers that want a full prediction interval
-    (rather than a confidence interval for the mean) add ``R``
-    themselves - see `StateSpaceResults.conf_int_y`.
+    See `_compute_predict_sigma_kernel_JAX` for the matching predictive
+    covariance, computed separately so it can be skipped when the
+    ``(p, p, T)`` array does not fit in device memory.
 
     Parameters
     ----------
     H : jax.numpy.ndarray, shape (p, q)
         Observation matrix.
-    x_T, P_T : jax.numpy.ndarray
-        State means/covariances (typically the smoothed states, shapes
-        ``(q, T+1)`` / ``(q, q, T+1)``); index 0 (the prior) is dropped
-        before computing the outputs.
+    x_T : jax.numpy.ndarray, shape (q, T+1)
+        State means (typically the smoothed states); index 0 (the prior)
+        is dropped before computing the output.
     Xbeta : jax.numpy.ndarray, shape (p, b, T)
         Exogenous regressors.
     beta : jax.numpy.ndarray, shape (b,)
@@ -757,7 +752,7 @@ def _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta):
     y_hat : jax.numpy.ndarray, shape (p, T)
         Predicted observation means.
     """
-    
+
     # Compute the plugin expected value
     y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
     y_hat_state_term = H @ x_T[:, 1:]  # Use the smoothed states for prediction
@@ -768,12 +763,11 @@ def _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta):
 @jit
 @_highest_matmul_precision
 def _compute_predict_sigma_kernel_JAX(H, P_T):
-    """Compute predicted observations and their plug-in state-driven
-    predictive covariance from smoothed (or filtered) states.
+    """Compute the plug-in state-driven predictive covariance of the
+    predicted observations from smoothed (or filtered) states.
 
     .. math::
-        \\hat y_t &= X_t \\beta + H x_{t|T} \\\\
-        \\Sigma_{\\hat y, t} &= H P_{t|T} H^T
+        \\Sigma_{\\hat y, t} = H P_{t|T} H^T
 
     ``Sigma_y_hat`` only propagates the state's own posterior
     uncertainty through ``H``; it does not add the observation noise
@@ -785,24 +779,17 @@ def _compute_predict_sigma_kernel_JAX(H, P_T):
     ----------
     H : jax.numpy.ndarray, shape (p, q)
         Observation matrix.
-    x_T, P_T : jax.numpy.ndarray
-        State means/covariances (typically the smoothed states, shapes
-        ``(q, T+1)`` / ``(q, q, T+1)``); index 0 (the prior) is dropped
-        before computing the outputs.
-    Xbeta : jax.numpy.ndarray, shape (p, b, T)
-        Exogenous regressors.
-    beta : jax.numpy.ndarray, shape (b,)
-        Regression coefficients.
+    P_T : jax.numpy.ndarray, shape (q, q, T+1)
+        State covariances (typically the smoothed states); index 0 (the
+        prior) is dropped before computing the output.
 
     Returns
     -------
-    y_hat : jax.numpy.ndarray, shape (p, T)
-        Predicted observation means.
     Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T)
         State-driven predictive covariance :math:`H P_{t|T} H^T` (excludes
         observation noise ``R``).
     """
-    
+
     # compute the plugin uncertainty
     Sigma_y_hat = jnp.einsum("ip,pqt,jq->ijt", H, P_T[:, :, 1:], H)
 
@@ -1416,12 +1403,13 @@ class StateSpaceModel:
         )
 
     @_on_device
-    def predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=False):
+    def predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """Compute predicted observations and their state-driven
         predictive covariance from (typically smoothed) states.
 
-        Thin wrapper around `_compute_predict_kernel_JAX`; see its
-        docstring for the exact equations. Unlike `filter`/`smoother`,
+        Thin wrapper around `_compute_predict_mean_kernel_JAX` and
+        `_compute_predict_sigma_kernel_JAX`; see their docstrings for the
+        exact equations. Unlike `filter`/`smoother`,
         this does not update the model's own state (``H``, ``Xbeta``,
         ``beta`` are used as passed, not read from ``self``).
 
@@ -1433,26 +1421,37 @@ class StateSpaceModel:
             State means (index 0 is the prior/initial state and is
             excluded from the output).
         P_T : array_like, shape (q, q, T+1), optional
-            State covariances (index 0 excluded from the output). Required if `std=True`.
+            State covariances (index 0 excluded from the output). Required
+            if `std=True`, ignored otherwise.
         Xbeta : array_like, shape (p, b, T), optional
             Exogenous regressors.
         beta : array_like, shape (b,), optional
             Regression coefficients for ``Xbeta``.
+        std : bool, default True
+            If `False`, skip the predictive covariance and return `None`
+            for it -- useful when the ``(p, p, T)`` array does not fit in
+            device memory.
 
         Returns
         -------
         y_hat : jax.numpy.ndarray, shape (p, T)
             Predicted observation means.
-        Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T)
+        Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T) or None
             State-driven predictive covariance :math:`H P_{t} H^T`
-            (excludes the observation noise covariance ``R``).
+            (excludes the observation noise covariance ``R``); `None` if
+            `std=False`.
+
+        Raises
+        ------
+        ValueError
+            If `std=True` and `P_T` is `None`.
         """
+        if std and P_T is None:
+            raise ValueError("P_T is required to compute the predictive covariance (std=True)")
+
         y_hat = _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta)
-        if std:
-            Sigma_y_hat = _compute_predict_sigma_kernel_JAX(H, P_T)
-            return y_hat, Sigma_y_hat
-        
-        return y_hat, None
+        Sigma_y_hat = _compute_predict_sigma_kernel_JAX(H, P_T) if std else None
+        return y_hat, Sigma_y_hat
 
     def _run_filter_kernel(
         self,
