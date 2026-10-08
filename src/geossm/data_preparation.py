@@ -211,6 +211,14 @@ def _extract_formula_metadata(termlist):
     return names, transformations, columns
 
 
+def _to_naive_utc(t) -> pd.Timestamp:
+    """Parse `t` to a tz-naive UTC `pd.Timestamp` (naive input is assumed UTC)."""
+    t = pd.Timestamp(t)
+    if t.tzinfo is not None:
+        t = t.tz_convert("UTC").tz_localize(None)
+    return t
+
+
 def check_regular_timestamps(timestamps):
     """
     Check whether a collection of timestamps is regularly spaced.
@@ -1174,17 +1182,27 @@ class DesignMatricesBuilder:
         return datetime_cols[0]
 
     def _coerce_time_column(self, geodf, time_col_name) -> None:
-        """Convert `geodf[time_col_name]` to datetime64 in place, if not already."""
-        if pd.api.types.is_datetime64_any_dtype(geodf[time_col_name]):
-            return
+        """
+        Convert `geodf[time_col_name]` to tz-naive UTC datetime64 in place.
 
-        self._log(f"Converting time column '{time_col_name}' to datetime")
-        geodf[time_col_name] = pd.to_datetime(geodf[time_col_name], errors="coerce")
-        if geodf[time_col_name].isna().any():
-            raise ValueError(
-                f"Time column '{time_col_name}' contains values that could not be "
-                "converted to datetime"
-            )
+        tz-aware columns are converted to UTC and their tz dropped; naive
+        columns are assumed to already be UTC. Keeping time tz-naive
+        internally lets training and prediction data be compared regardless
+        of how each was parsed, and keeps `timestamps` a plain datetime64
+        array (numpy has no tz-aware dtype).
+        """
+        if not pd.api.types.is_datetime64_any_dtype(geodf[time_col_name]):
+            self._log(f"Converting time column '{time_col_name}' to datetime")
+            geodf[time_col_name] = pd.to_datetime(geodf[time_col_name], errors="coerce")
+            if geodf[time_col_name].isna().any():
+                raise ValueError(
+                    f"Time column '{time_col_name}' contains values that could not be "
+                    "converted to datetime"
+                )
+
+        if geodf[time_col_name].dt.tz is not None:
+            self._log(f"Converting time column '{time_col_name}' to tz-naive UTC")
+            geodf[time_col_name] = geodf[time_col_name].dt.tz_convert("UTC").dt.tz_localize(None)
 
     def _check_formula_columns_exist(self, geodf, prediction=False) -> None:
         """Raise ValueError if a column referenced by `formula` is missing from `geodf`."""
@@ -1198,7 +1216,7 @@ class DesignMatricesBuilder:
             columns.update(entry.split(":"))
         columns.discard("Intercept")
 
-        missing = sorted(columns - set(geodf.columns))
+        missing = sorted(columns - set(geodf.columns)) 
         if missing:
             raise ValueError(
                 f"Formula references column(s) not found in the dataset: {', '.join(missing)}"
@@ -1228,11 +1246,13 @@ class DesignMatricesBuilder:
         """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound optional)."""
         self._log("Filtering dataset by time range")
         if tmin is not None:
-            geodf = geodf[geodf[time_col_name] >= pd.to_datetime(tmin)]
-            self._log(f"Filtered dataset to tmin={pd.to_datetime(tmin).strftime('%Y-%m-%d')}")
+            tmin = _to_naive_utc(tmin)
+            geodf = geodf[geodf[time_col_name] >= tmin]
+            self._log(f"Filtered dataset to tmin={tmin.strftime('%Y-%m-%d')}")
         if tmax is not None:
-            geodf = geodf[geodf[time_col_name] <= pd.to_datetime(tmax)]
-            self._log(f"Filtered dataset to tmax={pd.to_datetime(tmax).strftime('%Y-%m-%d')}")
+            tmax = _to_naive_utc(tmax)
+            geodf = geodf[geodf[time_col_name] <= tmax]
+            self._log(f"Filtered dataset to tmax={tmax.strftime('%Y-%m-%d')}")
 
         if geodf.empty:
             raise ValueError(f"No rows remain after filtering to tmin={tmin}, tmax={tmax}")
