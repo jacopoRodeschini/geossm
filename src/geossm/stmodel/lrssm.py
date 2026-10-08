@@ -1033,6 +1033,30 @@ class LRStateSpaceModel(StateSpaceModel):
         x_T = modelresults.x_smoothed
         P_T = modelresults.P_smoothed
 
+        # Restrict the smoothed states to the prediction timestamps: the
+        # prediction df may cover only a (contiguous) sub-window of the
+        # training period, e.g. when covariates are available only there.
+        # The latent state is shared across response variables, so every
+        # prediction grid must share one time axis.
+        self._log("Filtering the valid timestamps...")
+        timestamps_pred = gridList[0].timestamps
+        if any(not np.array_equal(g.timestamps, timestamps_pred) for g in gridList[1:]):
+            raise ValueError("All prediction grids must share the same timestamps")
+
+        timestamps_train = modelresults.timestamps_hat[0]
+        idx = np.flatnonzero(np.isin(timestamps_train, timestamps_pred))
+        if idx.size != timestamps_pred.size:
+            raise ValueError(
+                "Prediction timestamps must be a subset of the training timestamps"
+            )
+        self._log("Found {} of {} training timestamps.".format(idx.size, timestamps_train.size))
+
+        # x_T/P_T carry the prior at column 0 (dropped by _predict), so
+        # training step k is column k+1; keep column 0 as the prior slot.
+        cols = np.r_[0, idx + 1]
+        x_T = x_T[:, cols]
+        P_T = P_T[:, :, cols]
+
         # update the cov_function rescale
         for cov, ksi in zip(self.cov_function, ks):
             cov.rescale = ksi
