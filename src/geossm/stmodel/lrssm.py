@@ -962,7 +962,7 @@ class LRStateSpaceModel(StateSpaceModel):
         return y_sim, x_sim, info, tdelta    
     
     @_on_device
-    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
+    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True, std=False):
         """
         Out-of-sample prediction of the response variable(s) at new
         locations/times, from an already-fitted model.
@@ -979,7 +979,7 @@ class LRStateSpaceModel(StateSpaceModel):
         matrix (plus the response `y_obs`) for inspection/comparison
         outside of `predict()`.
 
-        Parameters
+        Parametersuncertainty
         ----------
         df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times to predict at, with the same columns
@@ -1071,7 +1071,8 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
         # Predict the response variable (stacked across all variables)
-        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta)
+
+        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta, std)
 
         # block_p for the *prediction* grid, snapshotted separately from
         # modelresults.block_p (the training grid's) since the prediction
@@ -1091,7 +1092,7 @@ class LRStateSpaceModel(StateSpaceModel):
         return modelresults
 
     @_on_device
-    def _predict(self, H, x_T, P_T, Xbeta, beta):
+    def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=False):
         """
         Core SSM prediction, stacked across all response variables -- the
         single source of truth used both for in-sample fitted values
@@ -1103,12 +1104,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Compute the prediction of linear SSM
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=std)
         tdelta = time.time()- tStart
 
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
         return y_hat_full, Sigma_y_hat_full, tdelta
+
+    
 
     @_on_device
     def fit(
