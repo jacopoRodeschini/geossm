@@ -16,13 +16,9 @@ produces NaN.
 The fix (`_highest_matmul_precision` in statespace.py, applied to every
 JIT-compiled kernel) forces full matmul precision inside the kernels
 regardless of any ambient `jax.default_matmul_precision` the caller has
-set, so it can't be silently defeated by unrelated code elsewhere. A
-secondary, independent change (`_chol_jitter`) makes the stabilizing
-Cholesky jitter scale with the matrix's own magnitude instead of being a
-fixed 1e-6 -- defense-in-depth for genuine float32 rounding on
-near-singular matrices, not a fix for the reduced-precision-matmul bug
-above (that failure mode is far too large for any jitter to reasonably
-absorb).
+set, so it can't be silently defeated by unrelated code elsewhere. The
+kernels no longer add a Cholesky jitter (F15): it biased results, and all
+tests below pass without it.
 """
 
 import numpy as np
@@ -30,7 +26,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 
-from geossm.ssm.statespace import _filter_kernelJAX, _smoother_kernelJAX, _chol_jitter
+from geossm.ssm.statespace import _filter_kernelJAX, _smoother_kernelJAX
 
 
 def _gpu_devices():
@@ -244,23 +240,6 @@ def test_gpu_float32_matches_cpu_float64_reference():
         f"GPU float32 smoothed state diverges too much from the float64 reference: "
         f"{max_abs_diff:.3e}"
     )
-
-
-def test_chol_jitter_scales_with_matrix_magnitude():
-    """
-    `_chol_jitter` should scale with the matrix's own magnitude rather than
-    staying pinned at the historical fixed 1e-6 (negligible for matrices
-    whose diagonal is orders of magnitude above 1).
-    """
-    small = jnp.eye(5) * 1.0
-    large = jnp.eye(5) * 1e4
-
-    j_small = float(_chol_jitter(small))
-    j_large = float(_chol_jitter(large))
-
-    assert j_small == pytest.approx(1e-6, rel=1e-6)
-    assert j_large == pytest.approx(1e-2, rel=1e-6)  # 1e-6 * 1e4
-    assert j_large > j_small
 
 
 def test_filter_smoother_no_nan_on_cpu_baseline():

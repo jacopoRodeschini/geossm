@@ -142,7 +142,7 @@ class TestFit:
         ref = kalman_filter(prob)
         # llf is a sum over observations, so its float32 rounding error grows
         # with n_obs; a relative tolerance would be meaningless when llf ~ 0.
-        assert float(res.llf_path[1]) == pytest.approx(ref["llf_no_const"], abs=1e-5 * ref["n_obs"])
+        assert float(res.llf_path[1]) == pytest.approx(ref["llf"], abs=1e-5 * ref["n_obs"])
 
     def test_summary_renders(self, fitted):
         _, res = fitted

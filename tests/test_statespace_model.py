@@ -71,8 +71,8 @@ class TestInitialState:
     def test_filter_uses_user_initial_state(self, problem):
         res = _model(problem, dtype=jnp.float64).filter(problem.y)
         ref = kalman_filter(problem)
-        np.testing.assert_allclose(res.x_filtered[:, 1:], ref["x_filt"][:, 1:], atol=1e-3)
-        assert float(res.llf) == pytest.approx(ref["llf_no_const"], abs=1e-3)
+        np.testing.assert_allclose(res.x_filtered[:, 1:], ref["x_filt"][:, 1:], atol=1e-8)
+        assert float(res.llf) == pytest.approx(ref["llf"], abs=1e-8)
 
     def test_setting_other_matrices_keeps_initial_state(self, problem):
         m = _model(problem)
@@ -93,8 +93,8 @@ class TestInitialState:
         m = _model(problem, dtype=jnp.float64)
         res = m.smoother(problem.y, x0=problem.x0, Sigma0=problem.Sigma0)
         ref = rts_smoother(problem)
-        np.testing.assert_allclose(res.x_smoothed, ref["x_smooth"], atol=1e-3)
-        np.testing.assert_allclose(res.P_smoothed, ref["P_smooth"], atol=1e-3)
+        np.testing.assert_allclose(res.x_smoothed, ref["x_smooth"], atol=1e-8)
+        np.testing.assert_allclose(res.P_smoothed, ref["P_smooth"], atol=1e-8)
 
 
 class TestFilterSmootherResults:

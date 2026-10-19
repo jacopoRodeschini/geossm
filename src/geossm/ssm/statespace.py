@@ -82,21 +82,6 @@ def _highest_matmul_precision(f):
     return wrapper
 
 
-def _chol_jitter(mat):
-    """Scale-aware jitter added before a stabilizing Cholesky decomposition.
-
-    A fixed 1e-6 (the historical constant here) is only meaningful relative
-    to an O(1)-magnitude matrix; scaling it by the matrix's own mean diagonal
-    keeps it proportionate for differently-scaled covariances. This is a
-    defense-in-depth measure for genuine float32 rounding on borderline
-    (near-singular) matrices -- it is NOT a fix for reduced-precision-matmul
-    errors, which can be orders of magnitude larger than any jitter should
-    reasonably be; see `_highest_matmul_precision` for that.
-    """
-    scale = jnp.maximum(jnp.mean(jnp.abs(jnp.diag(mat))), 1.0)
-    return 1e-6 * scale
-
-
 # %% JAX kernel functions for SSM
 
 @_highest_matmul_precision
@@ -253,8 +238,9 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     ``R`` and ``F`` are used only through their diagonal (see
     `_prepare_diag_array`), so the ``F @ P @ F.T`` and ``H.T @ R^{-1}``
     products above reduce to elementwise scalings rather than dense
-    matmuls. Matrix inverses are computed via a jittered Cholesky
-    factorization (`_chol_jitter`) for numerical stability.
+    matmuls. Matrix inverses and log-determinants are computed from a
+    Cholesky factorization. No jitter is added: it biased states and
+    log-likelihood without preventing any failure (finding F15).
 
     Missing observations (``NaN`` entries in ``y_t``) are handled by
     zeroing both the corresponding residual entries and the
@@ -263,10 +249,10 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     all arrays at their static, missingness-independent shape (required
     by ``jax.lax.scan``/``jit``).
 
-    The log-likelihood accumulated here is the Gaussian log-likelihood
-    up to the additive normalizing constant :math:`-\\tfrac{1}{2}\\sum_t
-    p \\log(2\\pi)`, which this kernel omits (it is constant with respect
-    to the model parameters).
+    The log-likelihood accumulated here is the full observed-data
+    Gaussian log-likelihood, including the normalizing constant
+    :math:`-\\tfrac{1}{2} n_t \\log(2\\pi)` for the :math:`n_t` observed
+    entries of each time step.
 
     Only the final Kalman gain ``K`` (from the last time step) is
     returned - it is the only one the smoother's boundary condition
@@ -298,8 +284,8 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         One-step-ahead predicted state covariances :math:`P_{t|t-1}`
         (index 0 is a zero placeholder).
     logL : float
-        Gaussian log-likelihood of ``y_t`` under the model, up to the
-        additive constant described above.
+        Gaussian log-likelihood of the observed entries of ``y_t``
+        under the model.
     """
 
     dtype = y_t.dtype.type()
@@ -316,6 +302,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     H_dense = H.astype(dtype)
     f_diag = F
     FF = jnp.outer(f_diag, f_diag)
+    log2pi = jnp.log(jnp.asarray(2.0 * jnp.pi, dtype=y_t.dtype))
 
     # This is the function for a single loop iteration
     def kalman_step(carry, step_data):
@@ -348,7 +335,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # reuse, but that duplicated a full (q, q, T) array for something the
         # smoother can recompute inline from the (already stored) P_t_1.
         #invP_pred = solve(P_pred, Iq)
-        L_P = jnp.linalg.cholesky(P_pred + _chol_jitter(P_pred) * Iq)  # jitter for numerical stability
+        L_P = jnp.linalg.cholesky(P_pred)
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
 
@@ -362,7 +349,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         M = invP_pred + HtinvRH
 
-        L_M = jnp.linalg.cholesky(M + _chol_jitter(M) * Iq)  # jitter for numerical stability
+        L_M = jnp.linalg.cholesky(M)
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
 
@@ -403,7 +390,8 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         v = HtinvR @ e
         quad_e = jnp.sum(invR_diag * e * e) - v @ (invM @ v)
 
-        logL_accum += logdetSigmaE + quad_e
+        n_obs_t = jnp.sum(~nan_mask, dtype=y_t.dtype)
+        logL_accum += logdetSigmaE + quad_e + n_obs_t * log2pi
 
         # 2. Pack carry for next step and outputs for this step
         next_carry = (x_upd, P_upd, logL_accum, K)
@@ -481,10 +469,10 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
     As in `_filter_kernelJAX`, ``F`` is used only through its diagonal,
     so ``F @ P`` products reduce to elementwise column scaling, and all
-    matrix inverses use a jittered Cholesky factorization
-    (`_chol_jitter`). ``P_t_1`` (the filter's one-step-ahead predicted
-    covariances) is reused directly rather than a separately stored
-    inverse, since it is already available from the filter pass.
+    matrix inverses use a Cholesky factorization. ``P_t_1`` (the filter's
+    one-step-ahead predicted covariances) is reused directly rather than a
+    separately stored inverse, since it is already available from the
+    filter pass.
 
     Parameters
     ----------
@@ -518,11 +506,11 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
     Iq = jnp.eye(q, dtype=dtype)
 
     def _chol_inv(P):
-        # Same Cholesky-based inverse the filter uses for the Woodbury step
-        # (with the same jitter for numerical stability). Recomputed here
-        # instead of being read from a stored (q, q, T) invP_t_1 array,
-        # since P_t_1 (its input) is already available from the filter pass.
-        L = jnp.linalg.cholesky(P + _chol_jitter(P) * Iq)
+        # Same Cholesky-based inverse the filter uses for the Woodbury step.
+        # Recomputed here instead of being read from a stored (q, q, T)
+        # invP_t_1 array, since P_t_1 (its input) is already available from
+        # the filter pass.
+        L = jnp.linalg.cholesky(P)
         invL = jax.scipy.linalg.solve_triangular(L, Iq, lower=True)
         return invL.T @ invL
 

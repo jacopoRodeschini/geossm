@@ -74,7 +74,7 @@ def kalman_filter(prob):
         x_filt (q, T+1), P_filt (q, q, T+1)   index 0 = prior (x0, Sigma0)
         x_pred (q, T+1), P_pred (q, q, T+1)   index 0 unused (zeros)
         llf    observed-data Gaussian log-likelihood INCLUDING -n/2 log(2 pi)
-        llf_no_const  same, without the 2 pi constant (geossm's convention)
+        llf_no_const  same, without the 2 pi constant (geossm's convention before F15)
         n_obs  number of observed entries
     """
     p, q, T = prob.p, prob.q, prob.T

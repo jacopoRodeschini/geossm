@@ -1,22 +1,22 @@
 """JAX SSM kernels vs the independent dense reference in `_reference.py`.
 
-Tolerances: the kernels add a scale-aware Cholesky jitter (1e-6 * mean
-diagonal) at every step, which alone produces differences of order 1e-4 on
-these problems (finding F15), hence ``atol=1e-3`` in float64.
+Tolerances: in float64 the kernels agree with the reference to rounding
+(~1e-13 on these problems); ``ATOL64`` leaves ample margin. Until F15 a
+Cholesky jitter at every step limited agreement to ~1e-4.
 """
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tests._reference import kalman_filter, rts_smoother, sufficient_statistics
+from tests._reference import SSMProblem, kalman_filter, rts_smoother, sufficient_statistics
 from geossm.ssm.statespace import (
     _compute_expected_values_kernelJAX,
     _filter_kernelJAX,
     _smoother_kernelJAX,
 )
 
-ATOL64 = 1e-3
+ATOL64 = 1e-8
 
 
 def _filter(prob, dtype=jnp.float64):
@@ -58,10 +58,32 @@ class TestFilterAgainstReference:
         f, ref = _filter(problem), kalman_filter(problem)
         np.testing.assert_allclose(np.asarray(f[key])[..., 1:], ref[key][..., 1:], atol=ATOL64)
 
-    def test_loglik_matches_reference_without_2pi_constant(self, problem):
-        # geossm's llf omits -n_obs/2 log(2 pi) (documented in the kernel).
+    def test_loglik_matches_reference(self, problem):
+        # Full Gaussian log-likelihood, including -n_obs/2 log(2 pi).
         f, ref = _filter(problem), kalman_filter(problem)
-        np.testing.assert_allclose(float(f["llf"]), ref["llf_no_const"], atol=ATOL64)
+        np.testing.assert_allclose(float(f["llf"]), ref["llf"], atol=ATOL64)
+
+    @pytest.mark.parametrize("s", [1e-4, 1e2])
+    def test_change_of_units_is_exact(self, problem_missing, s):
+        # Measuring y (and hence x) in units scaled by s is the same model:
+        # states scale by s and llf shifts by exactly -n_obs log(s). Needs no
+        # reference code; a jitter with a fixed floor broke it (F15).
+        prob = problem_missing
+        scaled = SSMProblem(**{**prob.__dict__, "R": prob.R * s**2, "Q": prob.Q * s**2,
+                               "x0": prob.x0 * s, "Sigma0": prob.Sigma0 * s**2,
+                               "beta": prob.beta * s, "y": prob.y * s})
+        f, fs = _filter(prob), _filter(scaled)
+        n_obs = int(np.sum(~np.isnan(prob.y)))
+        np.testing.assert_allclose(np.asarray(fs["x_filt"]), s * np.asarray(f["x_filt"]), rtol=1e-9, atol=0)
+        assert float(fs["llf"]) == pytest.approx(float(f["llf"]) - n_obs * np.log(s), rel=1e-12)
+
+    def test_small_observation_noise_matches_reference(self, problem):
+        # R ~ 1e-5: H'R^-1 H dominates the Woodbury matrix. Gave NaN with the
+        # per-step jitter (F15) although float64 handles it to rounding.
+        prob = SSMProblem(**{**problem.__dict__, "R": problem.R * 1e-5})
+        f, ref = _filter(prob), kalman_filter(prob)
+        np.testing.assert_allclose(np.asarray(f["x_filt"])[:, 1:], ref["x_filt"][:, 1:], atol=1e-6)
+        assert float(f["llf"]) == pytest.approx(ref["llf"], rel=1e-9)
 
     @pytest.mark.parametrize("key", ["x_filt", "P_filt", "x_pred", "P_pred"])
     def test_states_with_missing_match_reference(self, problem_missing, key):
@@ -76,7 +98,7 @@ class TestFilterAgainstReference:
 
     def test_loglik_with_missing_is_observed_data_likelihood(self, problem_missing):
         f, ref = _filter(problem_missing), kalman_filter(problem_missing)
-        np.testing.assert_allclose(float(f["llf"]), ref["llf_no_const"], atol=ATOL64)
+        np.testing.assert_allclose(float(f["llf"]), ref["llf"], atol=ATOL64)
 
     def test_loglik_with_missing_does_not_depend_on_R_of_missing_entries(self, problem):
         # Observed-data likelihood must be invariant to the noise variance of a
@@ -146,4 +168,4 @@ def test_float32_kernel_close_to_float64_reference(problem_missing):
     ref = kalman_filter(problem_missing)
     np.testing.assert_allclose(np.asarray(f["x_filt"])[:, 1:], ref["x_filt"][:, 1:], atol=1e-3)
     np.testing.assert_allclose(np.asarray(f["P_filt"])[..., 1:], ref["P_filt"][..., 1:], atol=1e-3)
-    assert float(f["llf"]) == pytest.approx(ref["llf_no_const"], rel=1e-4)
+    assert float(f["llf"]) == pytest.approx(ref["llf"], rel=1e-4)
