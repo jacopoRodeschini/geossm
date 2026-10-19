@@ -1083,15 +1083,15 @@ class StateSpaceModel:
 
         if x0 is not None:
             self._x0 = self._prepare_array(x0)
-        else:
-            if self.q is not None:
-                self._x0 = self._prepare_array(jnp.zeros(self.q))
+        elif self.q is not None and (self._x0 is None or self._x0.shape != (self.q,)):
+            self._x0 = self._prepare_array(jnp.zeros(self.q))
 
         if Sigma0 is not None:
             self._Sigma0 = self._prepare_array(Sigma0)
-        else:
-            if self.q is not None:
-                self._Sigma0 = self._prepare_array(jnp.eye(self.q))
+        elif self.q is not None and (
+            self._Sigma0 is None or self._Sigma0.shape != (self.q, self.q)
+        ):
+            self._Sigma0 = self._prepare_array(jnp.eye(self.q))
 
         if Xbeta is not None:
             Xbeta_arr = self._prepare_array(Xbeta)

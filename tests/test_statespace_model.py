@@ -61,14 +61,12 @@ class TestConstruction:
 
 
 class TestInitialState:
-    @known_bug("F01", "set() resets x0/Sigma0 to 0/I whenever they are not passed")
     def test_filter_preserves_user_initial_state(self, problem):
         m = _model(problem)
         m.filter(problem.y)
         np.testing.assert_allclose(np.asarray(m.x0), problem.x0, rtol=1e-6)
         np.testing.assert_allclose(np.asarray(m.Sigma0), problem.Sigma0, rtol=1e-6)
 
-    @known_bug("F01", "the filter runs with x0=0, Sigma0=I instead of the model's values")
     @pytest.mark.usefixtures("x64")
     def test_filter_uses_user_initial_state(self, problem):
         res = _model(problem, dtype=jnp.float64).filter(problem.y)
@@ -76,9 +74,22 @@ class TestInitialState:
         np.testing.assert_allclose(res.x_filtered[:, 1:], ref["x_filt"][:, 1:], atol=1e-3)
         assert float(res.llf) == pytest.approx(ref["llf_no_const"], abs=1e-3)
 
+    def test_setting_other_matrices_keeps_initial_state(self, problem):
+        m = _model(problem)
+        m.Q = 2.0 * problem.Q
+        m.set(H=problem.H, R=problem.R)
+        np.testing.assert_allclose(np.asarray(m.x0), problem.x0, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(m.Sigma0), problem.Sigma0, rtol=1e-6)
+
+    def test_changing_state_dimension_resets_incompatible_initial_state(self, problem):
+        m = _model(problem)
+        q_new = problem.q + 1
+        m.set(H=np.ones((problem.p, q_new)), F=np.full(q_new, 0.5), Q=np.eye(q_new))
+        np.testing.assert_array_equal(np.asarray(m.x0), np.zeros(q_new))
+        np.testing.assert_array_equal(np.asarray(m.Sigma0), np.eye(q_new))
+
     @pytest.mark.usefixtures("x64")
     def test_explicit_initial_state_per_call_is_used(self, problem):
-        # Passing x0/Sigma0 on every call works around F01 and must match the reference.
         m = _model(problem, dtype=jnp.float64)
         res = m.smoother(problem.y, x0=problem.x0, Sigma0=problem.Sigma0)
         ref = rts_smoother(problem)

@@ -13,6 +13,7 @@ from shapely.geometry import Polygon
 from geossm.covmodel import spdeAppoxCov
 from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
 from tests._known_bugs import known_bug
+from tests._reference import SSMProblem, kalman_filter
 from tests._synthetic import DOMAIN, make_panel_gdf, make_square_mesh
 
 N_SITES, N_TIMES, MAX_ITER = 25, 40, 5
@@ -113,7 +114,6 @@ class TestFit:
         res = model.fit(params0=ModelParams(f=Param("f", [0.5], fixed=True)), options=_options(max_iter=2))
         np.testing.assert_allclose(np.asarray(res.params.f.value), [0.5])
 
-    @known_bug("F01", "the E-step resets x0/Sigma0 to 0/I, ignoring fixed (or estimated) values")
     def test_fixed_initial_state_reaches_the_filter(self, gdf, mesh):
         model = _build_model(gdf, mesh)
         q = model.shape[1]
@@ -122,6 +122,24 @@ class TestFit:
         model.fit(params0=params0, options=_options(max_iter=2))
         np.testing.assert_allclose(np.asarray(model.x0), np.ones(q), rtol=1e-6)
         np.testing.assert_allclose(np.asarray(model.Sigma0), 5.0 * np.eye(q), rtol=1e-6)
+
+    def test_first_em_loglik_matches_dense_reference(self, mesh):
+        """llf of the first E-step equals the observed-data likelihood of an
+        independent dense filter run on the same system matrices and the
+        user-fixed prior (complete data, so F02 does not enter)."""
+        gdf = make_panel_gdf(n_sites=N_SITES, n_times=N_TIMES, missing_frac=0.0, seed=4)
+        model = _build_model(gdf, mesh)
+        q = model.shape[1]
+        x0, Sigma0 = 0.5 * np.ones(q), 3.0 * np.eye(q)
+        params0 = ModelParams(x0=Param("x0", x0, fixed=True), Sigma0=Param("Sigma0", Sigma0, fixed=True))
+        res = model.fit(params0=params0, options=_options(max_iter=1))
+        # After one iteration the model holds the system matrices of that E-step.
+        f64 = lambda a: np.asarray(a, dtype=np.float64)  # noqa: E731
+        prob = SSMProblem(H=f64(model.H), R=f64(model.R), F=f64(model.F), Q=f64(model.Q),
+                          x0=x0, Sigma0=Sigma0, Xbeta=f64(model.Xbeta), beta=f64(model.beta),
+                          y=f64(model.y_train))
+        ref = kalman_filter(prob)["llf_no_const"]
+        assert float(res.llf_path[1]) == pytest.approx(ref, rel=1e-4)
 
     def test_summary_renders(self, fitted):
         _, res = fitted
