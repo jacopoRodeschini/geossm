@@ -274,6 +274,16 @@ class TestPredict:
 
 
 class TestResultsMethods:
+    def test_sample_size_counts_observed_values_only(self, fitted):
+        # BIC and df_resid use the number of observed values, not p*T (F14).
+        model, res = fitted
+        y = np.asarray(model.y_train)
+        n_obs = int(np.sum(~np.isnan(y)))
+        assert (res.nobs, res.missing) == (n_obs, y.size - n_obs)
+        assert res.missing > 0
+        assert res.bic == pytest.approx(np.log(n_obs) * res.n_params - 2 * res.llf, rel=1e-12)
+        assert res.df_resid == n_obs - res.n_params
+
     def test_intervals_and_coverage(self, fitted):
         _, res = fitted
         lo, hi = res.conf_int_y(alpha=0.05, prediction=True)

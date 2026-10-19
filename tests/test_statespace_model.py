@@ -137,7 +137,6 @@ class TestFilterSmootherResults:
         res = _model(problem_missing).smoother(problem_missing.y)
         assert res.missing == int(missing_mask.sum())
 
-    @known_bug("F14", "nobs counts missing entries (used by BIC and df_resid)")
     def test_nobs_counts_only_observed_entries(self, problem_missing, missing_mask):
         res = _model(problem_missing).smoother(problem_missing.y)
         assert res.nobs == int((~missing_mask).sum())

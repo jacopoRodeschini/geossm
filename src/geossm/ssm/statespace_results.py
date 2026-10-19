@@ -101,6 +101,9 @@ class StateSpaceResults:
         `geossm.ssm.statespace._compute_expected_values_kernelJAX`.
     llf : float or None
         Model log-likelihood.
+    nobs, missing : int or None
+        Number of observed (non-NaN) and of missing entries of ``y_obs``;
+        ``nobs`` is the sample size used by BIC and ``df_resid``.
     time_filter, time_smoother, time_expectation, time_total : float
         Wall-clock runtimes (seconds) of the filter, smoother, expected-
         value/sufficient-statistics computation, and their sum.
@@ -285,9 +288,9 @@ class StateSpaceResults:
         # to __repr__ and to any direct caller, without requiring
         # summary()/generate_summary() to have run first. ----
         if self.y_obs is not None:
-            self.nobs = self.y_obs.size
             self.nspace, self.ntime = self.y_obs.shape
             self.missing = int(np.sum(np.isnan(self.y_obs)))
+            self.nobs = self.y_obs.size - self.missing  # observed values only
         else:
             self.nobs = self.nspace = self.ntime = self.missing = None
 
