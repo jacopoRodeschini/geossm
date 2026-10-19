@@ -18,6 +18,7 @@ import jax.numpy as jnp
 from geossm.ssm import StateSpaceModel
 from geossm.ssm import _filter_kernelJAX
 from geossm.ssm import _itype_for, _ensure_x64_for_dtype
+from geossm.ssm.statespace import _highest_matmul_precision
 from geossm.covmodel import spdeAppoxCov
 from geossm.covmodel.covmodels import _validate_domain, _domain_hull
 from statsmodels.iolib.summary import Summary
@@ -50,6 +51,7 @@ from types import SimpleNamespace
 # %% [Utils] Updating formula, JAX (M-Step)
 
 @partial(jax.jit, static_argnums=(2, 3))
+@_highest_matmul_precision
 def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     """
     Computes initial parameter values for a model using JAX.
@@ -132,6 +134,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 
 
 @partial(jit, static_argnames=["b"])
+@_highest_matmul_precision
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
     """M-step update of the regression coefficients `beta`, accumulating the
     (masked, missing-data-aware) normal equations over time via `lax.scan`
@@ -195,6 +198,7 @@ def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
 
 @partial(jit, static_argnames=["block_p"])
+@_highest_matmul_precision
 def _compute_s2e_jax_kernel(err, H, P_T, block_p):
     """M-step update of the measurement-error variances `s2e`, one value per
     response-variable block, from the smoothed residuals and smoothed state
@@ -270,6 +274,7 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
 
 
 @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
+@_highest_matmul_precision
 def _compute_A2_jax_kernel(
     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
 ):
@@ -1844,7 +1849,8 @@ class LRStateSpaceModel(StateSpaceModel):
             # (and their optimum) directly comparable.
             return fun / 1e4
 
-        return jax.jit(jax.value_and_grad(objective))
+        # Full matmul precision for the forward and backward pass (F31).
+        return jax.jit(_highest_matmul_precision(jax.value_and_grad(objective)))
 
     def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
         """
