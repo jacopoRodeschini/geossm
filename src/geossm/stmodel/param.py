@@ -42,19 +42,22 @@ class FitOptions:
     max_iter : int, default 20
         Maximum number of EM iterations to run.
     tol_relat : float, default 1e-3
-        Relative log-likelihood-improvement tolerance below which the EM
-        iteration is considered converged and stops early (before
-        `max_iter` is reached).
+        Convergence tolerance on the log-likelihood change per observed
+        value, ``|llf_k - llf_{k-1}| / n_obs``. EM stops as converged once
+        it is reached (before `max_iter`), including when the change is a
+        decrease of that size (iterates oscillating on the plateau). Unlike
+        a change relative to ``|llf|``, it does not depend on additive
+        constants in the log-likelihood.
     verbose : bool, default True
         If `True`, log per-iteration progress during `fit`.
     force_iter : bool, default False
-        If `False`, `fit` enforces a monotonically increasing
-        log-likelihood: it stops at the first decrease and returns the last
-        valid estimate. If `True`, a decrease only triggers a warning and
-        the EM iterations continue (useful when poor initial values make
-        the log-likelihood oscillate at the start). A NaN/Inf
-        log-likelihood always stops the algorithm and returns the last
-        valid estimate.
+        How a log-likelihood decrease larger than `tol_relat` is handled.
+        If `False`, `fit` stops at the first one and returns the
+        highest-likelihood estimate seen. If `True`, it only triggers a
+        warning and the EM iterations continue (useful when poor initial
+        values make the log-likelihood oscillate at the start). A NaN/Inf
+        log-likelihood always stops the algorithm and returns the
+        highest-likelihood estimate seen.
     std : bool, default True
         If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
         computed after the EM loop (left as `None`) -- useful when the

@@ -1136,8 +1136,9 @@ class LRStateSpaceModel(StateSpaceModel):
         `ks` (Matern rescale/range parameters, one per covariance function,
         optimised with L-BFGS-B against exact JAX gradients -- see
         `_build_ks_value_and_grad`) from those statistics. Iteration stops
-        when the relative change in log-likelihood drops to `tol_relat` or
-        `max_iter` iterations are reached (see `FitOptions`).
+        when the log-likelihood change per observation drops to `tol_relat`
+        or `max_iter` iterations are reached (see `FitOptions`; the reason
+        is recorded in the results' `termination`).
 
         Parameters
         ----------
@@ -1151,8 +1152,8 @@ class LRStateSpaceModel(StateSpaceModel):
             parameter is initialised and freely estimated.
         options : FitOptions, optional
             EM stopping-rule and logging options: `max_iter` caps the
-            number of EM iterations, `tol_relat` is the relative
-            log-likelihood-improvement tolerance below which EM is
+            number of EM iterations, `tol_relat` is the tolerance on the
+            log-likelihood change per observation below which EM is
             considered converged, and `verbose` overrides `self.verbose`
             for the whole call (including the per-iteration log printed via
             `logger`). Defaults to `max_iter=100`, `tol_relat=1e-3` if not
@@ -1202,6 +1203,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
         points = self.points
         p, T = y_obs.shape
+        # Observed entries: the stopping rule uses the log-likelihood change
+        # per observation, which (unlike a change relative to |llf|) does not
+        # depend on additive constants in the log-likelihood.
+        n_obs = int(jnp.sum(~jnp.isnan(y_obs)))
 
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
@@ -1246,8 +1251,9 @@ class LRStateSpaceModel(StateSpaceModel):
         tdelta_Edet = np.zeros(3)
         tdelta_Mdet = np.zeros(3)
         nstat = []  # list to store the results of each iteration
-        converged = False  # True only if the relative tolerance was met
-        last_valid = None  # snapshot of the last valid (params, E-step outputs)
+        converged = False  # True only if the tolerance was met
+        termination = None  # why EM stopped: tolerance | decrease | invalid | max_iter
+        best = None  # snapshot of the highest-llf (params, E-step outputs) so far
 
         # Log the initial state before starting the EM iterations
         nstat = self._log_iteration(
@@ -1330,36 +1336,50 @@ class LRStateSpaceModel(StateSpaceModel):
                 ks_value_and_grad,
             )
 
-            # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
+            # Log-likelihood change, absolute and per observation
             delta_lik = logL_cur - logL_prev
-            relat_lik = delta_lik / abs(logL_prev) if logL_prev != 0 else jnp.inf
+            relat_lik = delta_lik / n_obs if niter > 1 else jnp.inf
 
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Check if the step is valid. Skipped at the first iteration:
-            # logL_prev is a placeholder (0), so delta_lik is not a real
-            # likelihood increment. NaN/Inf always stop the algorithm; a
-            # decrease stops it only if force_iter is False.
+            # Check the step. Skipped at the first iteration: logL_prev is a
+            # placeholder (0), so delta_lik is not a real likelihood increment.
+            # - NaN/Inf always stops.
+            # - A decrease within tol_relat counts as convergence: the iterates
+            #   oscillate on the plateau.
+            # - A larger decrease stops unless force_iter is True.
+            # Every stop on a decrease or NaN/Inf returns the best iterate so far.
             if niter > 1:
                 invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
                 decreased = bool(delta_lik < 0)
-                if invalid or (decreased and not force_iter):
+                within_tol = not invalid and abs(float(relat_lik)) <= tol_relat
+                if decreased and not within_tol and force_iter:
                     msg = self._log_warning_emstep(delta_lik, niter)
                     self._log(msg)
-                    warnings.warn(
-                        msg + ". The EM algorithm was stopped and the last valid "
-                        "estimate is returned (convergence=False).",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                    warnings.warn(msg + " (force_iter=True: continuing).", RuntimeWarning, stacklevel=2)
+                elif invalid or decreased:
+                    if within_tol:
+                        termination, converged = "tolerance", True
+                    else:
+                        termination = "invalid" if invalid else "decrease"
+                        msg = self._log_warning_emstep(delta_lik, niter)
+                        self._log(msg)
+                        warnings.warn(
+                            msg + ". The EM algorithm was stopped and the best "
+                            "estimate so far is returned (convergence=False).",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
-                    # restore the last valid estimate and its E-step outputs
-                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
+                    # restore the best estimate and its E-step outputs
+                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = best
                     break
-            
-            # snapshot the current (finite) parameters and their E-step outputs
-            last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
+
+            # snapshot the current parameters and their E-step outputs if they
+            # are the best so far
+            if best is None or logL_cur >= best[-1]:
+                best = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
 
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
@@ -1391,10 +1411,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if abs(relat_lik) <= tol_relat:
-                converged = True
+                termination, converged = "tolerance", True
                 flag = False
-            
+
             elif niter == max_iter:
+                termination = "max_iter"
                 warnings.warn(
                     "The EM algorithm reached max_iter={} without meeting "
                     "tol_relat={}.".format(max_iter, tol_relat),
@@ -1432,6 +1453,8 @@ class LRStateSpaceModel(StateSpaceModel):
             nstats=nstat,
             options=options,
             convergence=converged,
+            termination=termination,
+            llf=logL_cur,
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
@@ -2394,8 +2417,9 @@ class LRStateSpaceModel(StateSpaceModel):
             Decimal places used to format the other numeric fields
             (log-likelihood, `s2e`, `f`, `ks`, `A`, `x0`, `Sigma0`, timings).
         relat_decimals : int, default 5
-            Decimal places used to format the relative log-likelihood
-            change `stats["relatL"]`.
+            Decimal places used to format the per-observation
+            log-likelihood change `stats["relatL"]` (the quantity compared
+            with `tol_relat`).
 
         Returns
         -------

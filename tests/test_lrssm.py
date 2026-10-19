@@ -45,6 +45,11 @@ def mesh():
 
 
 @pytest.fixture(scope="module")
+def stop_model(gdf, mesh):
+    return _build_model(gdf, mesh)
+
+
+@pytest.fixture(scope="module")
 def fitted(gdf, mesh):
     model = _build_model(gdf, mesh)
     return model, model.fit(options=_options())
@@ -144,10 +149,93 @@ class TestFit:
         # with n_obs; a relative tolerance would be meaningless when llf ~ 0.
         assert float(res.llf_path[1]) == pytest.approx(ref["llf"], abs=1e-5 * ref["n_obs"])
 
+    def test_max_iter_termination_is_recorded(self, fitted):
+        _, res = fitted
+        assert res.termination == "max_iter"
+
     def test_summary_renders(self, fitted):
         _, res = fitted
         text = str(res.summary())
         assert "LR State Space Model Results" in text
+
+
+class TestStoppingRule:
+    """EM stopping paths (F18), driven by a scripted log-likelihood.
+
+    Real EM does not decrease on this problem, so the E-step is wrapped to
+    return the scripted llf of each iteration; everything else is the real
+    fit. ``beta_seen[k]`` is the beta the (k+1)-th E-step was evaluated at.
+    """
+
+    TOL = 1e-3
+
+    @pytest.fixture
+    def model(self, stop_model):
+        return stop_model
+
+    @pytest.fixture
+    def scripted(self, model, monkeypatch):
+        real = model._E_step
+
+        def install(llfs):
+            beta_seen = []
+
+            def fake(y_obs):
+                out = real(y_obs)
+                beta_seen.append(np.asarray(model.beta).copy())
+                return (*out[:6], llfs[len(beta_seen) - 1], out[7])
+            monkeypatch.setattr(model, "_E_step", fake)
+            return beta_seen
+        return install
+
+    def _fit(self, model, **kw):
+        return model.fit(options=_options(tol_relat=self.TOL, **kw))
+
+    @pytest.fixture
+    def n_obs(self, model):
+        return int(np.sum(~np.isnan(np.asarray(model.y_train))))
+
+    @pytest.mark.parametrize("offset", [0.0, -1e7], ids=["llf~1e3", "llf~1e7"])
+    def test_tolerance_is_per_observation(self, model, scripted, n_obs, offset):
+        # The same llf changes stop (or not) EM regardless of |llf|: adding a
+        # constant to the log-likelihood must not change when EM stops.
+        small, large = 0.5 * self.TOL * n_obs, 2.0 * self.TOL * n_obs
+        scripted([offset - 1e3, offset - 500.0, offset - 500.0 + small])
+        res = self._fit(model, max_iter=5)
+        assert (res.termination, res.convergence, res.iterations) == ("tolerance", True, 3)
+
+        scripted([offset - 1e3, offset - 500.0, offset - 500.0 + large])
+        res = self._fit(model, max_iter=3)
+        assert (res.termination, res.convergence) == ("max_iter", False)
+
+    @pytest.mark.parametrize("force_iter", [False, True])
+    def test_small_decrease_is_convergence_and_returns_best(self, model, scripted, n_obs, force_iter):
+        beta_seen = scripted([-1e3, -500.0, -500.0 - 0.5 * self.TOL * n_obs])
+        res = self._fit(model, max_iter=5, force_iter=force_iter)
+        assert (res.termination, res.convergence) == ("tolerance", True)
+        assert res.llf == -500.0
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
+
+    def test_large_decrease_stops_without_force_iter(self, model, scripted):
+        beta_seen = scripted([-1e3, -500.0, -600.0])
+        with pytest.warns(RuntimeWarning, match="decreased"):
+            res = self._fit(model, max_iter=5)
+        assert (res.termination, res.convergence) == ("decrease", False)
+        assert res.llf == -500.0
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
+
+    def test_force_iter_continues_and_nan_restores_best(self, model, scripted):
+        # Under force_iter the decreased iterate (-600) must not replace the
+        # best one (-500) as the estimate restored on NaN.
+        beta_seen = scripted([-1e3, -500.0, -600.0, float("nan")])
+        with pytest.warns(RuntimeWarning) as record:
+            res = self._fit(model, max_iter=5, force_iter=True)
+        messages = [str(w.message) for w in record]
+        assert any("decreased" in m and "continuing" in m for m in messages)
+        assert any("NaN" in m for m in messages)
+        assert (res.termination, res.convergence) == ("invalid", False)
+        assert res.llf == -500.0
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
 
 
 class TestPredict:

@@ -160,6 +160,7 @@ class LRStateSpaceResults(StateSpaceResults):
         nstats: list = None,
         options: FitOptions = None,
         convergence: bool = None,
+        termination: str = None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -184,11 +185,17 @@ class LRStateSpaceResults(StateSpaceResults):
             The `FitOptions` the model was fit with (stored as-is, for
             reference).
         convergence : bool, optional
-            `True` if the EM algorithm stopped because the relative
-            log-likelihood tolerance (`tol_relat`) was met; `False` if it
-            stopped for any other reason (`max_iter` reached, or a
-            decreasing/NaN/Inf log-likelihood, in which case the last
-            valid estimate is kept).
+            `True` if the EM algorithm stopped because the per-observation
+            log-likelihood change was within `tol_relat`; `False` if it
+            stopped for any other reason (see `termination`).
+        termination : str, optional
+            Why the EM algorithm stopped: ``"tolerance"`` (converged; this
+            includes a decrease within `tol_relat`, i.e. the iterates
+            oscillating on the plateau), ``"decrease"`` (a larger decrease
+            with `force_iter=False`), ``"invalid"`` (NaN/Inf
+            log-likelihood) or ``"max_iter"``. On ``"decrease"``,
+            ``"invalid"`` and a converged decrease, the highest-likelihood
+            iterate seen is returned.
         block_p : array-like, optional
             Cumulative index boundaries splitting the stacked training
             arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
@@ -219,6 +226,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self.nstats = nstats
         self.options = options
         self.convergence = convergence
+        self.termination = termination
 
         # Cumulative per-response-variable index boundaries for the
         # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
@@ -369,7 +377,10 @@ class LRStateSpaceResults(StateSpaceResults):
         self.time_total = sum(runtime_each)
         
         self.llf_path = [v["logL"] for v in self.nstats]
-        self.llf = self.llf_path[-1]
+        # fit() passes the llf of the returned estimate, which is not the
+        # last logged one when an earlier best iterate is restored.
+        if self.llf is None:
+            self.llf = self.llf_path[-1]
     
     def _inference_params(self):
         """
