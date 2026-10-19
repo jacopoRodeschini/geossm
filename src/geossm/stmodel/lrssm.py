@@ -926,7 +926,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
         # Create a new SSM with the same parameters as the current model, but with the matrices H, R, F and Q computed above
 
-        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None, backend=self.backend)
+        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None, backend=self.backend, dtype=self.dtype)
 
         y_sim, x_sim, variance_stats, tdelta = sim_model.sim(
             seed, R=R, F=F, H=H, Q=Q, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose

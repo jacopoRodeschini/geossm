@@ -305,6 +305,23 @@ class TestPredict:
         np.testing.assert_allclose(res.y_pred, y_hat, rtol=1e-5, atol=1e-5)
 
 
+class TestSimulate:
+    @pytest.mark.usefixtures("x64")
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64], ids=["float32", "float64"])
+    def test_sim_keeps_model_dtype(self, gdf, mesh, dtype):
+        # F16: the internal StateSpaceModel used to default to float32.
+        model = _build_model(gdf, mesh, dtype=dtype)
+        params = ModelParams(beta=Param("beta", [2.0, 0.5]), s2e=Param("s2e", [0.1]), f=Param("f", [0.8]),
+                             A=Param("A", [[1.0]]), ks=Param("ks", [1.0]))
+        y_sim, x_sim, info, _ = model.sim(params=params, verbose=False)
+        assert info["sim_model"].dtype == jnp.dtype(dtype)
+        assert np.asarray(y_sim).dtype == np.dtype(dtype)
+        assert np.asarray(x_sim).dtype == np.dtype(dtype)
+        p, q, T = model.shape
+        assert np.asarray(y_sim).shape == (p, T)
+        assert np.all(np.isfinite(np.asarray(y_sim)))
+
+
 class TestResultsMethods:
     def test_sample_size_counts_observed_values_only(self, fitted):
         # BIC and df_resid use the number of observed values, not p*T (F14).

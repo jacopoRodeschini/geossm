@@ -133,7 +133,8 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
 
     # --- Initial State (t=0) ---
-    initial_noise = jax.random.normal(keys.next(), shape=(q,))
+    # Draws in the model dtype: without it they follow the global x64 flag.
+    initial_noise = jax.random.normal(keys.next(), shape=(q,), dtype=H.dtype)
     x_current = x0 + chol_Sigma0 @ initial_noise  # This is state x_0
 
     # --- Simulation using a Python for-loop ---
@@ -145,13 +146,13 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # Loop T times to generate T observations (y_0, ..., y_{T-1})
     for t in range(T):
         # 1. Generate the observation y_t based on the current state x_t
-        obs_noise = chol_R_diag * jax.random.normal(keys.next(), shape=(p,))
+        obs_noise = chol_R_diag * jax.random.normal(keys.next(), shape=(p,), dtype=H.dtype)
         mean_reg = Xbeta[:, :, t] @ beta
         y_t = mean_reg + H @ x_current + obs_noise
         y_history.append(y_t)
 
         # 2. Evolve the state to the next step: x_{t+1} from x_t
-        process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
+        process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,), dtype=H.dtype)
         x_next = F * x_current + process_noise
 
         # 3. Store the new state and update the current state for the next loop iteration
