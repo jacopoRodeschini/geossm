@@ -13,6 +13,7 @@ a printable summary.
 
 from __future__ import annotations
 from typing import Optional, Any, Tuple, Dict
+import warnings
 
 import numpy as np
 from scipy.stats import norm
@@ -21,9 +22,41 @@ from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date
 import jax
-from geossm.utils import _select_device
+from geossm.utils import _select_device, format_info_table
 
 ArrayLike = Optional[Any]
+
+# Below this magnitude, a negative variance is treated as floating-point
+# roundoff (e.g. from P @ H.T-style covariance propagation) rather than a
+# real modeling problem, and is silently clipped to 0.
+_VARIANCE_NEG_TOL = 1e-8
+
+
+def _safe_sqrt_variance(var: np.ndarray, *, context: str = "") -> np.ndarray:
+    """Elementwise square root of a variance array that never lets NumPy
+    raise its blanket "invalid value encountered in sqrt" warning.
+
+    Negative entries within `_VARIANCE_NEG_TOL` of 0 are clipped to 0
+    (ordinary floating-point noise). Entries that are NaN, +/-inf, or
+    negative beyond that tolerance are replaced with NaN - they likely
+    indicate a real numerical issue (e.g. a singular/ill-conditioned
+    covariance) - and are reported once via a single, explicit
+    `RuntimeWarning` naming `context`, instead of the unqualified one
+    NumPy would otherwise raise from deep inside `sqrt`.
+    """
+    var = np.asarray(var, dtype=float)
+    bad = ~np.isfinite(var) | (var < -_VARIANCE_NEG_TOL)
+    if np.any(bad):
+        where = f" in {context}" if context else ""
+        warnings.warn(
+            f"Non-finite or negative variance encountered{where}; "
+            f"{np.count_nonzero(bad)} of {var.size} value(s) set to NaN.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    safe = np.where(bad, np.nan, np.clip(var, 0, None))
+    with np.errstate(invalid="ignore"):
+        return np.sqrt(safe)
 
 
 class StateSpaceResults:
@@ -51,7 +84,7 @@ class StateSpaceResults:
     Sigma_y_hat : numpy.ndarray, shape (p, p, T) or None
         State-driven predictive covariance of ``y_hat`` (excludes
         observation noise ``R``); see
-        `geossm.ssm.statespace._compute_predict_kernel_JAX`.
+        `geossm.ssm.statespace._compute_predict_sigma_kernel_JAX`.
     x_filtered, P_filtered : numpy.ndarray or None
         Filtered state means/covariances (``None`` when unavailable, e.g.
         after ``smoother(..., light=True)``).
@@ -246,6 +279,17 @@ class StateSpaceResults:
 
         # convert arrays if needed
         self.to_numpy()
+
+        # ---- cheap observation-shape stats, computed once here (not
+        # lazily inside generate_summary()) so they're already available
+        # to __repr__ and to any direct caller, without requiring
+        # summary()/generate_summary() to have run first. ----
+        if self.y_obs is not None:
+            self.nobs = self.y_obs.size
+            self.nspace, self.ntime = self.y_obs.shape
+            self.missing = int(np.sum(np.isnan(self.y_obs)))
+        else:
+            self.nobs = self.nspace = self.ntime = self.missing = None
 
     @property
     def backend(self):
@@ -479,7 +523,7 @@ class StateSpaceResults:
         lower = np.zeros_like(mean)
         upper = np.zeros_like(mean)
         for t in range(mean.shape[1]):
-            std = np.sqrt(np.diag(cov[:, :, t]))
+            std = _safe_sqrt_variance(np.diag(cov[:, :, t]), context="conf_int_state")
             lower[:, t] = mean[:, t] - z * std
             upper[:, t] = mean[:, t] + z * std
 
@@ -554,7 +598,7 @@ class StateSpaceResults:
             if prediction and R_diag_matrix is not None:
                 var_y = var_y + R_diag_matrix
 
-            std_t = np.sqrt(np.diag(var_y))
+            std_t = _safe_sqrt_variance(np.diag(var_y), context="conf_int_y")
             lower[:, t] = y_hat[:, t] - z * std_t
             upper[:, t] = y_hat[:, t] + z * std_t
         return lower, upper
@@ -589,10 +633,27 @@ class StateSpaceResults:
         """
         Compute empirical coverage probability of prediction intervals.
 
+        Memoized per ``(alpha, which)`` on the instance: `Sigma_y_hat`/
+        `y_hat` are snapshotted once at fit time and never mutated
+        afterwards (see `conf_int_y`), so the result can't go stale.
+        This keeps `__repr__`/`__str__`/`summary()` - which call this via
+        `generate_summary()` on every render - from recomputing (and
+        re-triggering `conf_int_y`'s ``sqrt``) on every print.
+
         -------
         float
             Coverage probability in [0, 1].
         """
+        cache = self.__dict__.setdefault("_coverage_probability_cache", {})
+        key = (float(alpha), which)
+        if key in cache:
+            return cache[key]
+
+        result = self._compute_coverage_probability(alpha, which)
+        cache[key] = result
+        return result
+
+    def _compute_coverage_probability(self, alpha: float, which: str):
         y_true = self.y_obs
 
         lower, upper = self.conf_int_y(alpha, prediction=True)
@@ -674,9 +735,6 @@ class StateSpaceResults:
         and fit runtime on the left, fit-quality/residual diagnostics on
         the right) used by `summary`.
 
-        As a side effect, sets ``self.nobs``, ``self.nspace``,
-        ``self.ntime`` and ``self.missing`` from ``y_obs``.
-
         Returns
         -------
         tuple of list
@@ -685,10 +743,8 @@ class StateSpaceResults:
             ``statsmodels.iolib.summary.Summary.add_table_2cols``.
         """
 
-        self.nobs = self.y_obs.size
-        self.nspace, self.ntime = self.y_obs.shape
-        self.missing = np.sum(np.isnan(self.y_obs))
-        
+        # nobs/nspace/ntime/missing are set in __init__ (see there for why).
+
         # Compute residual diagnostics
         err = getattr(self, "residuals", None)
         if err is None:
@@ -800,11 +856,45 @@ class StateSpaceResults:
 
         return smry
 
+    def generate_summary_header(self):
+        """Cheap identity/shape rows (dep. variable, shape, observed/
+        missing counts, log-likelihood, backend/dtype) - all pure
+        attribute lookups set at construction time, with none of
+        `generate_summary()`'s residual diagnostics or coverage
+        probability. Used by `__repr__` (via `format_info_table`).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, matching the other
+            `generate_summary*` methods' return shape.
+        """
+        y_hat = getattr(self, "y_hat", None)
+        p, T = y_hat.shape if y_hat is not None else ("N/A", "N/A")
+        llf = getattr(self, "llf", None)
+        gen_top_left = [
+            ("Dep. Variable:", [getattr(self, "yname", None) or "N/A"]),
+            ("Shape (p, T):", [f"({p}, {T})"]),
+        ]
+        gen_top_right = [
+            ("Obs (missing):", [f"{self.nobs} ({self.missing})" if self.nobs is not None else "N/A"]),
+            ("Log-Likelihood:", [f"{llf:.5g}" if llf is not None else "N/A"]),
+            ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
+        ]
+        return gen_top_left, gen_top_right
+
     def __str__(self):
         return str(self.summary())
 
     def __repr__(self):
-        return str(self.summary())
+        """Cheap, side-effect-free representation for interactive use
+        (see `generate_summary_header`) - see `summary()`/`str()` for the
+        full diagnostic report (residual tests, coverage probability, ...).
+        """
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        return f"{self.__class__.__name__}\n" + format_info_table(
+            gen_top_left + gen_top_right, indent=2
+        )
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict snapshot of the main results.

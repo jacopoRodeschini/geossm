@@ -2,14 +2,15 @@ from statsmodels.iolib.summary import Summary
 from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import Param, ModelParams, FitOptions
-from geossm.ssm import StateSpaceResults
+from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
 from types import SimpleNamespace
 from scipy import stats
 import time
+import warnings
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
-from geossm.utils import _on_device
+from geossm.utils import _on_device, split_by_block, format_info_table
 
 
 ArrayLike = Optional[Any]
@@ -122,13 +123,24 @@ class LRStateSpaceResults(StateSpaceResults):
       Hessian, via `jax.hessian` on the model's log-likelihood), `bse`,
       `tvalues`, `pvalues`, `conf_int`, `aic`/`bic`.
     - Out-of-sample prediction: `predict` (thin wrapper around
-      `LRStateSpaceModel.predict`, storing `y_pred_list`/
-      `Sigma_y_pred_list` on this object).
+      `LRStateSpaceModel.predict`, storing `y_pred`/`Sigma_y_pred` on this
+      object).
     - Back-transformation of predictions/fitted values to the response's
       original scale via the delta method (`back_transform`), when the
       model formula applies a transform to the response (e.g. `np.log`).
-    - Export to `geopandas.GeoDataFrame` (`to_geo`).
+    - Export to `geopandas.GeoDataFrame` (`to_geo`), and change of
+      support from the prediction points to polygons (`to_poly`).
     - A `statsmodels`-style textual report (`summary`).
+
+    Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
+    (in-sample fitted), `y_obs_list` (training observations),
+    `residuals_list`, and -- after `.predict()` -- `y_pred_list`/
+    `Sigma_y_pred_list`, are all lazy `@property` views splitting the
+    corresponding stacked array (`y_hat`, `y_obs`, `residuals`, `y_pred`)
+    one entry per response variable. After `.back_transform()`, their
+    original-scale counterparts `y_hat_back_list`, `y_obs_back_list`,
+    `residuals_back_list`, and `y_pred_back_list` are plain attributes
+    (genuine computations, not free slices of a stacked array).
 
     Typical usage, continuing from `LRStateSpaceModel.fit()`::
 
@@ -138,6 +150,7 @@ class LRStateSpaceResults(StateSpaceResults):
         results = results.predict(new_df) # out-of-sample prediction
         results = results.back_transform(g_inv=jnp.exp)  # if y = np.log(...)
         geo = results.to_geo()
+        areal = results.to_poly("regions.shp", uncertainty=True)
     """
 
     def __init__(
@@ -146,8 +159,7 @@ class LRStateSpaceResults(StateSpaceResults):
         params: ModelParams = None,
         nstats: list = None,
         options: FitOptions = None,
-        y_hat_list: list = None,
-        Sigma_y_hat_list: list = None,
+        convergence: bool = None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -171,15 +183,21 @@ class LRStateSpaceResults(StateSpaceResults):
         options : FitOptions, optional
             The `FitOptions` the model was fit with (stored as-is, for
             reference).
-        y_hat_list, Sigma_y_hat_list : list of ndarray, optional
-            Per-response-variable in-sample fitted mean/covariance,
-            split from the stacked `y_hat`/`Sigma_y_hat` (passed via
-            `**kwargs`, see the base class) along `block_p`.
+        convergence : bool, optional
+            `True` if the EM algorithm stopped because the relative
+            log-likelihood tolerance (`tol_relat`) was met; `False` if it
+            stopped for any other reason (`max_iter` reached, or a
+            decreasing/NaN/Inf log-likelihood, in which case the last
+            valid estimate is kept).
         block_p : array-like, optional
-            Cumulative index boundaries splitting the stacked arrays into
-            one block per response variable (`block_p[i]:block_p[i+1]`
-            selects variable `i`); snapshotted here rather than read live
-            off `model.block_p`, which is mutable.
+            Cumulative index boundaries splitting the stacked training
+            arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
+            the base class) into one block per response variable
+            (`block_p[i]:block_p[i+1]` selects variable `i`); snapshotted
+            here rather than read live off `model.block_p`, which is
+            mutable. Drives the `y_hat_list`/`Sigma_y_hat_list`/
+            `y_obs_list`/`residuals_list` properties (see
+            `geossm.utils.split_by_block`).
         points_hat, timestamps_hat, crs_hat : list / list / CRS, optional
             Training grid (sites, timestamps) and CRS, one entry per
             response variable, snapshotted for `to_geo()`.
@@ -200,17 +218,16 @@ class LRStateSpaceResults(StateSpaceResults):
 
         self.nstats = nstats
         self.options = options
+        self.convergence = convergence
 
-        # Per-variable views (one entry per response variable, i.e. length
-        # `model.nvar`) of the base class's stacked `y_hat`/`Sigma_y_hat`,
-        # split along `block_p` -- see `_split_by_block`. `block_p` is
-        # snapshotted here (not read live off `self.model.block_p`) since
-        # that attribute is mutable and would go stale for this results
-        # object the next time `fit()`/`setup()` runs on this model instance.
-        self.y_hat_list = y_hat_list
-        self.Sigma_y_hat_list = Sigma_y_hat_list
+        # Cumulative per-response-variable index boundaries for the
+        # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
+        # `residuals`); snapshotted here (not read live off
+        # `self.model.block_p`) since that attribute is mutable and would
+        # go stale for this results object the next time `fit()`/`setup()`
+        # runs on this model instance. Drives the `y_hat_list`/
+        # `Sigma_y_hat_list`/`y_obs_list`/`residuals_list` properties below.
         self.block_p = block_p
-        self._residuals_list = None  # cache for the residuals_list property
 
         # Training grid (one entry per response variable), snapshotted for
         # the same reason as block_p above -- used by `.to_geo()`.
@@ -227,24 +244,34 @@ class LRStateSpaceResults(StateSpaceResults):
         self.runtime_tot_estep = 0.0
         self.runtime_tot_mstep = 0.0
 
-        # Out-of-sample prediction (populated by .predict(); per-variable
-        # views, distinct from `y_hat`/`y_hat_list`, which hold the
-        # in-sample filtered/fitted values used for residuals).
+        # Out-of-sample prediction (populated by .predict()): stacked
+        # arrays, distinct from `y_hat`/`Sigma_y_hat`, which hold the
+        # in-sample filtered/fitted values used for residuals. Their own
+        # `block_p_pred` is snapshotted separately from `block_p` (the
+        # training grid's) since the prediction grid can have a different
+        # number of points per response variable. `y_pred_list`/
+        # `Sigma_y_pred_list` (below) are derived properties from these.
         self.points_pred = None
-        self.y_pred_list = None
-        self.Sigma_y_pred_list = None
+        self.block_p_pred = None
+        self.y_pred = None
+        self.Sigma_y_pred = None
         self.tdelta_pred = None
         self.timestamps_pred = None
         self.crs_pred = None
 
         # Original-scale (back-transformed) counterparts of y_hat_list/
-        # y_pred_list, populated by .back_transform() -- see that method's
-        # docstring. Per-variable views only, mirroring y_hat_list/y_pred_list
-        # (no stacked y_hat_back/Sigma_y_hat_back).
+        # y_obs_list/y_pred_list/residuals_list, populated by
+        # .back_transform() -- see that method's docstring. Per-variable
+        # views only (no stacked *_back counterparts): unlike the plain
+        # `_list` views, these are genuine computations (delta method, or
+        # a direct transform), not free slices of a stacked array, so they
+        # are plain attributes rather than properties.
         self.y_hat_back_list = None
         self.Sigma_y_hat_back_list = None
+        self.y_obs_back_list = None
         self.y_pred_back_list = None
         self.Sigma_y_pred_back_list = None
+        self.residuals_back_list = None
 
         self.llf_path = None  # log-likelihood across EM iterations
 
@@ -474,13 +501,18 @@ class LRStateSpaceResults(StateSpaceResults):
     def bse_vector(self):
         """
         ndarray : Standard errors of the free parameters, as a flat 1D
-        array (`sqrt` of the diagonal of `compute_cov_params()`, clipped at
-        0 to guard against small negative values from numerical noise), in
-        the same flat order as `theta_hat`. Triggers the Hessian
-        computation on first access if not already cached.
+        array (`sqrt` of the diagonal of `compute_cov_params()`, via
+        `_safe_sqrt_variance` to guard against small negative/NaN values
+        from numerical noise), in the same flat order as `theta_hat`.
+
+        Does *not* trigger the Hessian computation: if `compute_cov_params()`
+        hasn't been called yet, returns a NaN-filled array of the same
+        shape instead. Call `compute_cov_params()` explicitly to get real
+        standard errors.
         """
-        cov = self.compute_cov_params()
-        return np.sqrt(np.clip(np.asarray(jnp.diag(cov)), a_min=0.0, a_max=None))
+        if self._cov_params is None:
+            return np.full(self.theta_hat.shape, np.nan)
+        return _safe_sqrt_variance(np.asarray(jnp.diag(self._cov_params)), context="bse_vector")
 
     @property
     def bse(self):
@@ -489,7 +521,15 @@ class LRStateSpaceResults(StateSpaceResults):
         into a `ModelParams` structure (one array per parameter, stored in
         each `Param.bse`) via `_vector_to_bse_params`, mirroring the shape
         of `self.params`. Fixed parameters get `bse=None`.
+
+        Does *not* trigger the Hessian computation: if `compute_cov_params()`
+        hasn't been called yet, returns NaN placeholders (see
+        `_nan_bse_params`) instead. Call `compute_cov_params()` explicitly
+        to get real standard errors.
         """
+        if self._cov_params is None:
+            return self._nan_bse_params()
+
         # structured ModelParams with bse stored in each Param
         if getattr(self, "_bse_params", None) is None:
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
@@ -532,7 +572,8 @@ class LRStateSpaceResults(StateSpaceResults):
     @property
     def tvalues(self):
         """ndarray : t-statistics (`theta_hat / bse_vector`) for the free
-        parameters, in the same flat order as `theta_hat`."""
+        parameters, in the same flat order as `theta_hat`. NaN until
+        `compute_cov_params()` has been called (see `bse_vector`)."""
         t, _, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
         return t
 
@@ -540,13 +581,15 @@ class LRStateSpaceResults(StateSpaceResults):
     def pvalues(self):
         """ndarray : Two-sided p-values for the free parameters (Student-t
         with `df_resid` degrees of freedom), in the same flat order as
-        `theta_hat`."""
+        `theta_hat`. NaN until `compute_cov_params()` has been called (see
+        `bse_vector`)."""
         _, p, _ = self._stats_from_arrays(self.theta_hat, self.bse_vector)
         return p
 
     def conf_int(self, alpha=0.05):
         """
-        Confidence intervals for the free parameters.
+        Confidence intervals for the free parameters. NaN until
+        `compute_cov_params()` has been called (see `bse_vector`).
 
         Parameters
         ----------
@@ -621,13 +664,14 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
-    def predict(self, df, verbose=True):
+    def predict(self, df, verbose=True, std=True):
         """
         Compute out-of-sample predictions based on smoothed states and model
         parameters. `self.model.predict` stores them directly on this
-        results object (`points_pred`, `y_pred_list`, `Sigma_y_pred_list`,
-        `tdelta_pred`, `timestamps_pred`, `crs_pred` -- one entry per
-        response variable) and returns `self`, so predictions travel with
+        results object (`points_pred`, `block_p_pred`, `y_pred`,
+        `Sigma_y_pred`, `tdelta_pred`, `timestamps_pred`, `crs_pred`; the
+        per-variable views `y_pred_list`/`Sigma_y_pred_list` are then
+        derived properties) and returns `self`, so predictions travel with
         the fitted model and can be reused by other methods (e.g.
         `.to_geo()`, plotting, summaries) without re-running prediction.
 
@@ -638,31 +682,93 @@ class LRStateSpaceResults(StateSpaceResults):
             `LRStateSpaceModel.predict` for the exact requirements.
         verbose : bool, default True
             Verbosity for the underlying grid/design-matrix construction.
+        std : bool, default True
+            If `False`, skip the predictive covariance `Sigma_y_pred` (left
+            as `None`) -- useful when it does not fit in device memory.
 
         Returns
         -------
         LRStateSpaceResults
             `self`, with the prediction attributes populated.
         """
-        return self.model.predict(df, modelresults=self, verbose=verbose)
+        return self.model.predict(df, modelresults=self, verbose=verbose, std=std)
 
+    # ---- Per-variable ("_list") views -----------------------------------
+    #
+    # Every `*_list` property below is a lazy, uncached view of an
+    # already-stored stacked array, split one entry per response variable
+    # via `geossm.utils.split_by_block`. Row-slicing a contiguous array
+    # returns a view rather than a copy, so these are effectively free in
+    # memory/compute -- no caching is needed, and none is done.
+    #
+    # In-sample:   y_hat / Sigma_y_hat   -> y_hat_list / Sigma_y_hat_list
+    #              y_obs                 -> y_obs_list
+    #              residuals             -> residuals_list
+    # Out-of-sample (after .predict()):
+    #              y_pred / Sigma_y_pred -> y_pred_list / Sigma_y_pred_list
+    #
+    # Original-scale counterparts (y_hat_back_list, y_obs_back_list,
+    # y_pred_back_list, residuals_back_list, ...) are genuine computations
+    # (delta method / direct transform) rather than free slices, so they
+    # are plain attributes populated by `back_transform()` instead.
+
+    @property
+    def y_hat_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `y_hat` (in-sample fitted mean), split along
+        `block_p`."""
+        if self.y_hat is None or self.block_p is None:
+            return None
+        return split_by_block(self.y_hat, self.block_p)
+
+    @property
+    def Sigma_y_hat_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `Sigma_y_hat` (in-sample fitted covariance),
+        split along `block_p` (diagonal blocks only)."""
+        if self.y_hat is None or self.Sigma_y_hat is None or self.block_p is None:
+            return None
+        _, Sigma_list = split_by_block(self.y_hat, self.block_p, self.Sigma_y_hat)
+        return Sigma_list
+
+    @property
+    def y_obs_list(self):
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `y_obs` (training observations), split along
+        `block_p`."""
+        if self.y_obs is None or self.block_p is None:
+            return None
+        return split_by_block(self.y_obs, self.block_p)
 
     @property
     def residuals_list(self):
-        """
-        Per-variable view of the base class's stacked `residuals`
-        (`y_obs - y_hat`), split along `block_p` -- the in-sample
-        counterpart of `y_hat_list`/`Sigma_y_hat_list`.
-        """
-        if self._residuals_list is None:
-            res = self.residuals
-            if res is None or self.block_p is None:
-                return None
-            block_p = np.asarray(self.block_p)
-            self._residuals_list = [
-                res[block_p[i]:block_p[i + 1], :] for i in range(len(block_p) - 1)
-            ]
-        return self._residuals_list
+        """list of ndarray : Per-response-variable view of the base
+        class's stacked `residuals` (`y_obs - y_hat`), split along
+        `block_p`."""
+        if self.residuals is None or self.block_p is None:
+            return None
+        return split_by_block(self.residuals, self.block_p)
+
+    @property
+    def y_pred_list(self):
+        """list of ndarray : Per-response-variable view of `y_pred`
+        (out-of-sample prediction mean, set by `.predict()`), split along
+        `block_p_pred` -- the prediction grid's own block boundaries,
+        since the prediction grid can have a different number of points
+        per response variable than the training grid."""
+        if self.y_pred is None or self.block_p_pred is None:
+            return None
+        return split_by_block(self.y_pred, self.block_p_pred)
+
+    @property
+    def Sigma_y_pred_list(self):
+        """list of ndarray : Per-response-variable view of `Sigma_y_pred`
+        (out-of-sample prediction covariance, set by `.predict()`), split
+        along `block_p_pred` (diagonal blocks only)."""
+        if self.y_pred is None or self.Sigma_y_pred is None or self.block_p_pred is None:
+            return None
+        _, Sigma_list = split_by_block(self.y_pred, self.block_p_pred, self.Sigma_y_pred)
+        return Sigma_list
 
     def _pred_summary_stats(self):
         """
@@ -673,11 +779,12 @@ class LRStateSpaceResults(StateSpaceResults):
         y_all = np.concatenate([np.asarray(y).ravel() for y in self.y_pred_list])
         n_points = sum(np.asarray(p).shape[0] for p in self.points_pred)
 
+        # Sigma_y_pred is None when predict() ran with std=False
         std_all = []
-        for sigma in self.Sigma_y_pred_list:
+        for sigma in self.Sigma_y_pred_list or []:
             sigma = np.asarray(sigma)
-            var = np.clip(np.diagonal(sigma, axis1=0, axis2=1), 0.0, None)  # (T, n_i)
-            std_all.append(np.sqrt(var).ravel())
+            var = np.diagonal(sigma, axis1=0, axis2=1)  # (T, n_i)
+            std_all.append(_safe_sqrt_variance(var, context="_pred_summary_stats").ravel())
         std_all = np.concatenate(std_all) if std_all else np.array([np.nan])
 
         return {
@@ -687,7 +794,7 @@ class LRStateSpaceResults(StateSpaceResults):
             "y_min": np.nanmin(y_all),
             "y_median": np.nanmedian(y_all),
             "y_max": np.nanmax(y_all),
-            "y_mean_std": np.nanmean(std_all),
+            "y_mean_std": np.nanmean(std_all) if not np.all(np.isnan(std_all)) else np.nan,
         }
 
     @staticmethod
@@ -728,12 +835,16 @@ class LRStateSpaceResults(StateSpaceResults):
         }
 
         def add_columns(names, ys, sigmas, col_prefix):
+            # sigmas is None when predict()/fit() ran with std=False: no std columns
+            if sigmas is None:
+                sigmas = [None] * len(names)
             for name, y, sigma in zip(names, ys, sigmas):
                 y = np.asarray(y)
-                var = np.clip(np.diagonal(np.asarray(sigma), axis1=0, axis2=1), 0.0, None)  # (T, n)
-                std = np.sqrt(var)
                 data[f"y_{col_prefix}_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
-                data[f"std_{col_prefix}_{name}"] = std.ravel()
+                if sigma is not None:
+                    var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
+                    std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
+                    data[f"std_{col_prefix}_{name}"] = std.ravel()
 
         add_columns(y_names, y_list, Sigma_list, prefix)
         if y_back_list is not None:
@@ -797,6 +908,229 @@ class LRStateSpaceResults(StateSpaceResults):
         return {"hat": gdf_hat, "pred": gdf_pred}
 
     @staticmethod
+    def _as_polygon_gdf(polys, crs):
+        """
+        Normalize the `polys` argument of `to_poly` -- a list of shapely
+        (Multi)Polygons, a single (Multi)Polygon, a GeoSeries/GeoDataFrame,
+        or a path to a vector file (e.g. a shapefile) -- into a
+        GeoDataFrame with a 0..m-1 index, reprojected to `crs` (the
+        prediction grid's CRS). Geometries without a CRS (plain shapely
+        objects, or a file/frame with no CRS set) are assumed to already
+        be in `crs`.
+        """
+        import geopandas as geopd
+        from os import PathLike
+        from shapely.geometry.base import BaseGeometry
+
+        if isinstance(polys, (str, PathLike)):
+            gdf = geopd.read_file(polys)
+        elif isinstance(polys, geopd.GeoDataFrame):
+            gdf = polys.copy()
+        elif isinstance(polys, geopd.GeoSeries):
+            gdf = geopd.GeoDataFrame(geometry=polys)
+        elif isinstance(polys, BaseGeometry):
+            gdf = geopd.GeoDataFrame(geometry=[polys])
+        else:
+            gdf = geopd.GeoDataFrame(geometry=list(polys))
+
+        if len(gdf) == 0:
+            raise ValueError("to_poly() requires at least one polygon.")
+
+        geom_type = gdf.geom_type
+        if not geom_type.isin(["Polygon", "MultiPolygon"]).all():
+            bad = sorted(set(geom_type[~geom_type.isin(["Polygon", "MultiPolygon"])].astype(str)))
+            raise ValueError(
+                f"to_poly() requires Polygon/MultiPolygon geometries, but got {bad}."
+            )
+
+        if gdf.crs is None:
+            gdf = gdf.set_crs(crs) if crs is not None else gdf
+        elif crs is not None and gdf.crs != crs:
+            gdf = gdf.to_crs(crs)
+
+        return gdf.reset_index(drop=True)
+
+    @staticmethod
+    def _areal_weights(points, polygons):
+        """
+        Sparse averaging matrix `W` (shape `(m, n)`) mapping the `n`
+        prediction points to the `m` polygons: `W[k, j] = 1 / n_k` if point
+        `j` falls in polygon `k` (boundary included), else 0, with `n_k`
+        the number of points in polygon `k`. A point on a boundary shared
+        by two polygons contributes to both. Rows of polygons containing
+        no point are all-zero; `n_k` (returned alongside) flags them.
+        """
+        import geopandas as geopd
+        from scipy import sparse
+
+        points = np.asarray(points)
+        pts = geopd.points_from_xy(points[:, 0], points[:, 1], crs=polygons.crs)
+        # (2, k) positional pairs: row 0 -> point, row 1 -> polygon
+        pt_idx, poly_idx = polygons.sindex.query(pts, predicate="intersects")
+
+        m, n = len(polygons), points.shape[0]
+        counts = np.bincount(poly_idx, minlength=m)
+        W = sparse.csr_matrix(
+            (1.0 / counts[poly_idx], (poly_idx, pt_idx)), shape=(m, n)
+        )
+        return W, counts
+
+    def to_poly(self, polys, back_transform=False, std=False):
+        """
+        Change of support: aggregate the point predictions of `.predict()`
+        to areal (polygon) predictions, approximating the block mean
+        `Y(B) = 1/|B| * integral_B Y(s) ds` of each polygon `B` by the
+        average of the predicted values at the prediction points inside it.
+
+        The intended workflow is to predict on a dense grid first, then
+        aggregate::
+
+            results = results.predict(fine_grid)
+            gdf = results.to_poly("regions.shp", uncertainty=True)
+
+        Since the average is linear, with `W` the `(m, n)` averaging
+        matrix (`W[k, j] = 1/n_k` for the `n_k` points in polygon `k`), the
+        areal predictive mean and covariance are, per time step `t`:
+
+            y_poly[:, t]       = W @ y_pred[:, t]
+            Sigma_poly[:, :, t] = W @ Sigma_pred[:, :, t] @ W.T
+
+        The full point covariance is required for the areal variance: the
+        std of a polygon mean is `sqrt(w_k' Sigma w_k)`, which includes the
+        cross-covariances between points. Averaging the point stds instead
+        assumes perfect correlation (overestimating it), and averaging the
+        variances divided by `n_k` assumes independence (underestimating
+        it, increasingly so for denser grids).
+
+        Only the diagonal of `Sigma_poly` is computed and returned (the
+        `std_<var>` columns): the cross-covariances between polygons (its
+        off-diagonal) are not provided. The per-polygon std is therefore
+        correct for each polygon on its own, but not sufficient for
+        quantities combining several polygons (e.g. the uncertainty of a
+        sum/difference of regions, or a joint confidence region), which
+        would need the full `W Sigma_t W'`.
+
+        Notes
+        -----
+        - `Sigma_y_pred` is the state-driven covariance `H P_t H'`: it
+          excludes the measurement error (whose contribution to a block
+          mean vanishes as `s2e / n_k`, so it is correctly left out of the
+          areal signal) and the estimation uncertainty of `beta`.
+        - The discrete average approximates the areal integral only when
+          the prediction points are dense and roughly uniform within each
+          polygon; polygons containing no point get NaN (with a warning).
+        - Only the per-time-step covariance is available, so the
+          uncertainty of temporal aggregates (e.g. an annual polygon mean)
+          cannot be derived from these outputs.
+        - Cross-variable covariance is dropped (as in `Sigma_y_pred_list`):
+          each response variable is aggregated independently.
+        - With `back_transform=True` the original-scale point predictions
+          (`y_pred_back_list`/`Sigma_y_pred_back_list`, from the delta
+          method) are averaged, i.e. the polygon mean of the original-scale
+          process -- not `g_inv` of the polygon mean on the model scale.
+
+        Parameters
+        ----------
+        polys : list of shapely (Multi)Polygon, GeoSeries, GeoDataFrame, or path
+            The target polygons, or a path to a vector file (e.g. a
+            shapefile) readable by `geopandas.read_file`. Reprojected to the
+            prediction CRS (`crs_pred`) if needed; geometries without a CRS
+            are assumed to already be in it. The attribute columns of a
+            GeoDataFrame/file are carried over to the output.
+        back_transform : bool, default False
+            Aggregate the original-scale predictions instead. Requires
+            `.back_transform(g_invs)` to have been run after `.predict()`.
+        uncertainty : bool, default False
+            Also compute the areal predictive std of each polygon mean
+            (`std_<var>` columns), `sqrt(diag(W Sigma_t W'))`.
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
+            One row per (polygon, timestamp), with columns `poly_id`,
+            `timestamp`, the input polygon attributes, then, per response
+            variable `<var>` in `model.y_name`: `n_points_<var>`
+            (prediction points in the polygon), `<var>` (areal mean), and
+            `std_<var>` (if `uncertainty=True`) -- the last two suffixed
+            `_back` if `back_transform=True` -- and `geometry` last.
+        """
+        import geopandas as geopd
+
+        if self.y_pred_list is None:
+            raise ValueError("to_poly() requires predictions: run `.predict(df)` first.")
+
+        if back_transform:
+            if self.y_pred_back_list is None:
+                raise ValueError(
+                    "to_poly(back_transform=True) requires back-transformed "
+                    "predictions: run `.back_transform(g_invs)` after `.predict(df)`."
+                )
+            y_list, Sigma_list, suffix = self.y_pred_back_list, self.Sigma_y_pred_back_list, "_back"
+        else:
+            y_list, Sigma_list, suffix = self.y_pred_list, self.Sigma_y_pred_list, ""
+
+        if Sigma_list is None:
+            if std:
+                raise ValueError(
+                    "to_poly(std=True) requires the prediction covariance: "
+                    "run `.predict(df, std=True)`."
+                )
+            Sigma_list = [None] * len(y_list)
+
+        y_names = self.model.y_name
+        ts = self.timestamps_pred[0]
+        for name, t in zip(y_names, self.timestamps_pred):
+            if len(t) != len(ts) or not np.array_equal(np.asarray(t), np.asarray(ts)):
+                raise ValueError(
+                    f"to_poly() requires every response variable to share the same "
+                    f"prediction timestamps, but '{name}' differs from '{y_names[0]}'."
+                )
+
+        polygons = self._as_polygon_gdf(polys, self.crs_pred)
+        m, T = len(polygons), len(ts)
+
+        # Long format (row-major over (T, m)), matching to_geo()'s layout
+        rows = np.tile(np.arange(m), T)
+        out = polygons.iloc[rows].reset_index(drop=True)
+        out.insert(0, "poly_id", rows)
+        out.insert(1, "timestamp", np.repeat(ts, m))
+
+        for name, points, y, Sigma in zip(y_names, self.points_pred, y_list, Sigma_list):
+            col = f"{name}{suffix}"
+            W, counts = self._areal_weights(points, polygons)
+            empty = counts == 0
+            if empty.any():
+                warnings.warn(
+                    f"to_poly(): {int(empty.sum())} of {m} polygon(s) contain no "
+                    f"prediction point for '{name}'; their values are set to NaN. "
+                    f"Use a denser prediction grid.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+            y_poly = np.asarray(W @ np.asarray(y), dtype=float)  # (m, T)
+            y_poly[empty, :] = np.nan
+
+            out[f"n_points_{name}"] = np.tile(counts, T)
+            out[col] = y_poly.T.ravel()
+
+            if std:
+                # diag(W Sigma_t W') = rowsum(W * (W Sigma_t)), without
+                # forming the (m, m) cross-polygon covariance
+                Sigma = np.asarray(Sigma)
+                var = np.empty((T, m))
+                for t in range(T):
+                    WS = W @ Sigma[:, :, t]  # (m, n)
+                    var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
+                std = _safe_sqrt_variance(var, context="to_poly")
+                std[:, empty] = np.nan  # after the sqrt: already warned above
+                out[f"std_{col}"] = std.ravel()
+
+        geom = polygons.geometry.name
+        out = out[[c for c in out.columns if c != geom] + [geom]]
+        return geopd.GeoDataFrame(out, geometry=geom, crs=polygons.crs)
+
+    @staticmethod
     def _delta_method(g_inv, mu, Sigma):
         """
         Second-order delta method: back-transform a mean `mu` (shape
@@ -835,14 +1169,39 @@ class LRStateSpaceResults(StateSpaceResults):
 
         return np.asarray(mean_back), np.asarray(Sigma_back)
 
-    def back_transform(self, g_inv):
+    @staticmethod
+    def _direct_transform(g_inv, y):
         """
-        Map `y_hat_list`/`y_pred_list` (and their model-implied covariance)
-        back to the response's original scale, via the second-order delta
-        method (see `_delta_method`), applied per response variable, and
-        store the results as `y_hat_back_list`/`Sigma_y_hat_back_list` and --
-        if `.predict()` has been run -- `y_pred_back_list`/
-        `Sigma_y_pred_back_list`.
+        Apply `g_inv` elementwise to an observed value `y` (shape `(n,
+        T)`), with no delta-method correction -- unlike `_delta_method`,
+        `y` here is a point (an actual observation), not the mean of an
+        estimated distribution, so there is no variance to propagate.
+        """
+        y = jnp.asarray(y)
+        h = jax.vmap(g_inv)(y.ravel()).reshape(y.shape)
+        return np.asarray(h)
+
+    def back_transform(self, g_invs):
+        """
+        Map `y_hat_list`/`y_obs_list`/`y_pred_list` back to the response's
+        original scale, and store the results as `y_hat_back_list`/
+        `Sigma_y_hat_back_list`, `y_obs_back_list`, and -- if `.predict()`
+        has been run -- `y_pred_back_list`/`Sigma_y_pred_back_list`.
+        Also derives `residuals_back_list` (`y_obs_back_list -
+        y_hat_back_list`, elementwise per response variable) once both are
+        available.
+
+        `y_hat_list`/`y_pred_list` are the mean of an estimated
+        distribution (with a model-implied covariance), so they go through
+        the second-order delta method (see `_delta_method`), applied per
+        response variable. `y_obs_list` is instead a point observation, so
+        it is transformed directly (`g_inv(y_obs)`, see `_direct_transform`)
+        -- there is no variance to propagate, and no meaningful way to
+        transform `residuals_list` (`y_obs - y_hat`) directly, since
+        `g_inv` of a residual is not itself a residual on the original
+        scale; `residuals_back_list` is instead built by back-transforming
+        `y_obs`/`y_hat` separately and then differencing, as is standard
+        practice.
 
         This relies on the transformed response being asymptotically
         Normal (the model's own assumption), so the delta method's local,
@@ -877,26 +1236,50 @@ class LRStateSpaceResults(StateSpaceResults):
 
         Parameters
         ----------
-        g_inv : Callable[[float], float]
+        g_invs : Callable[[float], float] or list/tuple of callables
             The inverse of the response transform in the model formula
             (e.g. `jnp.exp` for a `np.log(y)` response), as a scalar ->
-            scalar JAX-traceable function.
+            scalar JAX-traceable function, or a list/tuple of such functions
+            matching the number of response variables.
         """
+
+        # check the len of g_invs and if it matches the number of response variables
+        if isinstance(g_invs, (list, tuple)):
+            if len(g_invs) != len(self.model.y_name):
+                raise ValueError(
+                    f"g_invs must be a single callable or a list/tuple of callables "
+                    f"matching the number of response variables ({len(self.model.y_name)}), "
+                    f"but got {len(g_invs)}."
+                )
+        else:
+            g_invs = [g_invs] * len(self.model.y_name)
+
 
         if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
             y_hat_back_list, Sigma_hat_back_list = [], []
-            for mu_i, Sigma_i in zip(self.y_hat_list, self.Sigma_y_hat_list):
-                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+            for mu_i, Sigma_i, g_i in zip(self.y_hat_list, self.Sigma_y_hat_list, g_invs):
+                m, S = self._delta_method(g_i, mu_i, Sigma_i)
                 y_hat_back_list.append(m)
                 Sigma_hat_back_list.append(S)
 
             self.y_hat_back_list = y_hat_back_list
             self.Sigma_y_hat_back_list = Sigma_hat_back_list
 
-        if self.y_pred_list is not None:
+        if self.y_obs_list is not None:
+            self.y_obs_back_list = [
+                self._direct_transform(g_i, y_i) for g_i, y_i in zip(g_invs, self.y_obs_list)
+            ]
+
+        if self.y_obs_back_list is not None and self.y_hat_back_list is not None:
+            self.residuals_back_list = [
+                y_i - yhat_i
+                for y_i, yhat_i in zip(self.y_obs_back_list, self.y_hat_back_list)
+            ]
+
+        if self.y_pred_list is not None and self.Sigma_y_pred_list is not None:
             y_pred_back_list, Sigma_pred_back_list = [], []
-            for mu_i, Sigma_i in zip(self.y_pred_list, self.Sigma_y_pred_list):
-                m, S = self._delta_method(g_inv, mu_i, Sigma_i)
+            for mu_i, Sigma_i, g_i in zip(self.y_pred_list, self.Sigma_y_pred_list, g_invs):
+                m, S = self._delta_method(g_i, mu_i, Sigma_i)
                 y_pred_back_list.append(m)
                 Sigma_pred_back_list.append(S)
             
@@ -904,6 +1287,44 @@ class LRStateSpaceResults(StateSpaceResults):
             self.Sigma_y_pred_back_list = Sigma_pred_back_list
 
         return self
+
+    
+    def generate_summary_header(self):
+        """
+        Cheap identity/fit rows: the base class's header (see
+        `StateSpaceResults.generate_summary_header`) plus EM iteration
+        count and AIC/BIC -- all pure attribute lookups/cheap arithmetic,
+        none of `generate_summary()`'s residual diagnostics, coverage
+        probability, or (if `.predict()` has run) prediction summary.
+        Used by `__repr__` (inherited from the base class, via
+        `format_info_table`).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, of equal length.
+        """
+        gen_top_left, gen_top_right = super().generate_summary_header()
+
+        # aic/bic raise AttributeError before llf is set (i.e. before
+        # LRStateSpaceModel.fit() has run) -- __repr__ must never raise,
+        # so fall back to "N/A" rather than propagate that.
+        
+        if not hasattr(self, "aic") or not hasattr(self, "bic"):
+            aic_bic = "N/A"
+        else:
+            aic_bic = f"{self.aic:.4g}, {self.bic:.4g}"
+
+        gen_top_left = gen_top_left + [
+            ("EM iterations:", [f"{self.iterations}"]),
+            ("Converged:", [f"{self.convergence}"]),
+        ]
+        gen_top_right = gen_top_right + [
+            ("AIC, BIC:", [aic_bic]),
+            ("", [""]),
+        ]
+
+        return gen_top_left, gen_top_right
 
     def generate_summary(self):
         """
@@ -1013,11 +1434,9 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         name_width = 15
 
-        if self._hessian is not None or self._cov_params is not None:
-            bse_struct = self.bse  # structured ModelParams with bse fields
-        else:
-            # show point estimates with NaN placeholders for bse/t/p/CI.
-            bse_struct = self._nan_bse_params()
+        # structured ModelParams with bse fields; NaN placeholders if
+        # compute_cov_params() hasn't been called yet (see `bse`).
+        bse_struct = self.bse
 
         gen_top_left, gen_top_right = self.generate_summary()
         
