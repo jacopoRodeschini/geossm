@@ -1119,6 +1119,41 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_hat_full, Sigma_y_hat_full, tdelta
 
+    def _set_system_matrices(self, params, basis, pdim, qdim):
+        """
+        Build `H`, `R`, `F`, `Q` from `params` (setting the covariance
+        functions' `rescale` to `params.ks`) and set them, with `x0`,
+        `Sigma0` and `beta`, on the underlying `StateSpaceModel` for the
+        next E-step. Returns the dense `H`.
+        """
+        if params.ks.value is not None:
+            for fcov, ksi in zip(self.cov_function, params.ks.value):
+                fcov.rescale = ksi
+
+        H = self._buildH_dense(params.A.value, basis)  # dense
+        R, F = self._buildRF_dense(params.s2e.value, params.f.value, pdim, qdim)
+
+        # Block-diagonal covariance of the latent factors, from the marginal
+        # precision of each covariance function
+        invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
+        Q = block_diag(
+            *[
+                jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
+                for mt in invQ
+            ]
+        )
+
+        super().set(
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=params.x0.value,
+            Sigma0=params.Sigma0.value,
+            beta=params.beta.value,
+        )
+        return H
+
     @_on_device
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
@@ -1168,6 +1203,14 @@ class LRStateSpaceModel(StateSpaceModel):
             statistics (`nstats`/`llf_path`), in-sample fitted values
             (`y_hat`/`y_hat_list` and their covariances), the smoothed
             states, and the sufficient statistics `S11`/`S10`/`S00`.
+            `params`, `llf`, the states, `S11`/`S10`/`S00` and `y_hat` all
+            refer to the same parameter vector: the last M-step's output,
+            evaluated by a final E-step (or, if that is not an improvement
+            or EM stopped on a decrease/NaN, the best evaluated iterate).
+            The model's system matrices are left at those parameters.
+            `llf_path` is the per-iteration trace; entry ``k`` is the
+            log-likelihood of the E-step of iteration ``k``, so `llf` can
+            exceed `llf_path[-1]`.
         """
 
         # set the global options
@@ -1254,6 +1297,7 @@ class LRStateSpaceModel(StateSpaceModel):
         converged = False  # True only if the tolerance was met
         termination = None  # why EM stopped: tolerance | decrease | invalid | max_iter
         best = None  # snapshot of the highest-llf (params, E-step outputs) so far
+        restored = False  # True if EM stopped by restoring `best`
 
         # Log the initial state before starting the EM iterations
         nstat = self._log_iteration(
@@ -1282,34 +1326,8 @@ class LRStateSpaceModel(StateSpaceModel):
             # Start the timer for the iteration
             tStart_iter = time.time()
 
-            # ---- build parametrised matrices
-            H = self._buildH_dense(est_params.A.value, basis)  # dense
-
-            # R, F = buildRF(est_s2e, est_f, pdim, qdim)
-            R, F = self._buildRF_dense(
-                est_params.s2e.value, est_params.f.value, pdim, qdim)
-
-            # Compute the maginal precision matrix
-            invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
-
-            # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
-            Q = block_diag(
-                *[
-                    jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
-                    for mt in invQ
-                ]
-            )
-
-            # Inizialisate the SSM with the current parameters (we need it for the E step)
-            super().set(
-                H=H,
-                R=R,
-                F=F,
-                Q=Q,
-                x0=est_params.x0.value,
-                Sigma0=est_params.Sigma0.value,
-                beta=est_params.beta.value,
-            )
+            # ---- build parametrised matrices and set them for the E step
+            H = self._set_system_matrices(est_params, basis, pdim, qdim)
 
             # ---- E step
             # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
@@ -1374,6 +1392,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
                     # restore the best estimate and its E-step outputs
                     est_params, H, x_T, P_T, S11, S10, S00, logL_cur = best
+                    restored = True
                     break
 
             # snapshot the current parameters and their E-step outputs if they
@@ -1424,6 +1443,31 @@ class LRStateSpaceModel(StateSpaceModel):
                 )
                 flag = False
 
+        # Make every returned quantity refer to the same parameters. On a
+        # normal stop est_params is the output of the last M-step, which no
+        # E-step has evaluated yet: run a final E-step at it, unless it is not
+        # better than the best evaluated iterate. On a restore, `best` already
+        # holds its E-step outputs. Either way the model's matrices (and the
+        # covariance functions' rescale) are left at the returned parameters.
+        if not restored:
+            self._log("Final E-step at the estimated parameters...")
+            H = self._set_system_matrices(est_params, basis, pdim, qdim)
+            final = self._E_step(y_obs)
+            logL_final = final[6]
+            if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
+                _, x_T, P_T, S11, S10, S00, logL_cur, _ = final
+            else:
+                if not bool(jnp.isfinite(logL_final)):
+                    warnings.warn(
+                        "The log-likelihood at the last M-step's parameters is "
+                        "{}; the best estimate so far is returned.".format(logL_final),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                est_params, H, x_T, P_T, S11, S10, S00, logL_cur = best
+                self._set_system_matrices(est_params, basis, pdim, qdim)
+        else:
+            self._set_system_matrices(est_params, basis, pdim, qdim)
 
         if converged:
             self._log("EM algorithm converged after {} iterations.".format(niter))

@@ -129,25 +129,37 @@ class TestFit:
         np.testing.assert_allclose(np.asarray(model.Sigma0), 5.0 * np.eye(q), rtol=1e-6)
 
     @pytest.mark.parametrize("missing_frac", [0.0, 0.1], ids=["complete", "missing"])
-    def test_first_em_loglik_matches_dense_reference(self, mesh, missing_frac):
-        """llf of the first E-step equals the observed-data likelihood of an
-        independent dense filter run on the same system matrices and the
-        user-fixed prior."""
+    def test_reported_loglik_matches_dense_reference(self, mesh, missing_frac):
+        """Reported llf equals the observed-data likelihood of an independent
+        dense filter run at the returned parameters (whose system matrices
+        the model holds after fit, F08) and the user-fixed prior."""
         gdf = make_panel_gdf(n_sites=N_SITES, n_times=N_TIMES, missing_frac=missing_frac, seed=4)
         model = _build_model(gdf, mesh)
         q = model.shape[1]
         x0, Sigma0 = 0.5 * np.ones(q), 3.0 * np.eye(q)
         params0 = ModelParams(x0=Param("x0", x0, fixed=True), Sigma0=Param("Sigma0", Sigma0, fixed=True))
         res = model.fit(params0=params0, options=_options(max_iter=1))
-        # After one iteration the model holds the system matrices of that E-step.
         f64 = lambda a: np.asarray(a, dtype=np.float64)  # noqa: E731
+        np.testing.assert_array_equal(f64(model.beta), f64(res.params.beta.value))
         prob = SSMProblem(H=f64(model.H), R=f64(model.R), F=f64(model.F), Q=f64(model.Q),
                           x0=x0, Sigma0=Sigma0, Xbeta=f64(model.Xbeta), beta=f64(model.beta),
                           y=f64(model.y_train))
         ref = kalman_filter(prob)
         # llf is a sum over observations, so its float32 rounding error grows
         # with n_obs; a relative tolerance would be meaningless when llf ~ 0.
-        assert float(res.llf_path[1]) == pytest.approx(ref["llf"], abs=1e-5 * ref["n_obs"])
+        assert float(res.llf) == pytest.approx(ref["llf"], abs=1e-5 * ref["n_obs"])
+
+    def test_results_refer_to_the_returned_parameters(self, fitted):
+        # F08: y_hat, the model's matrices and the params are one iterate.
+        model, res = fitted
+        f64 = lambda a: np.asarray(a, dtype=np.float64)  # noqa: E731
+        for name in ("beta", "x0", "Sigma0"):
+            np.testing.assert_array_equal(f64(getattr(model, name)), f64(getattr(res.params, name).value))
+        np.testing.assert_allclose(f64(model.R), np.full(model.shape[0], f64(res.params.s2e.value)[0]), rtol=1e-6)
+        np.testing.assert_allclose([c.rescale for c in model.cov_function], f64(res.params.ks.value), rtol=1e-6)
+        Xb = np.einsum("pbt,b->pt", f64(model.Xbeta), f64(res.params.beta.value))
+        y_hat = Xb + f64(model.H) @ f64(res.x_smoothed)[:, 1:]
+        np.testing.assert_allclose(f64(res.y_hat), y_hat, rtol=1e-5, atol=1e-5)
 
     def test_max_iter_termination_is_recorded(self, fitted):
         _, res = fitted
@@ -165,6 +177,8 @@ class TestStoppingRule:
     Real EM does not decrease on this problem, so the E-step is wrapped to
     return the scripted llf of each iteration; everything else is the real
     fit. ``beta_seen[k]`` is the beta the (k+1)-th E-step was evaluated at.
+    Calls beyond the script (the final E-step after a normal stop, F08)
+    repeat its last value.
     """
 
     TOL = 1e-3
@@ -183,7 +197,7 @@ class TestStoppingRule:
             def fake(y_obs):
                 out = real(y_obs)
                 beta_seen.append(np.asarray(model.beta).copy())
-                return (*out[:6], llfs[len(beta_seen) - 1], out[7])
+                return (*out[:6], llfs[min(len(beta_seen), len(llfs)) - 1], out[7])
             monkeypatch.setattr(model, "_E_step", fake)
             return beta_seen
         return install
@@ -215,6 +229,25 @@ class TestStoppingRule:
         assert (res.termination, res.convergence) == ("tolerance", True)
         assert res.llf == -500.0
         np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
+
+    def test_final_estep_is_reported_when_it_improves(self, model, scripted):
+        # Converges at iteration 3; the 4th E-step evaluates the returned params.
+        beta_seen = scripted([-1e3, -500.0, -499.9, -499.8])
+        res = self._fit(model, max_iter=5)
+        assert (res.termination, res.iterations, res.llf) == ("tolerance", 3, -499.8)
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[3])
+
+    @pytest.mark.parametrize("final", [-499.95, float("nan")], ids=["worse", "nan"])
+    def test_final_estep_falls_back_to_best(self, model, scripted, final):
+        beta_seen = scripted([-1e3, -500.0, -499.9, final])
+        if np.isnan(final):
+            with pytest.warns(RuntimeWarning, match="best estimate so far"):
+                res = self._fit(model, max_iter=5)
+        else:
+            res = self._fit(model, max_iter=5)
+        assert (res.termination, res.convergence, res.llf) == ("tolerance", True, -499.9)
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[2])
+        np.testing.assert_array_equal(np.asarray(model.beta), beta_seen[2])
 
     def test_large_decrease_stops_without_force_iter(self, model, scripted):
         beta_seen = scripted([-1e3, -500.0, -600.0])
@@ -265,7 +298,6 @@ class TestPredict:
         with pytest.raises(ValueError):
             model.predict(later.drop(columns="y"), res, verbose=False)
 
-    @known_bug("F08", "y_hat mixes beta from the last M-step with H from the previous iterate")
     def test_in_sample_prediction_reproduces_fitted_values(self, fitted, gdf):
         model, res = fitted
         y_hat = res.y_hat.copy()
