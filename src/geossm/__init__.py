@@ -26,7 +26,7 @@ try:
         __version__ = "unknown"
 except ImportError:
     # Python < 3.8
-    __version__ = "2.0.0"
+    __version__ = "2.1.0"
 
 # Core utilities
 from .data_preparation import DesignMatrices, DesignMatricesBuilder
