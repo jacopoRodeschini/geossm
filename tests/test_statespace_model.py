@@ -37,14 +37,17 @@ class TestConstruction:
         assert m.dtype == jnp.float32
         assert m.H.dtype == jnp.float32
 
-    @known_bug("F03", "requesting float64 flips the process-global jax_enable_x64 flag")
-    def test_float64_does_not_change_global_x64_flag(self, problem):
-        before = jax.config.jax_enable_x64
-        try:
+    def test_float64_without_x64_raises_and_leaves_flag_unchanged(self, problem):
+        # F03: float64 needs x64 enabled by the user; the package never flips it.
+        jax.config.update("jax_enable_x64", False)
+        with pytest.raises(ValueError, match="jax_enable_x64"):
             _model(problem, dtype=jnp.float64)
-        except ValueError:
-            pass  # rejecting float64 without x64 enabled is an acceptable fix
-        assert jax.config.jax_enable_x64 == before
+        assert jax.config.jax_enable_x64 is False
+
+    @pytest.mark.usefixtures("x64")
+    def test_float64_with_x64_enabled(self, problem):
+        m = _model(problem, dtype=jnp.float64)
+        assert m.dtype == jnp.float64 and m.H.dtype == jnp.float64
 
     @known_bug("F11", "the default Xbeta has shape (p, 1, 1), so filtering T > 1 fails",
                raises=ValueError)

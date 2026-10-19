@@ -5,6 +5,7 @@ One EM fit is shared by the module (about 10 s including JIT compilation).
 
 import types
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -67,6 +68,14 @@ class TestModelConstruction:
                raises=AttributeError)
     def test_empty_model_without_formulas(self, gdf):
         LRStateSpaceModel(gdf, None, None, verbose=False, backend="cpu")
+
+    def test_float64_without_x64_raises(self, gdf):
+        # F03: the constructor must not switch on the process-wide x64 flag.
+        jax.config.update("jax_enable_x64", False)
+        with pytest.raises(ValueError, match="jax_enable_x64"):
+            LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False,
+                              backend="cpu", dtype=jnp.float64)
+        assert jax.config.jax_enable_x64 is False
 
     def test_mismatched_formulas_and_domains_raise(self, gdf):
         with pytest.raises(ValueError, match="must match"):
@@ -160,6 +169,23 @@ class TestFit:
         Xb = np.einsum("pbt,b->pt", f64(model.Xbeta), f64(res.params.beta.value))
         y_hat = Xb + f64(model.H) @ f64(res.x_smoothed)[:, 1:]
         np.testing.assert_allclose(f64(res.y_hat), y_hat, rtol=1e-5, atol=1e-5)
+
+    def test_float32_fit_does_not_depend_on_global_x64(self, gdf, mesh):
+        # F03: with x64 enabled (e.g. by other code in the process), a float32
+        # model must stay float32 and give bit-identical results.
+        out = {}
+        for x64 in (False, True):
+            jax.config.update("jax_enable_x64", x64)
+            model = _build_model(gdf, mesh, dtype=jnp.float32)
+            res = model.fit(options=_options(max_iter=2))
+            arrays = {name: np.asarray(getattr(res.params, name).value)
+                      for name in ("beta", "s2e", "f", "A", "ks", "x0", "Sigma0")}
+            arrays.update(y_hat=np.asarray(res.y_hat), x_smoothed=np.asarray(res.x_smoothed),
+                          llf=np.asarray(res.llf), H=np.asarray(model.H), Q=np.asarray(model.Q))
+            out[x64] = arrays
+        for name, a in out[True].items():
+            assert a.dtype == np.float32, name
+            np.testing.assert_array_equal(a, out[False][name], err_msg=name)
 
     def test_max_iter_termination_is_recorded(self, fitted):
         _, res = fitted

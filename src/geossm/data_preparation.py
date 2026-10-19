@@ -34,16 +34,24 @@ except ImportError:
     JAX_AVAILABLE = False
 
 
-def _ensure_x64_for_dtype(dtype):
-    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
 
-    JAX silently truncates float64 arrays back to 32-bit unless x64 mode is
-    enabled. Mirrors geossm.ssm.statespace._ensure_x64_for_dtype; duplicated
-    here (rather than imported) to avoid a circular import with geossm.ssm
-    during package initialization.
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested for JAX arrays while x64 is off.
+
+    Mirrors geossm.ssm.statespace._check_x64_for_dtype; duplicated here
+    (rather than imported) to avoid a circular import with geossm.ssm during
+    package initialization.
     """
     if JAX_AVAILABLE and np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
 
 
 class _NAPassthrough(NAAction):
@@ -422,9 +430,9 @@ class DesignMatrices:
         Name of the column in the source GeoDataFrame that held the
         timestamps.
     dtype : numpy.dtype, default numpy.float32
-        Numeric precision used for `X`, `y` and `points`. Passing a
-        64-bit dtype (e.g. `numpy.float64`) also enables JAX's x64 mode,
-        since JAX otherwise silently truncates float64 arrays to 32-bit.
+        Numeric precision used for `X`, `y` and `points` (NumPy arrays;
+        `astype` converts to JAX arrays, and for a 64-bit dtype requires
+        JAX's x64 mode to be enabled).
 
     Attributes
     ----------
@@ -494,7 +502,6 @@ class DesignMatrices:
             self.dtype = np.dtype(self.dtype)
         except TypeError:
             raise TypeError(f"Invalid dtype: {self.dtype}")
-        _ensure_x64_for_dtype(self.dtype)
 
         # Cast arrays to dtype
         self.y = np.asarray(self.y, dtype=self.dtype) if self.y is not None else None
@@ -550,9 +557,10 @@ class DesignMatrices:
         ----------
         dtype : numpy.dtype or str
             Target numeric precision (e.g. `numpy.float32`,
-            `numpy.float64`). If it is 64-bit, JAX's x64 mode is enabled
-            (see `dtype` on the class), since JAX otherwise silently
-            truncates float64 arrays to 32-bit.
+            `numpy.float64`). A 64-bit dtype requires JAX's x64 mode to be
+            enabled beforehand (`jax.config.update("jax_enable_x64", True)`),
+            since JAX otherwise silently truncates float64 arrays to 32-bit;
+            a `ValueError` is raised if it is not.
 
         Returns
         -------
@@ -565,7 +573,7 @@ class DesignMatrices:
         if dtype == self.dtype:
             return self
 
-        _ensure_x64_for_dtype(dtype)
+        _check_x64_for_dtype(dtype)
 
         self.dtype = dtype
         self.X = jnp.asarray(self.X, dtype=dtype)
@@ -766,8 +774,7 @@ class DesignMatricesBuilder:
         dtype : numpy.dtype, default numpy.float32
             Numeric precision used when casting `geodf`'s numeric columns
             and when building the resulting `DesignMatrices` (`X`, `y`,
-            `points`). Passing a 64-bit dtype also enables JAX's x64
-            mode, which is otherwise off by default.
+            `points`).
         verbose : bool, default True
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.

@@ -45,16 +45,24 @@ def _itype_for(dtype):
     return jnp.int64 if jnp.dtype(dtype).itemsize == 8 else jnp.int32
 
 
-def _ensure_x64_for_dtype(dtype):
-    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
 
-    JAX silently truncates float64/int64 arrays back to 32-bit unless x64 mode
-    is enabled, so requesting a 64-bit dtype only takes effect if we flip this
-    flag on. Left untouched (and off by default) for 32-bit dtypes so that the
-    default, fast 32-bit path is unaffected.
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
+
+    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
+    enabled. Enabling it is a process-wide setting, so it is left to the user
+    rather than switched on here (finding F03).
     """
     if jnp.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=jnp.dtype(dtype).name))
 
 
 def _highest_matmul_precision(f):
@@ -884,9 +892,10 @@ class StateSpaceModel:
             ``'auto'`` lets JAX pick its default device.
         dtype : numpy/jax dtype, default jax.numpy.float32
             Floating-point precision used for all internal computations.
-            Requesting a 64-bit dtype (e.g. ``jax.numpy.float64``)
-            transparently enables JAX's x64 mode (see
-            `_ensure_x64_for_dtype`).
+            A 64-bit dtype (e.g. ``jax.numpy.float64``) requires JAX's
+            x64 mode to be enabled beforehand
+            (``jax.config.update("jax_enable_x64", True)``); otherwise a
+            `ValueError` is raised (see `_check_x64_for_dtype`).
 
         Raises
         ------
@@ -896,7 +905,7 @@ class StateSpaceModel:
         """
         self.dtype = jnp.dtype(dtype)  # Data type for computations
         self.itype = _itype_for(self.dtype)  # Matching integer dtype for index/block arrays
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
         self._backend = _select_device(backend)  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
@@ -2249,7 +2258,7 @@ class StateSpaceModel:
                 self.dtype = jnp.dtype(jnp.float32)
 
         self.itype = _itype_for(self.dtype)
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
 
         # Restore the backend device. Fall back to 'auto' if the platform
         # requested at pickle time (e.g. 'gpu') isn't available on this

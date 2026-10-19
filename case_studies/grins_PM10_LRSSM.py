@@ -12,6 +12,11 @@ import pandas as pd
 import geopandas as gpd
 import jax
 import jax.numpy as jnp
+
+# The models below use float64, which needs JAX's 64-bit mode enabled before
+# any JAX array is created (geossm does not switch it on itself).
+jax.config.update("jax_enable_x64", True)
+
 import geossm
 from shapely.geometry import Polygon, MultiPolygon
 from shapely import ops

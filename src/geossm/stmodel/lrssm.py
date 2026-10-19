@@ -17,7 +17,7 @@ import jax.numpy as jnp
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
 from geossm.ssm import _filter_kernelJAX
-from geossm.ssm import _itype_for, _ensure_x64_for_dtype
+from geossm.ssm import _itype_for, _check_x64_for_dtype
 from geossm.ssm.statespace import _highest_matmul_precision
 from geossm.covmodel import spdeAppoxCov
 from geossm.covmodel.covmodels import _validate_domain, _domain_hull
@@ -469,7 +469,9 @@ class LRStateSpaceModel(StateSpaceModel):
             pinned to it (see `geossm.utils._on_device`).
         dtype : numpy/jax dtype, default `jnp.float32`
             Floating-point precision used for the design matrices and all
-            model computations.
+            model computations. `jnp.float64` requires JAX's x64 mode to be
+            enabled beforehand (``jax.config.update("jax_enable_x64", True)``);
+            otherwise a `ValueError` is raised.
 
         Raises
         ------
@@ -484,7 +486,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # re-derives the same values from `dtype` further down (harmless).
         self.dtype = jnp.dtype(dtype)
         self.itype = _itype_for(self.dtype)
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
 
         self.df = df.copy()
         self.formulas = formulas
@@ -869,6 +871,7 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Parsing the parameters (ModelParams|None)...")
         
         params = self._parseParams(params)
+        params = self._cast_params(params)
         A = params.A.value
         s2e = params.s2e.value
         f = params.f.value
@@ -915,7 +918,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
         # Compute the maginal precision matrix
-        invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
+        # precision() returns NumPy float64; cast explicitly so the result does
+        # not depend on the global x64 flag (F03).
+        invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
+                for fcov in self.cov_function]
 
         # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
         Q = block_diag(
@@ -1140,7 +1146,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Block-diagonal covariance of the latent factors, from the marginal
         # precision of each covariance function
-        invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
+        # precision() returns NumPy float64; cast explicitly so the result does
+        # not depend on the global x64 flag (F03).
+        invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
+                for fcov in self.cov_function]
         Q = block_diag(
             *[
                 jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
@@ -1614,7 +1623,7 @@ class LRStateSpaceModel(StateSpaceModel):
         ldim = block_q[1:] - block_q[:-1]  # latent dimensions
 
         # Update f (Eq 3a)
-        est_f = jnp.zeros((nlat))
+        est_f = jnp.zeros((nlat), dtype=self.dtype)
         tStart = time.time()
         for q in range(nlat):
             s = slice(block_q[q], block_q[q + 1])
@@ -1734,7 +1743,9 @@ class LRStateSpaceModel(StateSpaceModel):
             [tdelta_beta, tdelta_s2e, tdelta_f, tdelta_ks, tdelta_A], dtype=jnp.float32
         )
 
-        est_ks = jnp.exp(opt.x)
+        # opt.x is NumPy float64: cast before exp, so that the result does not
+        # depend on the global x64 flag (F03)
+        est_ks = jnp.exp(jnp.asarray(opt.x, dtype=self.dtype))
         # print("est_ks", est_ks)
 
         # Note that the Cov. function is updated in place with the new rescale parameter (i.e. the range parameter of the Matern covariance function)
@@ -1825,8 +1836,9 @@ class LRStateSpaceModel(StateSpaceModel):
             for ki, C, G, perm, n_inner in zip(ks, mass_list, stiff_list, perm_list, n_inner_list):
                 Ci = jnp.diag(1.0 / C.diagonal())
                 K = ki**2 * C + G
-                sigma2k = (jax.scipy.special.gamma(1.0) /
-                           (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
+                # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
+                sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
+                           (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
                 Qi = sigma2k * (K @ Ci @ K)
 
                 Qperm = Qi[perm][:, perm]
@@ -1945,8 +1957,9 @@ class LRStateSpaceModel(StateSpaceModel):
             
             Ci      = jnp.diag(1.0 / C.diagonal())
             K       = ki**2 * C + G
-            sigma2k = (jax.scipy.special.gamma(1.0) /
-                    (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
+            # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
+            sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
+                    (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
             Qi = sigma2k * (K @ Ci @ K)
 
             # usa indici interi (non boolean) per compatibilità JAX
@@ -1992,8 +2005,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
         box = [cv.fem_solver.box for cv in self.cov_function]
+        # The box is NumPy float64: cast the extents to the model dtype first
+        # (as JAX did implicitly with x64 off), so that the result does not
+        # depend on the global x64 flag (F03)
+        dt = self.dtype
         est_ks = [
-            jnp.sqrt(8.0) / (jnp.minimum(jnp.abs(bx[2] - bx[0]), jnp.abs(bx[3] - bx[1])) / 3.0)
+            jnp.sqrt(jnp.asarray(8.0, dtype=dt))
+            / (jnp.minimum(jnp.abs(jnp.asarray(bx[2] - bx[0], dtype=dt)),
+                           jnp.abs(jnp.asarray(bx[3] - bx[1], dtype=dt))) / 3.0)
             for bx in box
         ]
 
@@ -2062,7 +2081,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 value=jnp.asarray(new_param.value),
             )
 
-        new_params = ModelParams(**updated_fields)
+        new_params = self._cast_params(ModelParams(**updated_fields))
 
         # Special handling for ks update covariance scaling
         if not new_params.ks.fixed and new_params.ks.value is not None:
@@ -2096,7 +2115,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 value=jnp.asarray(new_param.value),
             )
 
-        new_params = ModelParams(**updated_fields)
+        new_params = self._cast_params(ModelParams(**updated_fields))
 
         # Special handling for ks update covariance scaling
         if not new_params.ks.fixed and new_params.ks.value is not None:
@@ -2104,6 +2123,21 @@ class LRStateSpaceModel(StateSpaceModel):
                 fcov.rescale = ksi
 
         return new_params
+
+    def _cast_params(self, params: ModelParams) -> ModelParams:
+        """
+        Return `params` with every value in the model dtype. User-supplied
+        values (`Param` converts them with JAX's default dtype) and
+        intermediate results would otherwise follow the global x64 flag
+        (F03).
+        """
+        fields = {}
+        for name in params.__dataclass_fields__:
+            p = getattr(params, name)
+            if p is not None and p.value is not None:
+                p = replace(p, value=jnp.asarray(p.value, dtype=self.dtype))
+            fields[name] = p
+        return ModelParams(**fields)
 
     # dense matrix
     def _buildBasis_list(self, points, hmesh):
