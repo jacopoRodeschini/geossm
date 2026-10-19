@@ -391,7 +391,12 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
         logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
-        logdetSigmaE = logdet_M + logdet_Ppred + jnp.sum(jnp.log(R_diag))
+        # With the missing rows of H zeroed, the innovation covariance is
+        # block-diagonal (observed block, diag(R) of the missing rows), so the
+        # determinant lemma above gives log|S_obs| + sum_missing log R_ii.
+        # Only the observed rows belong to the observed-data likelihood.
+        logdet_R_obs = jnp.sum(jnp.where(nan_mask, 0.0, jnp.log(R_diag)))
+        logdetSigmaE = logdet_M + logdet_Ppred + logdet_R_obs
 
         # e.T @ invSigmaE @ e, expanded the same way as K above so this is
         # O(p*q) instead of O(p^2) via an explicit invSigmaE.

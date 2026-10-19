@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tests._known_bugs import known_bug
 from tests._reference import kalman_filter, rts_smoother, sufficient_statistics
 from geossm.ssm.statespace import (
     _compute_expected_values_kernelJAX,
@@ -75,12 +74,10 @@ class TestFilterAgainstReference:
         np.testing.assert_allclose(f["x_filt"][:, t + 1], f["x_pred"][:, t + 1], atol=1e-10)
         np.testing.assert_allclose(f["P_filt"][:, :, t + 1], f["P_pred"][:, :, t + 1], atol=1e-10)
 
-    @known_bug("F02", "log-likelihood adds -1/2 sum_missing log R_ii")
     def test_loglik_with_missing_is_observed_data_likelihood(self, problem_missing):
         f, ref = _filter(problem_missing), kalman_filter(problem_missing)
         np.testing.assert_allclose(float(f["llf"]), ref["llf_no_const"], atol=ATOL64)
 
-    @known_bug("F02", "llf depends on R of never-observed sites")
     def test_loglik_with_missing_does_not_depend_on_R_of_missing_entries(self, problem):
         # Observed-data likelihood must be invariant to the noise variance of a
         # site that is never observed. Pins F02 without any reference code.
@@ -143,12 +140,10 @@ def test_sufficient_statistics_match_reference(problem):
 
 
 def test_float32_kernel_close_to_float64_reference(problem_missing):
-    """float32 on CPU: states within 1e-3 abs of the float64 reference.
-
-    The llf is not compared here: with missing data it carries the F02 term.
-    """
+    """float32 on CPU: states within 1e-3 abs, llf within 1e-4 rel of the float64 reference."""
     f = _filter(problem_missing, dtype=jnp.float32)
     assert f["x_filt"].dtype == jnp.float32
     ref = kalman_filter(problem_missing)
     np.testing.assert_allclose(np.asarray(f["x_filt"])[:, 1:], ref["x_filt"][:, 1:], atol=1e-3)
     np.testing.assert_allclose(np.asarray(f["P_filt"])[..., 1:], ref["P_filt"][..., 1:], atol=1e-3)
+    assert float(f["llf"]) == pytest.approx(ref["llf_no_const"], rel=1e-4)

@@ -123,11 +123,12 @@ class TestFit:
         np.testing.assert_allclose(np.asarray(model.x0), np.ones(q), rtol=1e-6)
         np.testing.assert_allclose(np.asarray(model.Sigma0), 5.0 * np.eye(q), rtol=1e-6)
 
-    def test_first_em_loglik_matches_dense_reference(self, mesh):
+    @pytest.mark.parametrize("missing_frac", [0.0, 0.1], ids=["complete", "missing"])
+    def test_first_em_loglik_matches_dense_reference(self, mesh, missing_frac):
         """llf of the first E-step equals the observed-data likelihood of an
         independent dense filter run on the same system matrices and the
-        user-fixed prior (complete data, so F02 does not enter)."""
-        gdf = make_panel_gdf(n_sites=N_SITES, n_times=N_TIMES, missing_frac=0.0, seed=4)
+        user-fixed prior."""
+        gdf = make_panel_gdf(n_sites=N_SITES, n_times=N_TIMES, missing_frac=missing_frac, seed=4)
         model = _build_model(gdf, mesh)
         q = model.shape[1]
         x0, Sigma0 = 0.5 * np.ones(q), 3.0 * np.eye(q)
@@ -138,8 +139,10 @@ class TestFit:
         prob = SSMProblem(H=f64(model.H), R=f64(model.R), F=f64(model.F), Q=f64(model.Q),
                           x0=x0, Sigma0=Sigma0, Xbeta=f64(model.Xbeta), beta=f64(model.beta),
                           y=f64(model.y_train))
-        ref = kalman_filter(prob)["llf_no_const"]
-        assert float(res.llf_path[1]) == pytest.approx(ref, rel=1e-4)
+        ref = kalman_filter(prob)
+        # llf is a sum over observations, so its float32 rounding error grows
+        # with n_obs; a relative tolerance would be meaningless when llf ~ 0.
+        assert float(res.llf_path[1]) == pytest.approx(ref["llf_no_const"], abs=1e-5 * ref["n_obs"])
 
     def test_summary_renders(self, fitted):
         _, res = fitted
