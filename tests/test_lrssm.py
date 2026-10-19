@@ -1,0 +1,197 @@
+"""End-to-end `LRStateSpaceModel` workflow on a small synthetic dataset (CPU).
+
+One EM fit is shared by the module (about 10 s including JIT compilation).
+"""
+
+import types
+
+import jax.numpy as jnp
+import numpy as np
+import pytest
+from shapely.geometry import Polygon
+
+from geossm.covmodel import spdeAppoxCov
+from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
+from tests._known_bugs import known_bug
+from tests._synthetic import DOMAIN, make_panel_gdf, make_square_mesh
+
+N_SITES, N_TIMES, MAX_ITER = 25, 40, 5
+
+# Fits deliberately stop at max_iter (tol_relat=1e-12) to keep runtime fixed.
+pytestmark = pytest.mark.filterwarnings("ignore:The EM algorithm reached max_iter:RuntimeWarning")
+
+
+def _build_model(gdf, mesh, dtype=jnp.float32):
+    model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False,
+                              backend="cpu", dtype=dtype)
+    cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+    return model.setup([cov])
+
+
+def _options(**kw):
+    kw = {"max_iter": MAX_ITER, "tol_relat": 1e-12, "verbose": False, **kw}
+    return FitOptions(**kw)
+
+
+@pytest.fixture(scope="module")
+def gdf():
+    return make_panel_gdf(n_sites=N_SITES, n_times=N_TIMES, missing_frac=0.1, seed=0)
+
+
+@pytest.fixture(scope="module")
+def mesh():
+    return make_square_mesh()
+
+
+@pytest.fixture(scope="module")
+def fitted(gdf, mesh):
+    model = _build_model(gdf, mesh)
+    return model, model.fit(options=_options())
+
+
+class TestModelConstruction:
+    def test_dimensions(self, fitted):
+        model, _ = fitted
+        p, q, T = model.shape
+        assert (p, T) == (N_SITES, N_TIMES)
+        assert q == int(model.cov_function[0].fem_solver.n_inner_points)
+        assert model.Xbeta.shape == (p, 2, T)
+
+    @known_bug("F11", "formulas=None (documented 'empty model') raises AttributeError",
+               raises=AttributeError)
+    def test_empty_model_without_formulas(self, gdf):
+        LRStateSpaceModel(gdf, None, None, verbose=False, backend="cpu")
+
+    def test_mismatched_formulas_and_domains_raise(self, gdf):
+        with pytest.raises(ValueError, match="must match"):
+            LRStateSpaceModel(gdf, ["y ~ 1"], domain=[DOMAIN, DOMAIN], verbose=False, backend="cpu")
+
+
+class TestFit:
+    def test_result_contract(self, fitted):
+        model, res = fitted
+        p, q, T = model.shape
+        assert isinstance(res, LRStateSpaceResults)
+        assert res.y_hat.shape == (p, T)
+        assert res.Sigma_y_hat.shape == (p, p, T)
+        assert res.x_smoothed.shape == (q, T + 1)
+        assert res.P_smoothed.shape == (q, q, T + 1)
+        assert res.iterations == MAX_ITER and res.convergence is False
+        assert len(res.llf_path) == MAX_ITER + 1  # initial entry + one per iteration
+        assert [len(v) for v in res.y_hat_list] == [p]
+
+    def test_parameter_shapes_and_domains(self, fitted):
+        _, res = fitted
+        prm = res.params
+        assert prm.beta.value.shape == (2,)
+        assert prm.A.value.shape == (1, 1)
+        assert float(prm.s2e.value[0]) > 0
+        assert 0 < float(prm.f.value[0]) < 1
+        assert float(prm.ks.value[0]) > 0
+
+    def test_recovers_regression_slope(self, fitted):
+        # Data were simulated with slope 0.5 on x.
+        _, res = fitted
+        assert float(res.params.beta.value[1]) == pytest.approx(0.5, abs=0.05)
+
+    def test_loglikelihood_increases(self, fitted):
+        _, res = fitted
+        llf = np.asarray(res.llf_path[1:], dtype=float)
+        assert np.all(np.isfinite(llf))
+        assert np.all(np.diff(llf) > 0)
+
+    def test_refit_is_deterministic(self, fitted):
+        model, res = fitted
+        again = model.fit(options=_options())
+        assert again.llf == res.llf
+        for k in ("beta", "s2e", "f", "A", "ks"):
+            np.testing.assert_array_equal(np.asarray(getattr(again.params, k).value),
+                                          np.asarray(getattr(res.params, k).value))
+
+    def test_fixed_parameter_is_held(self, gdf, mesh):
+        model = _build_model(gdf, mesh)
+        res = model.fit(params0=ModelParams(f=Param("f", [0.5], fixed=True)), options=_options(max_iter=2))
+        np.testing.assert_allclose(np.asarray(res.params.f.value), [0.5])
+
+    @known_bug("F01", "the E-step resets x0/Sigma0 to 0/I, ignoring fixed (or estimated) values")
+    def test_fixed_initial_state_reaches_the_filter(self, gdf, mesh):
+        model = _build_model(gdf, mesh)
+        q = model.shape[1]
+        params0 = ModelParams(x0=Param("x0", np.ones(q), fixed=True),
+                              Sigma0=Param("Sigma0", 5.0 * np.eye(q), fixed=True))
+        model.fit(params0=params0, options=_options(max_iter=2))
+        np.testing.assert_allclose(np.asarray(model.x0), np.ones(q), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(model.Sigma0), 5.0 * np.eye(q), rtol=1e-6)
+
+    def test_summary_renders(self, fitted):
+        _, res = fitted
+        text = str(res.summary())
+        assert "LR State Space Model Results" in text
+
+
+class TestPredict:
+    def test_predict_on_time_window(self, fitted, gdf):
+        model, res = fitted
+        times = np.sort(gdf["Time"].unique())
+        sub = gdf[gdf["Time"] <= times[9]].drop(columns="y")
+        out = model.predict(sub, res, verbose=False)
+        assert out is res  # predict() stores into and returns the passed results (F27)
+        assert res.y_pred.shape == (N_SITES, 10)
+        assert res.Sigma_y_pred.shape == (N_SITES, N_SITES, 10)
+        assert np.all(np.diagonal(res.Sigma_y_pred, axis1=0, axis2=1) >= -1e-6)
+
+    def test_predict_at_new_locations(self, fitted, mesh):
+        model, res = fitted
+        xy = np.array([[2.0, 2.0], [5.0, 5.0], [8.0, 3.0]])
+        new = make_panel_gdf(n_sites=3, n_times=N_TIMES, missing_frac=0.0, seed=3, xy=xy)
+        model.predict(new.drop(columns="y"), res, verbose=False, std=False)
+        assert res.y_pred.shape == (3, N_TIMES)
+        assert res.Sigma_y_pred is None
+        assert np.all(np.isfinite(res.y_pred))
+
+    def test_predict_outside_training_period_raises(self, fitted, gdf):
+        model, res = fitted
+        later = gdf.copy()
+        later["Time"] = later["Time"] + np.timedelta64(365, "D")
+        with pytest.raises(ValueError):
+            model.predict(later.drop(columns="y"), res, verbose=False)
+
+    @known_bug("F08", "y_hat mixes beta from the last M-step with H from the previous iterate")
+    def test_in_sample_prediction_reproduces_fitted_values(self, fitted, gdf):
+        model, res = fitted
+        y_hat = res.y_hat.copy()
+        model.predict(gdf.drop(columns="y"), res, verbose=False, std=False)
+        np.testing.assert_allclose(res.y_pred, y_hat, rtol=1e-5, atol=1e-5)
+
+
+class TestResultsMethods:
+    def test_intervals_and_coverage(self, fitted):
+        _, res = fitted
+        lo, hi = res.conf_int_y(alpha=0.05, prediction=True)
+        assert lo.shape == hi.shape == res.y_hat.shape
+        assert np.all(lo <= hi)
+        cov = res.coverage_probability(alpha=0.05)
+        assert 0.0 <= cov <= 1.0
+
+    def test_back_transform_identity(self, fitted):
+        _, res = fitted
+        res.back_transform(lambda v: v)
+        np.testing.assert_allclose(res.y_hat_back_list[0], res.y_hat_list[0], rtol=1e-6)
+
+
+@known_bug("F10", "to_poly(std=True) reuses the name `std` for an array inside its loop",
+           raises=ValueError)
+def test_to_poly_std_with_two_responses():
+    # Stubbed results object: the defect is in to_poly's own loop, so no fit is needed.
+    res = object.__new__(LRStateSpaceResults)
+    n, T = 4, 3
+    pts = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]])
+    ts = np.array(["2020-01-01", "2020-01-02", "2020-01-03"], dtype="datetime64[D]")
+    res.y_pred = np.ones((2 * n, T))
+    res.Sigma_y_pred = np.tile(np.eye(2 * n)[:, :, None], (1, 1, T))
+    res.block_p_pred = np.array([0, n, 2 * n])
+    res.points_pred, res.timestamps_pred = [pts, pts], [ts, ts]
+    res.crs_pred, res.y_pred_back_list = "EPSG:3857", None
+    res.model = types.SimpleNamespace(y_name=["a", "b"])
+    out = res.to_poly([Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], std=True)
+    np.testing.assert_allclose(out["std_a"], 0.5)  # sqrt(1/4 * 4 * 1/4) for 4 iid unit points

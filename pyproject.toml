@@ -94,6 +94,10 @@ exclude = ["old*", "tests*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
+filterwarnings = [
+  # emitted by the MFEM SWIG bindings at import time; not actionable here
+  "ignore:builtin type .* has no __module__ attribute:DeprecationWarning",
+]
 
 
 [tool.black]
