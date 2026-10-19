@@ -1182,7 +1182,7 @@ class LRStateSpaceModel(StateSpaceModel):
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
         force_iter = options.force_iter if options is not None else False
-        std = options.std if options is not None else True
+        std = options.std if options is not None else False
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle

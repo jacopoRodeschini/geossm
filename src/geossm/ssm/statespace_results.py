@@ -84,7 +84,7 @@ class StateSpaceResults:
     Sigma_y_hat : numpy.ndarray, shape (p, p, T) or None
         State-driven predictive covariance of ``y_hat`` (excludes
         observation noise ``R``); see
-        `geossm.ssm.statespace._compute_predict_kernel_JAX`.
+        `geossm.ssm.statespace._compute_predict_sigma_kernel_JAX`.
     x_filtered, P_filtered : numpy.ndarray or None
         Filtered state means/covariances (``None`` when unavailable, e.g.
         after ``smoother(..., light=True)``).

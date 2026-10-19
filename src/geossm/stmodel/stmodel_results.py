@@ -664,7 +664,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
-    def predict(self, df, verbose=True):
+    def predict(self, df, verbose=True, std=True):
         """
         Compute out-of-sample predictions based on smoothed states and model
         parameters. `self.model.predict` stores them directly on this
@@ -682,13 +682,16 @@ class LRStateSpaceResults(StateSpaceResults):
             `LRStateSpaceModel.predict` for the exact requirements.
         verbose : bool, default True
             Verbosity for the underlying grid/design-matrix construction.
+        std : bool, default True
+            If `False`, skip the predictive covariance `Sigma_y_pred` (left
+            as `None`) -- useful when it does not fit in device memory.
 
         Returns
         -------
         LRStateSpaceResults
             `self`, with the prediction attributes populated.
         """
-        return self.model.predict(df, modelresults=self, verbose=verbose)
+        return self.model.predict(df, modelresults=self, verbose=verbose, std=std)
 
     # ---- Per-variable ("_list") views -----------------------------------
     #
@@ -716,8 +719,7 @@ class LRStateSpaceResults(StateSpaceResults):
         `block_p`."""
         if self.y_hat is None or self.block_p is None:
             return None
-        y_list, _ = split_by_block(self.y_hat, self.block_p, self.Sigma_y_hat)
-        return y_list
+        return split_by_block(self.y_hat, self.block_p)
 
     @property
     def Sigma_y_hat_list(self):
@@ -756,8 +758,7 @@ class LRStateSpaceResults(StateSpaceResults):
         per response variable than the training grid."""
         if self.y_pred is None or self.block_p_pred is None:
             return None
-        y_list, _ = split_by_block(self.y_pred, self.block_p_pred, self.Sigma_y_pred)
-        return y_list
+        return split_by_block(self.y_pred, self.block_p_pred)
 
     @property
     def Sigma_y_pred_list(self):
@@ -778,8 +779,9 @@ class LRStateSpaceResults(StateSpaceResults):
         y_all = np.concatenate([np.asarray(y).ravel() for y in self.y_pred_list])
         n_points = sum(np.asarray(p).shape[0] for p in self.points_pred)
 
+        # Sigma_y_pred is None when predict() ran with std=False
         std_all = []
-        for sigma in self.Sigma_y_pred_list:
+        for sigma in self.Sigma_y_pred_list or []:
             sigma = np.asarray(sigma)
             var = np.diagonal(sigma, axis1=0, axis2=1)  # (T, n_i)
             std_all.append(_safe_sqrt_variance(var, context="_pred_summary_stats").ravel())
@@ -792,7 +794,7 @@ class LRStateSpaceResults(StateSpaceResults):
             "y_min": np.nanmin(y_all),
             "y_median": np.nanmedian(y_all),
             "y_max": np.nanmax(y_all),
-            "y_mean_std": np.nanmean(std_all),
+            "y_mean_std": np.nanmean(std_all) if not np.all(np.isnan(std_all)) else np.nan,
         }
 
     @staticmethod
@@ -833,12 +835,16 @@ class LRStateSpaceResults(StateSpaceResults):
         }
 
         def add_columns(names, ys, sigmas, col_prefix):
+            # sigmas is None when predict()/fit() ran with std=False: no std columns
+            if sigmas is None:
+                sigmas = [None] * len(names)
             for name, y, sigma in zip(names, ys, sigmas):
                 y = np.asarray(y)
-                var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
-                std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
                 data[f"y_{col_prefix}_{name}"] = y.T.ravel()  # (T, n) row-major: matches geoms below
-                data[f"std_{col_prefix}_{name}"] = std.ravel()
+                if sigma is not None:
+                    var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
+                    std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
+                    data[f"std_{col_prefix}_{name}"] = std.ravel()
 
         add_columns(y_names, y_list, Sigma_list, prefix)
         if y_back_list is not None:
@@ -969,7 +975,7 @@ class LRStateSpaceResults(StateSpaceResults):
         )
         return W, counts
 
-    def to_poly(self, polys, back_transform=False, uncertainty=False):
+    def to_poly(self, polys, back_transform=False, std=False):
         """
         Change of support: aggregate the point predictions of `.predict()`
         to areal (polygon) predictions, approximating the block mean
@@ -1063,6 +1069,14 @@ class LRStateSpaceResults(StateSpaceResults):
         else:
             y_list, Sigma_list, suffix = self.y_pred_list, self.Sigma_y_pred_list, ""
 
+        if Sigma_list is None:
+            if std:
+                raise ValueError(
+                    "to_poly(std=True) requires the prediction covariance: "
+                    "run `.predict(df, std=True)`."
+                )
+            Sigma_list = [None] * len(y_list)
+
         y_names = self.model.y_name
         ts = self.timestamps_pred[0]
         for name, t in zip(y_names, self.timestamps_pred):
@@ -1100,7 +1114,7 @@ class LRStateSpaceResults(StateSpaceResults):
             out[f"n_points_{name}"] = np.tile(counts, T)
             out[col] = y_poly.T.ravel()
 
-            if uncertainty:
+            if std:
                 # diag(W Sigma_t W') = rowsum(W * (W Sigma_t)), without
                 # forming the (m, m) cross-polygon covariance
                 Sigma = np.asarray(Sigma)
@@ -1262,7 +1276,7 @@ class LRStateSpaceResults(StateSpaceResults):
                 for y_i, yhat_i in zip(self.y_obs_back_list, self.y_hat_back_list)
             ]
 
-        if self.y_pred_list is not None:
+        if self.y_pred_list is not None and self.Sigma_y_pred_list is not None:
             y_pred_back_list, Sigma_pred_back_list = [], []
             for mu_i, Sigma_i, g_i in zip(self.y_pred_list, self.Sigma_y_pred_list, g_invs):
                 m, S = self._delta_method(g_i, mu_i, Sigma_i)
