@@ -211,6 +211,14 @@ def _extract_formula_metadata(termlist):
     return names, transformations, columns
 
 
+def _to_naive_utc(t) -> pd.Timestamp:
+    """Parse `t` to a tz-naive UTC `pd.Timestamp` (naive input is assumed UTC)."""
+    t = pd.Timestamp(t)
+    if t.tzinfo is not None:
+        t = t.tz_convert("UTC").tz_localize(None)
+    return t
+
+
 def check_regular_timestamps(timestamps):
     """
     Check whether a collection of timestamps is regularly spaced.
@@ -695,7 +703,7 @@ class DesignMatrices:
         return (
             f"DesignMatrices("
             f"N={self.N}, b={self.b}, T={self.T}, "
-            f"dtype={self.dtype}')"
+            f"dtype={self.dtype})"
         )
 
 
@@ -935,7 +943,7 @@ class DesignMatricesBuilder:
         del self.geodf
         return self.design_matrices
 
-    def build_predict(self, df: geopd.GeoDataFrame, verbose=None, domain=None) -> "DesignMatrices":
+    def build_predict(self, df: geopd.GeoDataFrame, verbose=None, domain=None, include_response=False) -> "DesignMatrices":
         """
         Build the design matrix for new (prediction) locations/times, reusing
         this builder's fitted `X_design_info` so stateful transforms (e.g.
@@ -944,9 +952,10 @@ class DesignMatricesBuilder:
 
         `df` is validated the same way as the training GeoDataFrame (spatial
         checks, time column detection, regular-spacing check, formula-column
-        existence -- but no response column is required), and is additionally
-        checked for consistency with the training data's CRS and time step,
-        and clipped to the training data's observed time range.
+        existence -- but no response column is required unless
+        `include_response=True`), and is additionally checked for
+        consistency with the training data's CRS and time step, and clipped
+        to the training data's observed time range.
 
         Parameters
         ----------
@@ -954,7 +963,7 @@ class DesignMatricesBuilder:
             New (prediction) spatio-temporal dataset, in the same format,
             CRS and time step as the GeoDataFrame `build` was trained on.
             It only needs to supply the covariate columns referenced by
-            `formula`, not the response.
+            `formula` (plus the response column if `include_response=True`).
         verbose : bool, optional
             Temporarily override `self.verbose` for this call only. If
             `None` (default), `self.verbose` (set in `__init__`) is used.
@@ -966,12 +975,21 @@ class DesignMatricesBuilder:
             axis of the returned `DesignMatrices`. Points outside `domain`
             are *not* dropped, only flagged -- filtering is left to the
             caller. `self.mask` is left `None` when `domain` is not given.
+        include_response : bool, default False
+            If `True`, also evaluate the response (left-hand side of
+            `formula`) on `df`, reusing the training `y_design_info` the
+            same way `X` reuses `X_design_info` -- e.g. to compare a
+            held-out set's actual values against a model's predictions.
+            `df` must then contain the response column. If the formula has
+            no left-hand side, this is a no-op (`y` stays `None`).
 
         Returns
         -------
         DesignMatrices
-            Covariate-only design matrices (``y`` is `None`) for `df`,
-            built with the training `X_design_info`.
+            Design matrices for `df`, built with the training
+            `X_design_info` (and `y_design_info` if `include_response=True`).
+            `y` is `None` unless `include_response=True` and `formula` has a
+            response.
 
         Raises
         ------
@@ -992,7 +1010,7 @@ class DesignMatricesBuilder:
             train_tmin = self.design_matrices.timestamps.min()
             train_tmax = self.design_matrices.timestamps.max()
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
-                self._prepare_geodf(df, train_tmin, train_tmax, prediction=True)
+                self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response)
             )
             self._check_consistent_with_training(crs, delta, unit)
             self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
@@ -1001,6 +1019,7 @@ class DesignMatricesBuilder:
 
             predict_design_matrices = self._compute_predict_design_matrix(
                 geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
+                include_response=include_response,
             )
             self._check_domain(predict_design_matrices, domain)
             self._log("Prediction design matrices built successfully")
@@ -1163,17 +1182,27 @@ class DesignMatricesBuilder:
         return datetime_cols[0]
 
     def _coerce_time_column(self, geodf, time_col_name) -> None:
-        """Convert `geodf[time_col_name]` to datetime64 in place, if not already."""
-        if pd.api.types.is_datetime64_any_dtype(geodf[time_col_name]):
-            return
+        """
+        Convert `geodf[time_col_name]` to tz-naive UTC datetime64 in place.
 
-        self._log(f"Converting time column '{time_col_name}' to datetime")
-        geodf[time_col_name] = pd.to_datetime(geodf[time_col_name], errors="coerce")
-        if geodf[time_col_name].isna().any():
-            raise ValueError(
-                f"Time column '{time_col_name}' contains values that could not be "
-                "converted to datetime"
-            )
+        tz-aware columns are converted to UTC and their tz dropped; naive
+        columns are assumed to already be UTC. Keeping time tz-naive
+        internally lets training and prediction data be compared regardless
+        of how each was parsed, and keeps `timestamps` a plain datetime64
+        array (numpy has no tz-aware dtype).
+        """
+        if not pd.api.types.is_datetime64_any_dtype(geodf[time_col_name]):
+            self._log(f"Converting time column '{time_col_name}' to datetime")
+            geodf[time_col_name] = pd.to_datetime(geodf[time_col_name], errors="coerce")
+            if geodf[time_col_name].isna().any():
+                raise ValueError(
+                    f"Time column '{time_col_name}' contains values that could not be "
+                    "converted to datetime"
+                )
+
+        if geodf[time_col_name].dt.tz is not None:
+            self._log(f"Converting time column '{time_col_name}' to tz-naive UTC")
+            geodf[time_col_name] = geodf[time_col_name].dt.tz_convert("UTC").dt.tz_localize(None)
 
     def _check_formula_columns_exist(self, geodf, prediction=False) -> None:
         """Raise ValueError if a column referenced by `formula` is missing from `geodf`."""
@@ -1187,7 +1216,7 @@ class DesignMatricesBuilder:
             columns.update(entry.split(":"))
         columns.discard("Intercept")
 
-        missing = sorted(columns - set(geodf.columns))
+        missing = sorted(columns - set(geodf.columns)) 
         if missing:
             raise ValueError(
                 f"Formula references column(s) not found in the dataset: {', '.join(missing)}"
@@ -1217,11 +1246,13 @@ class DesignMatricesBuilder:
         """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound optional)."""
         self._log("Filtering dataset by time range")
         if tmin is not None:
-            geodf = geodf[geodf[time_col_name] >= pd.to_datetime(tmin)]
-            self._log(f"Filtered dataset to tmin={pd.to_datetime(tmin).strftime('%Y-%m-%d')}")
+            tmin = _to_naive_utc(tmin)
+            geodf = geodf[geodf[time_col_name] >= tmin]
+            self._log(f"Filtered dataset to tmin={tmin.strftime('%Y-%m-%d')}")
         if tmax is not None:
-            geodf = geodf[geodf[time_col_name] <= pd.to_datetime(tmax)]
-            self._log(f"Filtered dataset to tmax={pd.to_datetime(tmax).strftime('%Y-%m-%d')}")
+            tmax = _to_naive_utc(tmax)
+            geodf = geodf[geodf[time_col_name] <= tmax]
+            self._log(f"Filtered dataset to tmax={tmax.strftime('%Y-%m-%d')}")
 
         if geodf.empty:
             raise ValueError(f"No rows remain after filtering to tmin={tmin}, tmax={tmax}")
@@ -1342,14 +1373,18 @@ class DesignMatricesBuilder:
 
     def _compute_predict_design_matrix(
         self, geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit,
+        include_response=False,
     ) -> DesignMatrices:
         """
         Counterpart to `_build_geodataframe`/`_compute_design_matrix` for new
-        (prediction) data: never evaluates a response, and always reuses
-        this builder's fitted `X_design_info` (via `build_design_matrices`)
-        instead of re-parsing the formula, so stateful transforms (e.g.
-        `standardize(...)`) are evaluated with the training mean/std rather
-        than being recomputed on `geodf`.
+        (prediction) data: always reuses this builder's fitted
+        `X_design_info` (via `build_design_matrices`) instead of re-parsing
+        the formula, so stateful transforms (e.g. `standardize(...)`) are
+        evaluated with the training mean/std rather than being recomputed on
+        `geodf`. Only evaluates the response (the same way, reusing
+        `y_design_info`) when `include_response=True` and `formula` has one
+        -- otherwise `y` stays `None`, as for a true out-of-sample `df`
+        that has no response column at all.
         """
         self._log("Computing prediction design matrix from GeoDataFrame")
 
@@ -1385,12 +1420,30 @@ class DesignMatricesBuilder:
             Xbeta[:, i, :] = x_matrix[:, i].reshape(T, 1, N).T.squeeze(axis=1)
         self._log(f"Reshaped X to {Xbeta.shape}")
 
+        y = None
+        y_design_info = None
+        y_name = None
+        if include_response and self.formula_info.response_column:
+            self._log(
+                "Reusing training y_design_info to build the response "
+                "matrix, the same way X reuses X_design_info"
+            )
+            (y_matrix,) = build_design_matrices(
+                [self.design_matrices.y_design_info], data=geodf,
+                NA_action=na_action, return_type="matrix",
+            )
+            y_matrix[np.isinf(y_matrix)] = np.nan
+            y = y_matrix.reshape(T, N).T
+            y_design_info = y_matrix.design_info
+            y_name = y_design_info.column_names
+            self._log(f"y name: {y_name[0]}, shape={y.shape}")
+
         self._log(f"Computed prediction design matrices with N={N}, P={Xbeta.shape[1]}, T={T}")
 
         return DesignMatrices(
-            y=None,
-            y_design_info=None,
-            y_name=None,
+            y=y,
+            y_design_info=y_design_info,
+            y_name=y_name,
             y_expr=self.formula_info.response_expr,
             X=Xbeta,
             X_design_info=x_design_info,

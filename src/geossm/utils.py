@@ -126,6 +126,40 @@ class KeyStream:
         return new_key
 
 
+# %% [Utils] Split a stacked array into per-block views
+
+
+def split_by_block(y_full, block, Sigma_full=None):
+    """
+    Split a stacked array `y_full` (shape `(P, T)`) into one entry per
+    block, using the cumulative index boundaries `block` (length
+    `n_blocks + 1`, `block[i]:block[i+1]` selects block `i`'s rows) --
+    e.g. a response-variable block (`block_p`) or a latent-factor block
+    (`block_q`).
+
+    Row-slicing a contiguous array returns a view, not a copy, so this
+    is essentially free in memory: the returned entries share storage
+    with `y_full`/`Sigma_full` rather than duplicating it.
+
+    If a stacked covariance `Sigma_full` (shape `(P, P, T)`) is also
+    given, its per-block diagonal blocks are returned alongside
+    `y_full`'s (cross-block covariance is dropped) and a `(y_list,
+    Sigma_list)` pair is returned; otherwise only `y_list` is returned.
+    """
+    block = np.asarray(block)
+    y_list = []
+    Sigma_list = [] if Sigma_full is not None else None
+    for i in range(len(block) - 1):
+        s0, s1 = block[i], block[i + 1]
+        y_list.append(y_full[s0:s1, :])
+        if Sigma_full is not None:
+            Sigma_list.append(Sigma_full[s0:s1, s0:s1, :])
+
+    if Sigma_full is not None:
+        return y_list, Sigma_list
+    return y_list
+
+
 # %% Compute the block diagonal 3D
 
 
@@ -292,3 +326,45 @@ def getHardware():
         f"Available Memory: {available_memory:.2f} GB\n"
     )
     return info
+
+
+# %% [Utils] Minimal key/value formatting, shared by every class's __repr__
+
+def format_info_table(items, indent=0):
+    """Format a list of (key, value) tuples into a clean aligned string.
+
+    Pure string formatting only (no attribute access, no computation) so
+    it's safe to use from a `__repr__`: every value must already be a
+    plain, cheaply-obtained scalar/string/list by the time it's passed
+    in here.
+
+    Parameters
+    ----------
+    items : list of tuple
+        ``[(key, value), ...]``; a list-valued `value` is joined with
+        ``", "``.
+    indent : int, default 0
+        Number of spaces to indent each row.
+
+    Returns
+    -------
+    str
+        Nicely formatted multi-line string.
+    """
+    if not items:
+        return ""
+
+    max_key_len = max(len(str(k)) for k, _ in items)
+
+    lines = []
+    pad = " " * indent
+
+    for key, value in items:
+        key = str(key).rstrip(":") + ":"
+
+        if isinstance(value, list):
+            value = ", ".join(map(str, value))
+
+        lines.append(f"{pad}{key:<{max_key_len + 1}} {value}")
+
+    return "\n".join(lines)

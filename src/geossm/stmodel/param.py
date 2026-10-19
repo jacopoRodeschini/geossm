@@ -47,11 +47,25 @@ class FitOptions:
         `max_iter` is reached).
     verbose : bool, default True
         If `True`, log per-iteration progress during `fit`.
+    force_iter : bool, default False
+        If `False`, `fit` enforces a monotonically increasing
+        log-likelihood: it stops at the first decrease and returns the last
+        valid estimate. If `True`, a decrease only triggers a warning and
+        the EM iterations continue (useful when poor initial values make
+        the log-likelihood oscillate at the start). A NaN/Inf
+        log-likelihood always stops the algorithm and returns the last
+        valid estimate.
+    std : bool, default True
+        If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
+        computed after the EM loop (left as `None`) -- useful when the
+        ``(p, p, T)`` array does not fit in device memory.
     """
 
     max_iter: int = 20
     tol_relat: float = 1e-3
     verbose: bool = True
+    force_iter: bool = False
+    std: bool = True
 
     def __str__(self):
         lines = ["FitOptions:"]

@@ -28,6 +28,7 @@ from functools import partial
 
 from datetime import datetime, timezone
 import time
+import warnings
 from jax.scipy.linalg import block_diag
 from scipy.linalg import block_diag as scyp_block_diag
 import jax
@@ -35,7 +36,7 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend, _on_device
+from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table
 
 
 from shapely.geometry import MultiPoint
@@ -513,31 +514,11 @@ class LRStateSpaceModel(StateSpaceModel):
                 raise ValueError(msg)
 
         if formulas is not None:
-
-            # Compute the design matrices
-            self._log("Building observation grid...")
-
-            # Each formula's own domain entry (if any) is forwarded to its
-            # DesignMatricesBuilder, which drops observed sites outside it
-            # (see `DesignMatricesBuilder._filter_domain`) before the design
-            # matrix is built.
-            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders = (
-                self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
-            )
-
-            self._log("Building observation grid... Done.")
-
-            self._log("Building the design matrix...")
-
-            # self.train will be used later for estimation and for the results
-            # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-            self.y_train, Xbeta = self._buildDesignMatrix(self.gridList)
-
-            # get response name
-            self.y_name = [g.y_name for g in self.gridList]
-            xbeta_names = [g.x_names for g in self.gridList]
-
-            self._log("Building the design matrix... Done.")
+            self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders, \
+                self.y_train, Xbeta, self.y_name, xbeta_names, \
+                self.y_train_list, self.Xbeta_list = self.BuildDesignMatrix(
+                    df, formulas, verbose=verbose, domain=domain
+                )
 
         else:
             self._log("Formulas not provided. The model will be initialized without them")
@@ -600,6 +581,139 @@ class LRStateSpaceModel(StateSpaceModel):
         self.nlat = len(self._cov_matern)
 
         return self
+
+    def BuildDesignMatrix(self, df, formulas, verbose=None, domain=None):
+        # Compute the design matrices
+        self._log("Building observation grid...")
+
+        # Each formula's own domain entry (if any) is forwarded to its
+        # DesignMatricesBuilder, which drops observed sites outside it
+        # (see `DesignMatricesBuilder._filter_domain`) before the design
+        # matrix is built.
+        nvar, points, gridList, ndim, pdim, block_p, T, builders = (
+            self._buildObservationGrid(df, formulas, verbose=verbose, domain=domain)
+        )
+
+        self._log("Building observation grid... Done.")
+
+        self._log("Building the design matrix...")
+
+        # self.train will be used later for estimation and for the results
+        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
+        y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+        y_train, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+
+        # get response name
+        y_name = [g.y_name for g in gridList]
+        xbeta_names = [g.x_names for g in gridList]
+
+        self._log("Building the design matrix... Done.")
+
+        return (
+            nvar, points, gridList, ndim, pdim, block_p, T, builders,
+            y_train, Xbeta, y_name, xbeta_names, y_list, Xbeta_list,
+        )
+
+    def getDesignMatrix(self, df, verbose=None):
+        """
+        Build the design matrix for new (out-of-sample) locations/times --
+        e.g. a held-out test set -- exactly the way `predict()` builds it
+        internally, plus the response `y_obs`, so the result can be
+        compared directly against `predict()`'s output (e.g.
+        `y_obs - y_pred_list`).
+
+        Thin public wrapper around `_getPredictionDesignMatrix` (the single
+        source of truth also used by `predict()`) with
+        `include_response=True`: reuses each formula's already-fitted
+        `DesignMatricesBuilder` (`self.builders`) so stateful transforms
+        (e.g. `standardize()`) are evaluated with the *training* mean/std
+        rather than refit on `df`, and the model's own measurement-equation
+        domain (`self.domain`, fixed at `__init__` time) -- there is
+        nothing left to check here that `__init__` didn't already validate
+        once. Unlike `predict()`'s own use of it, `df` must contain the
+        response column(s) referenced by `self.formulas`.
+
+        Parameters
+        ----------
+        df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
+            New locations/times, with the same columns required by the
+            model's formulas (including the response) and the same CRS as
+            the training data. A single GeoDataFrame is used for every
+            formula (e.g. a shared held-out set); a list with one
+            GeoDataFrame per formula (see `_asPredictionDataFrames`) lets
+            each response variable be compared at its own, different set
+            of locations -- e.g. `model.getDesignMatrix([gdf_no2_test,
+            gdf_pm10_test])` for a bivariate model, one test set per
+            pollutant, instead of a single combined `df` that would give
+            every formula the union of both pollutants' locations.
+        verbose : bool, optional
+            Overrides `self.verbose` for this call's logging.
+
+        Returns
+        -------
+        points : list of ndarray
+            One entry per response variable/formula, aligned with
+            `Xbeta`'s/`y_obs`'s rows for that variable (see
+            `_buildPredictionGrid`).
+        gridList : list of DesignMatrices
+            The per-formula `DesignMatrices` `Xbeta`/`y_obs` were built
+            from (timestamps, CRS, ...).
+        ndim : int
+            Total number of rows stacked across all response variables.
+        pdim : list of int
+            Per-variable row counts (`block_p[i+1] - block_p[i]`).
+        block_p : ndarray
+            Cumulative row-index boundaries, one more entry than `pdim`.
+        T : list of int
+            Per-variable number of time steps.
+        Xbeta : ndarray
+            Stacked, block-diagonal-by-variable fixed-effect design matrix
+            -- the same array `predict()` feeds through `H`/`beta` to
+            build `y_pred`.
+        y_obs : ndarray
+            Stacked response, one row per observation (same row order as
+            `Xbeta`), evaluated from `df` with the training `y_design_info`.
+        """
+        return self._getPredictionDesignMatrix(df, verbose=verbose, include_response=True)
+
+    
+
+    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False):
+        """
+        Build the design matrix for new (out-of-sample) locations/times,
+        the way `predict()` needs it: reusing each formula's already-fitted
+        `DesignMatricesBuilder` (`self.builders`, see
+        `_buildPredictionGrid`) so stateful transforms (e.g.
+        `standardize()`) are evaluated with the *training* mean/std rather
+        than refit on `df`, and the model's own measurement-equation domain
+        (`self.domain`, fixed at `__init__` time).
+
+        `include_response`, if `True`, also evaluates the response and
+        returns it as a trailing `y_obs` array (`None` per-variable rows
+        become `NaN` if `df` is missing that variable's response) -- see
+        the public `getDesignMatrix`, the entry point for that case.
+        """
+        if verbose is None:
+            verbose = self.verbose
+
+        self._log("Building observation grid...")
+        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(
+            df, verbose=verbose, include_response=include_response
+        )
+        self._log("Building observation grid... Done.")
+
+        self._log("Building the design matrix...")
+        y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+        
+        self._log("Building the design matrix... Done.")
+
+        if include_response:
+            return points, T, Xbeta_list, y_list
+
+        _, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+
+        return points, gridList, ndim, pdim, block_p, T, Xbeta
+
 
     @property
     def shape(self):
@@ -702,6 +816,7 @@ class LRStateSpaceModel(StateSpaceModel):
         if formulas is None:
             formulas = self.formulas
             Xbeta = self.Xbeta
+            Xbeta_list = self.Xbeta_list
             xbeta_names = self.xbeta_names
             y_name = self.y_name
             nvar = self.nvar
@@ -723,8 +838,9 @@ class LRStateSpaceModel(StateSpaceModel):
             # self.train will be used later for estimation and for the results
             # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
             self._log("Building the design matrix...")
-            y, Xbeta = self._buildDesignMatrix(gridList)
-            
+            y_list, Xbeta_list = self._buildDesignMatrix(gridList)
+            y, Xbeta = self._stackDesignMatrix(y_list, Xbeta_list)
+
             y_name = [g.y_name for g in gridList]
             xbeta_names = [g.x_names for g in gridList]
 
@@ -818,11 +934,19 @@ class LRStateSpaceModel(StateSpaceModel):
 
         self._log("Simulation done. Time elapsed: {}.".format(tdelta))
 
+        # Per-variable/per-latent-factor views, so callers don't have to
+        # re-slice y_sim/x_sim by hand with block_p/block_q themselves.
+        y_sim_list = split_by_block(y_sim, block_p)
+        x_sim_list = split_by_block(x_sim, block_q)
+
         info = {}
         info['formulas'] = formulas
         info['y_name'] = y_name
         info['xbeta_names'] = xbeta_names
         info['Xbeta'] = Xbeta
+        info['Xbeta_list'] = Xbeta_list
+        info['y_sim_list'] = y_sim_list
+        info['x_sim_list'] = x_sim_list
         info['params'] = params
         info['points'] = points
         info['T'] = T
@@ -838,28 +962,33 @@ class LRStateSpaceModel(StateSpaceModel):
         return y_sim, x_sim, info, tdelta    
     
     @_on_device
-    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True):
+    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True, std=True):
         """
         Out-of-sample prediction of the response variable(s) at new
         locations/times, from an already-fitted model.
 
-        For each formula, builds a new design matrix/grid over `df` by
-        reusing the formula's fitted `DesignMatricesBuilder`
-        (`self.builders`, see `_buildPredictionGrid`) -- so stateful
-        transforms in the formula (e.g. `standardize()`) are evaluated with
-        the training mean/std rather than recomputed on `df` -- then maps
-        the fitted model's smoothed states (`modelresults.x_smoothed`,
+        For each formula, builds a new design matrix/grid over `df` via
+        `_getPredictionDesignMatrix` -- which reuses the formula's fitted
+        `DesignMatricesBuilder` (`self.builders`) so stateful transforms in
+        the formula (e.g. `standardize()`) are evaluated with the training
+        mean/std rather than recomputed on `df` -- then maps the fitted
+        model's smoothed states (`modelresults.x_smoothed`,
         `modelresults.P_smoothed`) through the new observation matrix `H`
         and design matrix to get the predictive mean and covariance (see
-        `_predict`).
+        `_predict`). The public `getDesignMatrix` builds this same design
+        matrix (plus the response `y_obs`) for inspection/comparison
+        outside of `predict()`.
 
         Parameters
         ----------
-        df : geopandas.GeoDataFrame
+        df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times to predict at, with the same columns
             required by the model's formulas (minus the response, which is
             not needed for prediction) and the same CRS as the training
-            data.
+            data. A single GeoDataFrame is used for every formula (e.g. a
+            shared regular grid); a list with one GeoDataFrame per formula
+            (see `_asPredictionDataFrames`) predicts each response variable
+            at its own, different set of locations instead.
         modelresults : LRStateSpaceResults
             Results of a previous `fit()` call, providing the estimated
             parameters (`modelresults.params`) and smoothed states used to
@@ -867,12 +996,18 @@ class LRStateSpaceModel(StateSpaceModel):
         verbose : bool, default True
             Verbosity for the observation-grid/design-matrix construction
             logging.
+        std : bool, default True
+            If `False`, skip the predictive covariance `Sigma_y_pred`
+            (left as `None`) -- useful when the ``(p, p, T)`` array does
+            not fit in device memory.
 
         Returns
         -------
         LRStateSpaceResults
             The same `modelresults` object, with `points_pred`,
-            `y_pred_list`, `Sigma_y_pred_list`, `tdelta_pred`,
+            `y_pred`/`Sigma_y_pred` (and their per-variable views
+            `y_pred_list`/`Sigma_y_pred_list`; `Sigma_y_pred` is `None`
+            if `std=False`), `tdelta_pred`,
             `timestamps_pred`, and `crs_pred` populated (one entry per
             response variable, except `tdelta_pred`/`crs_pred`).
 
@@ -888,20 +1023,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # and reuses its X_design_info so stateful transforms (e.g.
         # standardize()) are evaluated with the training mean/std rather
         # than recomputed on `df`.
-        self._log("Building observation grid...")
-
-        points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(df, verbose=verbose)
-
-        self._log("Building Prediction grid... Done.")
-
-        self._log("Building the design matrix...")
-
-        # self.train will be used later for estimation and for the results
-        # Xbeta_train -> Xbeta in the parant class, y_train -> y_obs in the parent class
-        _, Xbeta_predict = self._buildDesignMatrix(gridList)
-        
-
-        self._log("Building the design matrix... Done.")
+        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(df, verbose=verbose)
 
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
@@ -915,6 +1037,30 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Get the filtered state")
         x_T = modelresults.x_smoothed
         P_T = modelresults.P_smoothed
+
+        # Restrict the smoothed states to the prediction timestamps: the
+        # prediction df may cover only a (contiguous) sub-window of the
+        # training period, e.g. when covariates are available only there.
+        # The latent state is shared across response variables, so every
+        # prediction grid must share one time axis.
+        self._log("Filtering the valid timestamps...")
+        timestamps_pred = gridList[0].timestamps
+        if any(not np.array_equal(g.timestamps, timestamps_pred) for g in gridList[1:]):
+            raise ValueError("All prediction grids must share the same timestamps")
+
+        timestamps_train = modelresults.timestamps_hat[0]
+        idx = np.flatnonzero(np.isin(timestamps_train, timestamps_pred))
+        if idx.size != timestamps_pred.size:
+            raise ValueError(
+                "Prediction timestamps must be a subset of the training timestamps"
+            )
+        self._log("Found {} of {} training timestamps.".format(idx.size, timestamps_train.size))
+
+        # x_T/P_T carry the prior at column 0 (dropped by _predict), so
+        # training step k is column k+1; keep column 0 as the prior slot.
+        cols = np.r_[0, idx + 1]
+        x_T = x_T[:, cols]
+        P_T = P_T[:, :, cols]
 
         # update the cov_function rescale
         for cov, ksi in zip(self.cov_function, ks):
@@ -930,17 +1076,19 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
         # Predict the response variable (stacked across all variables)
-        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(H, x_T, P_T, Xbeta_predict, beta)
-
-        # Per-variable views, one entry per response variable, aligned with
-        # block_p
-        y_pred_list, Sigma_y_pred_list = self._split_by_block(
-            y_pred_full, Sigma_y_pred_full, block_p
+        y_pred_full, Sigma_y_pred_full, tdelta = self._predict(
+            H, x_T, P_T, Xbeta_predict, beta, std=std
         )
 
+        # block_p for the *prediction* grid, snapshotted separately from
+        # modelresults.block_p (the training grid's) since the prediction
+        # grid can have a different number of points per response
+        # variable -- used to split y_pred/Sigma_y_pred into
+        # y_pred_list/Sigma_y_pred_list (see LRStateSpaceResults).
         modelresults.points_pred = points
-        modelresults.y_pred_list = y_pred_list
-        modelresults.Sigma_y_pred_list = Sigma_y_pred_list
+        modelresults.block_p_pred = block_p
+        modelresults.y_pred = y_pred_full
+        modelresults.Sigma_y_pred = Sigma_y_pred_full
         modelresults.tdelta_pred = tdelta
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
@@ -949,39 +1097,22 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return modelresults
 
-    def _split_by_block(self, y_full, Sigma_full, block_p):
-        """
-        Split a stacked mean array `y_full` (shape `(P, T)`) and its stacked
-        covariance `Sigma_full` (shape `(P, P, T)`) into one entry per
-        response variable, using the cumulative index boundaries `block_p`
-        (length `nvar + 1`, `block_p[i]:block_p[i+1]` selects variable `i`'s
-        rows). The `i`-th entries of the returned lists hold, respectively,
-        variable `i`'s own rows of `y_full` and its own diagonal block of
-        `Sigma_full` (cross-variable covariance is dropped).
-        """
-        block_p = np.asarray(block_p)
-        y_list, Sigma_list = [], []
-        for i in range(len(block_p) - 1):
-            y_list.append(y_full[block_p[i]:block_p[i + 1], :])
-            Sigma_list.append(
-                Sigma_full[block_p[i]:block_p[i + 1], block_p[i]:block_p[i + 1], :]
-            )
-        return y_list, Sigma_list
-
     @_on_device
-    def _predict(self, H, x_T, P_T, Xbeta, beta):
+    def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """
         Core SSM prediction, stacked across all response variables -- the
         single source of truth used both for in-sample fitted values
         (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
         result into per-variable views is a separate, explicit step (see
-        `self._split_by_block`), left to the caller.
+        `geossm.utils.split_by_block`), left to the caller. With
+        `std=False` the predictive covariance is skipped and returned as
+        `None` (see `StateSpaceModel.predict`).
         """
         self._log("Start Prediction the SSM...")
 
         # Compute the prediction of linear SSM
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=std)
         tdelta = time.time()- tStart
 
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
@@ -1041,9 +1172,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
         
-        smr = self.summary(print_full = False)
         if self.verbose:
-            print(smr)
+            print(self._get_summary_table())
         self._log("Starting the estimation of the model parameters using EM algorithm...")
 
         
@@ -1051,6 +1181,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
         max_iter = options.max_iter if options is not None else 100
         tol_relat = options.tol_relat if options is not None else 1e-3
+        force_iter = options.force_iter if options is not None else False
+        std = options.std if options is not None else False
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1114,6 +1246,8 @@ class LRStateSpaceModel(StateSpaceModel):
         tdelta_Edet = np.zeros(3)
         tdelta_Mdet = np.zeros(3)
         nstat = []  # list to store the results of each iteration
+        converged = False  # True only if the relative tolerance was met
+        last_valid = None  # snapshot of the last valid (params, E-step outputs)
 
         # Log the initial state before starting the EM iterations
         nstat = self._log_iteration(
@@ -1135,6 +1269,7 @@ class LRStateSpaceModel(StateSpaceModel):
             print(msg)
 
         # Start EM iteration
+        decreased = False  # flag to indicate if the log-likelihood decreased
         while flag:
             niter += 1
 
@@ -1202,6 +1337,30 @@ class LRStateSpaceModel(StateSpaceModel):
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
+            # Check if the step is valid. Skipped at the first iteration:
+            # logL_prev is a placeholder (0), so delta_lik is not a real
+            # likelihood increment. NaN/Inf always stop the algorithm; a
+            # decrease stops it only if force_iter is False.
+            if niter > 1:
+                invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
+                decreased = bool(delta_lik < 0)
+                if invalid or (decreased and not force_iter):
+                    msg = self._log_warning_emstep(delta_lik, niter)
+                    self._log(msg)
+                    warnings.warn(
+                        msg + ". The EM algorithm was stopped and the last valid "
+                        "estimate is returned (convergence=False).",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+
+                    # restore the last valid estimate and its E-step outputs
+                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
+                    break
+            
+            # snapshot the current (finite) parameters and their E-step outputs
+            last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
+
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
             logL_prev = logL_cur
@@ -1223,28 +1382,39 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # print the results of the iteration
             if self.verbose:
-                msg = self.logger(nstat[-1])
+                msg = self.logger(nstat[-1])       
+                if decreased:
+                    msg += "\n (force_iter=True: continuing)"
+               
                 print(msg)
+               
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
-            if niter == max_iter or abs(relat_lik) <= tol_relat:
+            if abs(relat_lik) <= tol_relat:
+                converged = True
+                flag = False
+            
+            elif niter == max_iter:
+                warnings.warn(
+                    "The EM algorithm reached max_iter={} without meeting "
+                    "tol_relat={}.".format(max_iter, tol_relat),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 flag = False
 
 
-        self._log("EM algorithm converged after {} iterations.".format(niter))
+        if converged:
+            self._log("EM algorithm converged after {} iterations.".format(niter))
+        else:
+            self._log("EM algorithm stopped after {} iterations without converging.".format(niter))
         self._log("Final log-likelihood: {}.".format(logL_cur))
         self._log("Create the results object...")
 
         # predict the respose variable using the fitted model parameters
         beta_est = est_params.beta.value
-        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(H, x_T, P_T, Xbeta, beta_est)
-
-        # Per-variable views (one entry per response variable), snapshotted
-        # here rather than derived later from `self.model.block_p` -- that
-        # attribute is mutable and would go stale for this results object
-        # the next time `fit()`/`setup()` runs on this same model instance.
-        y_hat_list, Sigma_y_hat_list = self._split_by_block(
-            y_hat_full, Sigma_y_hat_full, block_p
+        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(
+            H, x_T, P_T, Xbeta, beta_est, std=std
         )
 
         # Training grid (points/timestamps/CRS), one entry per response
@@ -1261,15 +1431,19 @@ class LRStateSpaceModel(StateSpaceModel):
             params=est_params,
             nstats=nstat,
             options=options,
+            convergence=converged,
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
             y_hat=y_hat_full,
             Sigma_y_hat=Sigma_y_hat_full,
             tdelta_hat=tdelta_hat,
-            # per-variable views (one entry per response variable)
-            y_hat_list=y_hat_list,
-            Sigma_y_hat_list=Sigma_y_hat_list,
+            # block_p: snapshotted here rather than left to be read live
+            # off `self.block_p` -- that attribute is mutable and would go
+            # stale for this results object the next time `fit()`/`setup()`
+            # runs on this same model instance. Per-variable views
+            # (y_hat_list, ...) are derived from this + the stacked arrays
+            # above as lazy properties on LRStateSpaceResults.
             block_p=block_p,
             points_hat=points_hat,
             timestamps_hat=timestamps_hat,
@@ -2090,15 +2264,50 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T, builders
 
-    def _buildPredictionGrid(self, df, verbose=True):
+    def _asPredictionDataFrames(self, df):
+        """
+        Normalize `df` (as accepted by `predict`/`getDesignMatrix`) to a
+        list of GeoDataFrames, one per formula/builder (`self.builders`).
+
+        A single GeoDataFrame is broadcast to every formula (the same
+        locations/times are used to predict every response variable, e.g.
+        a shared regular grid). A list/tuple is used as-is, one entry per
+        formula -- e.g. to predict/compare each response variable at its
+        own, different set of held-out locations -- and must have exactly
+        one entry per formula.
+        """
+        if isinstance(df, (list, tuple)):
+            if len(df) != len(self.builders):
+                raise ValueError(
+                    f"Number of dataframes ({len(df)}) must match number of "
+                    f"formulas ({len(self.builders)})"
+                )
+            return list(df)
+        return [df] * len(self.builders)
+
+    def _buildPredictionGrid(self, df, verbose=True, include_response=False):
         """
         Build the design matrices for new (prediction) locations/times, one
         per formula, reusing each formula's fitted `DesignMatricesBuilder`
         (`self.builders`, set in `__init__`) so stateful transforms (e.g.
         standardize()) reuse training statistics instead of being recomputed
         on `df`.
+
+        `df` may be a single GeoDataFrame (broadcast to every formula) or a
+        list with one GeoDataFrame per formula (see
+        `_asPredictionDataFrames`) -- e.g. to predict each response
+        variable at its own set of locations rather than a shared one.
+
+        `include_response`, if `True`, also evaluates each formula's
+        response on its dataframe (see `DesignMatricesBuilder.build_predict`)
+        -- that dataframe must then contain the response column.
         """
-        dfs = [b.build_predict(df, verbose=verbose, domain=d) for b, d in zip(self.builders, self.domain)]
+        dfs_in = self._asPredictionDataFrames(df)
+
+        dfs = [
+            b.build_predict(d, verbose=verbose, domain=dom, include_response=include_response)
+            for b, d, dom in zip(self.builders, dfs_in, self.domain)
+        ]
 
         T = [gr.T for gr in dfs]
         points = [gr.points for gr in dfs]
@@ -2115,7 +2324,7 @@ class LRStateSpaceModel(StateSpaceModel):
         variables via `block_diag_3D`) into the model-wide arrays consumed
         by `StateSpaceModel`."""
 
-        Ylist = [grid.y for grid in gridList if grid.y is not None]
+        y_list = [grid.y for grid in gridList if grid.y is not None]
 
         # X - Fixed effect design matrix -> 3D block diag - [N x beta x T]
         Xbeta_list = [grid.X for grid in gridList if grid.X is not None]
@@ -2129,8 +2338,12 @@ class LRStateSpaceModel(StateSpaceModel):
         # Y_test_list = [yi[index, :] for yi, index in zip(Ylist, itest)]
         # Xbeta_test_list = [xi[index, :, :] for xi, index in zip(Xlist, itest)]
 
-        if len(Ylist) > 0:
-            y_train = jnp.vstack(Ylist) 
+        
+        return y_list, Xbeta_list
+
+    def _stackDesignMatrix(self, y_list, Xbeta_list):
+        if len(y_list) > 0:
+            y_train = jnp.vstack(y_list) 
         else:
             y_train = None
 
@@ -2141,8 +2354,26 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Y_test = np.vstack(Y_test_list)
         # Xbeta_test = block_diag_3D(Xbeta_test_list)
-
         return y_train, Xbeta_train
+
+
+    def _log_warning_emstep(self, delta_lik, niter):
+        msg = ""
+        if delta_lik < 0:
+            msg = "Warning: the log-likelihood decreased in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+        elif jnp.isnan(delta_lik):
+            msg = "Warning: the log-likelihood is NaN in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+        elif jnp.isinf(delta_lik):
+            msg = "Warning: the log-likelihood is Inf in iteration {} (delta_lik = {})".format(
+                    niter, delta_lik
+                )
+
+        return msg
+                
 
     def logger(self, stats, beta_decimals=2, scalar_decimals=2, relat_decimals=5):
         """
@@ -2250,29 +2481,9 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         return history
 
-
-    def generate_summary(self, print_full=True):
-        """
-        Build the left/right key-value rows used by `summary()`'s header
-        table: model name/type/shape, then (if `print_full=True`) one
-        "Grid ..." section per response variable's `DesignMatrices` and one
-        "Latent. ..." section per latent covariance function, each via that
-        object's own `generate_summary`.
-
-        Parameters
-        ----------
-        print_full : bool, default True
-            If `False`, only the top model-level rows are returned (used
-            when this table is embedded elsewhere, e.g. by
-            `LRStateSpaceResults.generate_summary`, without repeating the
-            per-grid/per-covariance detail).
-
-        Returns
-        -------
-        gen_top_left, gen_top_right : list of (str, list)
-            Two lists of `(label, [value])` rows, of equal length.
-        """
-
+    
+    def generate_summary_header(self):
+        
         # top-left / top-right small tables
         p = self.shape[0] if hasattr(self, "shape") else "N/A"
         q = self.shape[1] if hasattr(self, "shape") else "N/A"
@@ -2330,7 +2541,33 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         elif len_empty < 0:
             gen_top_left = gen_top_left + [("", [""])] * (-len_empty)
 
-        if not print_full:
+        return gen_top_left, gen_top_right
+
+    def generate_summary(self, print_short=False):
+        """
+        Build the left/right key-value rows used by `summary()`'s header
+        table: model name/type/shape, then (if `print_full=True`) one
+        "Grid ..." section per response variable's `DesignMatrices` and one
+        "Latent. ..." section per latent covariance function, each via that
+        object's own `generate_summary`.
+
+        Parameters
+        ----------
+        print_full : bool, default True
+            If `False`, only the top model-level rows are returned (used
+            when this table is embedded elsewhere, e.g. by
+            `LRStateSpaceResults.generate_summary`, without repeating the
+            per-grid/per-covariance detail).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, of equal length.
+        """
+
+
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        if not print_short:
             return gen_top_left, gen_top_right
 
         else:  
@@ -2398,7 +2635,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             
             return gen_top_left, gen_top_right 
 
-    def summary(self, print_full=True) -> Summary:
+    def summary(self, print_short=False) -> Summary:
         """
         Return a `statsmodels`-style structured summary of the model
         (before fitting -- for the fitted results' own summary, see
@@ -2421,7 +2658,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         self.model = SimpleNamespace()
 
         # Generate the summary tables
-        gen_top_left, gen_top_right = self.generate_summary(print_full=print_full)
+        gen_top_left, gen_top_right = self.generate_summary(print_short=print_short)
 
         # Add the header to the summary
         smry = Summary()
@@ -2446,39 +2683,28 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         return smry
 
-    def format_info_table(self, items, indent=0):
+    def __str__(self):
+        """Return a human-readable summary of the model (see `summary`)."""
+        return str(self.summary(print_short=False))
+
+    def _get_summary_table(self):
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        items = [
+            (key, value)
+            for key, value in gen_top_left + gen_top_right
+            if str(key).strip()
+        ]
+        return f"{self.__class__.__name__}\n" + format_info_table(items, indent=2)
+
+    def __repr__(self):
+        """Cheap, side-effect-free representation for interactive use
+        (model name/type/shape/backend only, from `generate_summary_header`)
+        -- see `summary()`/`str()` for the full, more expensive report
+        (per-grid/per-covariance detail). Does not touch `self.model` or
+        any other state, unlike `summary()`.
         """
-        Format a list of (key, value) tuples into a clean aligned string.
+        return self._get_summary_table()
 
-        Parameters
-        ----------
-        items : list of tuples
-            [(key, value), ...]
-        indent : int
-            Number of spaces to indent each row.
-
-        Returns
-        -------
-        str
-            Nicely formatted multi-line string.
-        """
-        # Compute longest key for alignment
-        max_key_len = max(len(str(k)) for k, _ in items)
-
-        lines = []
-        pad = " " * indent
-
-        for key, value in items:
-            key = str(key).rstrip(":") + ":"
-
-            # Convert lists to readable string
-            if isinstance(value, list):
-                value = ", ".join(map(str, value))
-
-            lines.append(f"{pad}{key:<{max_key_len+1}} {value}")
-
-        return "\n".join(lines)
- 
     def _is_verbose(self, verbose=None) -> bool:
         """Resolve an optional per-call `verbose` override against `self.verbose`."""
         return self.verbose if verbose is None else verbose

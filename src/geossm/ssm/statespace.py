@@ -37,7 +37,7 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device
+from geossm.utils import _select_device, _to_backend, _on_device, format_info_table
 
 
 def _itype_for(dtype):
@@ -725,13 +725,49 @@ def _compute_expected_values_kernelJAX(H, x_T, P_T, P_T_1, Xbeta, beta):
 
 @jit
 @_highest_matmul_precision
-def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
-    """Compute predicted observations and their plug-in state-driven
-    predictive covariance from smoothed (or filtered) states.
+def _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta):
+    """Compute predicted observations from smoothed (or filtered) states.
 
     .. math::
-        \\hat y_t &= X_t \\beta + H x_{t|T} \\\\
-        \\Sigma_{\\hat y, t} &= H P_{t|T} H^T
+        \\hat y_t = X_t \\beta + H x_{t|T}
+
+    See `_compute_predict_sigma_kernel_JAX` for the matching predictive
+    covariance, computed separately so it can be skipped when the
+    ``(p, p, T)`` array does not fit in device memory.
+
+    Parameters
+    ----------
+    H : jax.numpy.ndarray, shape (p, q)
+        Observation matrix.
+    x_T : jax.numpy.ndarray, shape (q, T+1)
+        State means (typically the smoothed states); index 0 (the prior)
+        is dropped before computing the output.
+    Xbeta : jax.numpy.ndarray, shape (p, b, T)
+        Exogenous regressors.
+    beta : jax.numpy.ndarray, shape (b,)
+        Regression coefficients.
+
+    Returns
+    -------
+    y_hat : jax.numpy.ndarray, shape (p, T)
+        Predicted observation means.
+    """
+
+    # Compute the plugin expected value
+    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
+    y_hat_state_term = H @ x_T[:, 1:]  # Use the smoothed states for prediction
+    y_hat = y_hat_covariate_term + y_hat_state_term
+
+    return y_hat
+
+@jit
+@_highest_matmul_precision
+def _compute_predict_sigma_kernel_JAX(H, P_T):
+    """Compute the plug-in state-driven predictive covariance of the
+    predicted observations from smoothed (or filtered) states.
+
+    .. math::
+        \\Sigma_{\\hat y, t} = H P_{t|T} H^T
 
     ``Sigma_y_hat`` only propagates the state's own posterior
     uncertainty through ``H``; it does not add the observation noise
@@ -743,33 +779,22 @@ def _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta):
     ----------
     H : jax.numpy.ndarray, shape (p, q)
         Observation matrix.
-    x_T, P_T : jax.numpy.ndarray
-        State means/covariances (typically the smoothed states, shapes
-        ``(q, T+1)`` / ``(q, q, T+1)``); index 0 (the prior) is dropped
-        before computing the outputs.
-    Xbeta : jax.numpy.ndarray, shape (p, b, T)
-        Exogenous regressors.
-    beta : jax.numpy.ndarray, shape (b,)
-        Regression coefficients.
+    P_T : jax.numpy.ndarray, shape (q, q, T+1)
+        State covariances (typically the smoothed states); index 0 (the
+        prior) is dropped before computing the output.
 
     Returns
     -------
-    y_hat : jax.numpy.ndarray, shape (p, T)
-        Predicted observation means.
     Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T)
         State-driven predictive covariance :math:`H P_{t|T} H^T` (excludes
         observation noise ``R``).
     """
-    
-    # Compute the expected valure
-    y_hat_covariate_term = jnp.einsum("pkt,k->pt", Xbeta, beta)
-    y_hat_state_term = H @ x_T[:, 1:]  # Use the smoothed states for prediction
-    y_hat = y_hat_covariate_term + y_hat_state_term
 
     # compute the plugin uncertainty
     Sigma_y_hat = jnp.einsum("ip,pqt,jq->ijt", H, P_T[:, :, 1:], H)
 
-    return y_hat, Sigma_y_hat
+    return Sigma_y_hat
+
 
 # %% State Space Model Class
 class StateSpaceModel:
@@ -1378,12 +1403,13 @@ class StateSpaceModel:
         )
 
     @_on_device
-    def predict(self, H, x_T, P_T, Xbeta=None, beta=None):
+    def predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """Compute predicted observations and their state-driven
         predictive covariance from (typically smoothed) states.
 
-        Thin wrapper around `_compute_predict_kernel_JAX`; see its
-        docstring for the exact equations. Unlike `filter`/`smoother`,
+        Thin wrapper around `_compute_predict_mean_kernel_JAX` and
+        `_compute_predict_sigma_kernel_JAX`; see their docstrings for the
+        exact equations. Unlike `filter`/`smoother`,
         this does not update the model's own state (``H``, ``Xbeta``,
         ``beta`` are used as passed, not read from ``self``).
 
@@ -1394,22 +1420,37 @@ class StateSpaceModel:
         x_T : array_like, shape (q, T+1)
             State means (index 0 is the prior/initial state and is
             excluded from the output).
-        P_T : array_like, shape (q, q, T+1)
-            State covariances (index 0 excluded from the output).
+        P_T : array_like, shape (q, q, T+1), optional
+            State covariances (index 0 excluded from the output). Required
+            if `std=True`, ignored otherwise.
         Xbeta : array_like, shape (p, b, T), optional
             Exogenous regressors.
         beta : array_like, shape (b,), optional
             Regression coefficients for ``Xbeta``.
+        std : bool, default True
+            If `False`, skip the predictive covariance and return `None`
+            for it -- useful when the ``(p, p, T)`` array does not fit in
+            device memory.
 
         Returns
         -------
         y_hat : jax.numpy.ndarray, shape (p, T)
             Predicted observation means.
-        Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T)
+        Sigma_y_hat : jax.numpy.ndarray, shape (p, p, T) or None
             State-driven predictive covariance :math:`H P_{t} H^T`
-            (excludes the observation noise covariance ``R``).
+            (excludes the observation noise covariance ``R``); `None` if
+            `std=False`.
+
+        Raises
+        ------
+        ValueError
+            If `std=True` and `P_T` is `None`.
         """
-        y_hat, Sigma_y_hat = _compute_predict_kernel_JAX(H, x_T, P_T, Xbeta, beta)
+        if std and P_T is None:
+            raise ValueError("P_T is required to compute the predictive covariance (std=True)")
+
+        y_hat = _compute_predict_mean_kernel_JAX(H, x_T, Xbeta, beta)
+        Sigma_y_hat = _compute_predict_sigma_kernel_JAX(H, P_T) if std else None
         return y_hat, Sigma_y_hat
 
     def _run_filter_kernel(
@@ -2411,10 +2452,41 @@ class StateSpaceModel:
   
         return smry
 
+    def generate_summary_header(self):
+        """Cheap identity/shape rows (name, type/order, dep. variable,
+        shape, backend/dtype) - the subset of `generate_summary()` that's
+        pure attribute lookups, with no per-matrix computation. Used by
+        `__repr__` (via `format_info_table`) so that a bare console/Jupyter
+        display never touches `R`/`Q`/`F`/`x0`/`Sigma0`.
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows, matching the other
+            `generate_summary*` methods' return shape.
+        """
+        p, q, T = self.shape if hasattr(self, "shape") else ("N/A", "N/A", "N/A")
+        gen_top_left = [
+            ("Model type (order):", [f"{getattr(self, 'type', 'N/A')}, {getattr(self, 'order', 'N/A')}"]),
+            ("Dep. Variable:", [getattr(self, "y_name", None) or "N/A"]),
+        ]
+        gen_top_right = [
+            ("Shape (p, q, T):", [f"(p = {p}, q = {q}, T = {T})"]),
+            ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
+        ]
+        return gen_top_left, gen_top_right
+
     def __str__(self):
         """String representation of the model."""
 
         return str(self.summary())
 
     def __repr__(self):
-        return self.__str__()
+        """Cheap, side-effect-free representation for interactive use
+        (see `generate_summary_header`) - see `summary()`/`str()` for the
+        full report (includes mean system-matrix diagonals).
+        """
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        return f"{self.__class__.__name__}\n" + format_info_table(
+            gen_top_left + gen_top_right, indent=2
+        )

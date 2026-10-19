@@ -21,6 +21,8 @@ from statsmodels.iolib.summary import Summary
 from datetime import datetime, timezone
 import time
 
+from geossm.utils import format_info_table
+
 
 # % Utility functions
 
@@ -1042,7 +1044,35 @@ class FEMSolver:
 
     def __str__(self):
         return self.summary().as_text()
-    
+
+    def generate_summary_header(self):
+        """Cheap mesh-size rows (`nelements`/`nbElements`, direct O(1)
+        MFEM accessor calls) - unlike `generate_summary()`, does not touch
+        `nvertex`/`n_inner_points`/`n_outer_points`/`angles`/`areas`,
+        which involve a Python loop over every mesh element or a
+        reduction over the (possibly large) angle/area arrays. Used by
+        `__repr__` (via `format_info_table`).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list)
+            Two lists of `(label, [value])` rows.
+        """
+        return (
+            [("Mesh triangles:", [f"{self.nelements}"])],
+            [("Mesh lines:", [f"{self.nbElements}"])],
+        )
+
+    def __repr__(self):
+        """Cheap, side-effect-free representation for interactive use
+        (see `generate_summary_header`) - see `summary()`/`str()` for the
+        full mesh-quality report (angles, areas, inner/outer counts).
+        """
+        gen_top_left, gen_top_right = self.generate_summary_header()
+        return f"{self.__class__.__name__}\n" + format_info_table(
+            gen_top_left + gen_top_right, indent=2
+        )
+
     def _is_verbose(self, verbose=None) -> bool:
         return self.verbose if verbose is None else verbose
 
