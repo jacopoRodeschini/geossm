@@ -80,6 +80,12 @@ class TestModelConstruction:
                               backend="cpu", dtype=jnp.float64)
         assert jax.config.jax_enable_x64 is False
 
+    @pytest.mark.parametrize("call", ["fit", "sim"])
+    def test_fit_and_sim_before_setup_raise_clearly(self, gdf, call):
+        model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
+        with pytest.raises(ValueError, match=r"setup\(cov_fun"):
+            model.fit(options=_options()) if call == "fit" else model.sim(verbose=False)
+
     def test_mismatched_formulas_and_domains_raise(self, gdf):
         with pytest.raises(ValueError, match="must match"):
             LRStateSpaceModel(gdf, ["y ~ 1"], domain=[DOMAIN, DOMAIN], verbose=False, backend="cpu")
@@ -97,6 +103,29 @@ class TestFit:
         assert res.iterations == MAX_ITER and res.convergence is False
         assert len(res.llf_path) == MAX_ITER + 1  # initial entry + one per iteration
         assert [len(v) for v in res.y_hat_list] == [p]
+
+    def test_result_contract_types_shapes_dtypes(self, fitted):
+        # Documented contract (StateSpaceResults): array attributes are NumPy
+        # arrays in the model dtype; llf is a float.
+        model, res = fitted
+        p, q, T = model.shape
+        b = model.Xbeta.shape[1]
+        dt = np.dtype(model.dtype)
+        shapes = {"y_obs": (p, T), "Xbeta": (p, b, T), "y_hat": (p, T), "Sigma_y_hat": (p, p, T),
+                  "residuals": (p, T), "x_smoothed": (q, T + 1), "P_smoothed": (q, q, T + 1),
+                  "S11": (q, q), "S10": (q, q), "S00": (q, q)}
+        for name, shape in shapes.items():
+            value = getattr(res, name)
+            assert type(value) is np.ndarray, name
+            assert value.shape == shape and value.dtype == dt, name
+        for name in ("llf", "aic", "bic"):
+            assert isinstance(getattr(res, name), float), name
+        assert all(isinstance(v, float) for v in res.llf_path)
+        assert isinstance(res.nobs, int) and isinstance(res.missing, int) and res.nobs + res.missing == p * T
+        assert isinstance(res.iterations, int) and isinstance(res.convergence, bool)
+        assert res.termination in ("tolerance", "decrease", "invalid", "max_iter")
+        for name in ("beta", "s2e", "f", "A", "ks", "x0", "Sigma0"):
+            assert np.asarray(getattr(res.params, name).value).dtype == dt, name
 
     def test_parameter_shapes_and_domains(self, fitted):
         _, res = fitted
@@ -184,11 +213,12 @@ class TestFit:
             arrays = {name: np.asarray(getattr(res.params, name).value)
                       for name in ("beta", "s2e", "f", "A", "ks", "x0", "Sigma0")}
             arrays.update(y_hat=np.asarray(res.y_hat), x_smoothed=np.asarray(res.x_smoothed),
-                          llf=np.asarray(res.llf), H=np.asarray(model.H), Q=np.asarray(model.Q))
-            out[x64] = arrays
-        for name, a in out[True].items():
+                          H=np.asarray(model.H), Q=np.asarray(model.Q))
+            out[x64] = arrays, res.llf
+        for name, a in out[True][0].items():
             assert a.dtype == np.float32, name
-            np.testing.assert_array_equal(a, out[False][name], err_msg=name)
+            np.testing.assert_array_equal(a, out[False][0][name], err_msg=name)
+        assert out[True][1] == out[False][1]  # llf is a Python float (computed in float32)
 
     def test_max_iter_termination_is_recorded(self, fitted):
         _, res = fitted

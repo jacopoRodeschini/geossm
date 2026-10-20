@@ -377,7 +377,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self.time_expectation = sum(runtime_expectation)
         self.time_total = sum(runtime_each)
         
-        self.llf_path = [v["logL"] for v in self.nstats]
+        self.llf_path = [float(v["logL"]) for v in self.nstats]
         # fit() passes the llf of the returned estimate, which is not the
         # last logged one when an earlier best iterate is restored.
         if self.llf is None:

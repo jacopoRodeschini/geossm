@@ -249,8 +249,8 @@ class StateSpaceResults:
         if params_dim is not None:
             self.params_dim = params_dim
 
-        # ---- likelihood ----
-        self.llf = llf
+        # ---- likelihood (a Python float, not a 0-d array) ----
+        self.llf = None if llf is None else float(llf)
         self.time_filter = time_filter
         self.time_smoother = time_smoother
         self.time_expectation = time_expectation
@@ -316,6 +316,8 @@ class StateSpaceResults:
         consistent with the precision the model was fit in.
         """
         for attr in [
+            "y_obs",
+            "Xbeta",
             "y_hat",
             "Sigma_y_hat",
             "x_filtered",
@@ -330,7 +332,7 @@ class StateSpaceResults:
             "S10",
             "S00",
         ]:
-            value = getattr(self, attr)
+            value = getattr(self, attr, None)
             if value is not None:
                 setattr(self, attr, np.asarray(value, dtype=self.dtype))
 

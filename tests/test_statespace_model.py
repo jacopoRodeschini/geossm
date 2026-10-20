@@ -141,6 +141,12 @@ class TestFilterSmootherResults:
         res = _model(problem_missing).smoother(problem_missing.y)
         assert res.missing == int(missing_mask.sum())
 
+    def test_result_types_follow_documented_contract(self, problem):
+        res = _model(problem).smoother(problem.y)
+        assert type(res.y_obs) is np.ndarray and res.y_obs.dtype == np.float32
+        assert type(res.Xbeta) is np.ndarray and res.Xbeta.dtype == np.float32
+        assert isinstance(res.llf, float)
+
     def test_nobs_counts_only_observed_entries(self, problem_missing, missing_mask):
         res = _model(problem_missing).smoother(problem_missing.y)
         assert res.nobs == int((~missing_mask).sum())

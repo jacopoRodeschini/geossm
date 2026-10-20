@@ -866,6 +866,7 @@ class LRStateSpaceModel(StateSpaceModel):
             covariance functions, respectively).
         """
 
+        self._require_setup("sim")
         if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
         
@@ -907,13 +908,9 @@ class LRStateSpaceModel(StateSpaceModel):
 
             self._log("Building the design matrix... Done.")
         
-        # check if the covariance function is defined
-        if self._cov_matern is None or len(self._cov_matern) == 0:
-            raise ValueError("Covariance function is not defined. Please run the setup method first.")
-        else:
-            qdim = self.qdim
-            block_q = self.block_q
-            nlat = self.nlat
+        qdim = self.qdim
+        block_q = self.block_q
+        nlat = self.nlat
 
         
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
@@ -1179,6 +1176,15 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_hat_full, Sigma_y_hat_full, tdelta
 
+    def _require_setup(self, method):
+        """Raise a clear error if `setup()` (the latent covariance functions)
+        has not been called before `method`."""
+        if not self._cov_matern:
+            raise ValueError(
+                f"{method}() needs the latent covariance functions: call "
+                f"setup(cov_fun=[...]) on the model first."
+            )
+
     def _set_system_matrices(self, params, basis, pdim, qdim):
         """
         Build `H`, `R`, `F`, `Q` from `params` (setting the covariance
@@ -1274,7 +1280,15 @@ class LRStateSpaceModel(StateSpaceModel):
             `llf_path` is the per-iteration trace; entry ``k`` is the
             log-likelihood of the E-step of iteration ``k``, so `llf` can
             exceed `llf_path[-1]`.
+
+        Raises
+        ------
+        ValueError
+            If `setup()` has not been called (no latent covariance
+            functions).
         """
+
+        self._require_setup("fit")
 
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
