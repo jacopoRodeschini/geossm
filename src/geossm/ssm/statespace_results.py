@@ -59,6 +59,13 @@ def _safe_sqrt_variance(var: np.ndarray, *, context: str = "") -> np.ndarray:
         return np.sqrt(safe)
 
 
+def _format_names(names):
+    """Response name(s) for the summary: a list or tuple is joined with ", "."""
+    if isinstance(names, (list, tuple)):
+        return ", ".join(map(str, names))
+    return names
+
+
 class StateSpaceResults:
     """Container for state-space model estimation results (filter and/or
     smoother outputs), with convenience methods for residuals, error
@@ -791,7 +798,7 @@ class StateSpaceResults:
                         f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
                     ],
                 ),
-                ("Dep. Variables:", lambda: [getattr(self, "_model_y_name", None) or "N/A"]),
+                ("Dep. Variables:", lambda: [_format_names(getattr(self, "_model_y_name", None)) or "N/A"]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
                 ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),

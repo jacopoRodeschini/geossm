@@ -1204,9 +1204,7 @@ class LRStateSpaceModel(StateSpaceModel):
             pdim=_read_only_copy(self.pdim),
             nvar=int(self.nvar),
             nlat=int(self.nlat),
-            # copies of the entries (one-element lists today, see F39), so
-            # that names and output column names are unchanged
-            y_name=tuple(list(n) if isinstance(n, list) else n for n in self.y_name),
+            y_name=tuple(self.y_name),
             xbeta_names=tuple(tuple(names) for names in self.xbeta_names),
             builders=tuple(self.builders),
             domain=tuple(self.domain),
@@ -2623,7 +2621,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 ),
                 (
                     "Dep. Variables:",
-                    lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
+                    lambda: [", ".join(self.y_name) if hasattr(self, "y_name") else "N/A"],
                 ),
                 ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ]

@@ -34,6 +34,14 @@ def test_shapes_and_intercept(gdf):
     assert list(dm.x_names) == ["Intercept", "x"]
 
 
+@pytest.mark.parametrize("formula, name", [("y ~ 1 + x", "y"), ("np.sqrt(y) ~ 1 + x", "np.sqrt(y)")])
+def test_response_name_is_a_string(gdf, formula, name):
+    # F39: y_name was the one-element list design_info.column_names.
+    builder = DesignMatricesBuilder(gdf, formula, verbose=False)
+    assert builder.build().y_name == name
+    assert builder.build_predict(gdf, verbose=False, include_response=True).y_name == name
+
+
 def test_printing_design_matrices_has_no_side_effects(gdf):
     # F12: summary() used to set placeholder model/params/bse/... attributes
     dm = _build(gdf)

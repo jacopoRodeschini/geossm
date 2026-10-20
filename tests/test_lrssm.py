@@ -570,7 +570,7 @@ class TestFittedState:
         with pytest.raises(dataclasses.FrozenInstanceError):
             state.y_name = ("z",)
         assert not state.points[0].flags.writeable and not state.pdim.flags.writeable
-        assert state.cov_function == (cov,) and list(state.y_name) == model.y_name
+        assert state.cov_function == (cov,) and state.y_name == ("y",) and model.y_name == ["y"]
         assert state.builders == tuple(model.builders) and state.dtype == np.dtype(model.dtype)
 
     def test_predict_and_hessian_ignore_later_changes_to_the_model(self, gdf, mesh):
@@ -642,6 +642,22 @@ class TestResultsMethods:
         _, res = fitted
         res.back_transform(lambda v: v)
         np.testing.assert_allclose(res.y_hat_back_list[0], res.y_hat_list[0], rtol=1e-6)
+
+    def test_output_names_use_the_response_name(self, gdf, mesh):
+        # F39: columns read y_hat_['y'], std_hat_['y'] and the summary [['y']].
+        model = _build_model(gdf, mesh)
+        res = model.fit(options=_options(max_iter=1))
+        res.predict(gdf.drop(columns="y"), verbose=False)
+        res.back_transform(lambda v: v)
+        geo = res.to_geo()
+        assert {"y_hat_y", "std_hat_y", "y_hat_back_y", "std_hat_back_y"} <= set(geo["hat"].columns)
+        assert {"y_pred_y", "std_pred_y", "y_pred_back_y", "std_pred_back_y"} <= set(geo["pred"].columns)
+        poly = res.to_poly([DOMAIN], std=True)
+        assert {"y", "std_y"} <= set(poly.columns)
+        assert not any("[" in str(c) for df in (geo["hat"], geo["pred"], poly) for c in df.columns)
+        for obj in (res, model):
+            (line,) = [ln for ln in str(obj.summary()).splitlines() if ln.startswith("Dep. Variables:")]
+            assert line.split()[2] == "y"
 
 
 def test_to_poly_std_with_two_responses():

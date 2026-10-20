@@ -49,9 +49,8 @@ class FittedState:
         Number of sites of each response variable.
     nvar, nlat : int
         Number of response variables and of latent factors.
-    y_name : tuple
-        Response-variable names, one entry per response variable, as on
-        the model (copies).
+    y_name : tuple of str
+        Response-variable names, one per response variable.
     xbeta_names : tuple of tuple of str
         Covariate names of each response variable.
     builders : tuple of DesignMatricesBuilder

@@ -1292,7 +1292,7 @@ class DesignMatricesBuilder:
         return DesignMatrices(
             y=y,
             y_design_info=y_design_info,
-            y_name=y_design_info.column_names if y_design_info else None,
+            y_name=y_design_info.column_names[0] if y_design_info else None,
             y_expr=self.formula_info.response_expr,
             X=Xbeta,
             X_design_info=x_design_info,
@@ -1430,8 +1430,8 @@ class DesignMatricesBuilder:
             y_matrix[np.isinf(y_matrix)] = np.nan
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
-            y_name = y_design_info.column_names
-            self._log(f"y name: {y_name[0]}, shape={y.shape}")
+            y_name = y_design_info.column_names[0]
+            self._log(f"y name: {y_name}, shape={y.shape}")
 
         self._log(f"Computed prediction design matrices with N={N}, P={Xbeta.shape[1]}, T={T}")
 
