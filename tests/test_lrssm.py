@@ -13,6 +13,8 @@ from shapely.geometry import Polygon
 
 from geossm.covmodel import spdeAppoxCov
 from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
+from geossm.stmodel.lrssm import _ks_value_and_grad
+from geossm.stmodel.stmodel_results import _pack_params, _unpack_params
 from tests._known_bugs import known_bug
 from tests._reference import SSMProblem, kalman_filter
 from tests._synthetic import DOMAIN, make_panel_gdf, make_square_mesh
@@ -329,6 +331,62 @@ class TestPredict:
         y_hat = res.y_hat.copy()
         model.predict(gdf.drop(columns="y"), res, verbose=False, std=False)
         np.testing.assert_allclose(res.y_pred, y_hat, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.usefixtures("x64")
+class TestStandardErrors:
+    """Hessian and standard errors (F21), float64 for finite differences."""
+
+    def _fit(self, gdf, mesh, max_iter):
+        model = _build_model(gdf, mesh, dtype=jnp.float64)
+        return model, model.fit(options=_options(max_iter=max_iter))
+
+    def test_hessian_matches_finite_differences(self, gdf, mesh):
+        model, res = self._fit(gdf, mesh, max_iter=30)
+        H = np.asarray(res._compute_hessian()[0])
+
+        # Independent check: central second differences of the observed
+        # log-likelihood in the same flat parameterisation.
+        params = res._inference_params()
+        logL = model._observed_logL(res.y_obs, res.Xbeta, params.x0.value, params.Sigma0.value)
+        vec0, meta = _pack_params(params, dtype=jnp.float64)
+        f = jax.jit(lambda v: logL(_unpack_params(v, params, meta)))
+        x0 = np.asarray(vec0)
+        h = 1e-3 * np.maximum(np.abs(x0), 0.1)
+        n = x0.size
+        E = np.eye(n)
+        fd = np.empty((n, n))
+        for i in range(n):
+            for j in range(i, n):
+                fpp = float(f(x0 + h[i] * E[i] + h[j] * E[j]))
+                fpm = float(f(x0 + h[i] * E[i] - h[j] * E[j]))
+                fmp = float(f(x0 - h[i] * E[i] + h[j] * E[j]))
+                fmm = float(f(x0 - h[i] * E[i] - h[j] * E[j]))
+                fd[i, j] = fd[j, i] = (fpp - fpm - fmp + fmm) / (4 * h[i] * h[j])
+        np.testing.assert_allclose(H, fd, rtol=1e-3, atol=1e-4 * np.abs(H).max())
+
+        res.compute_cov_params()
+        se = np.asarray(res.bse_vector)
+        assert np.all(np.isfinite(se)) and np.all(se > 0)
+
+    def test_indefinite_hessian_gives_nan_standard_errors(self, gdf, mesh):
+        # After 3 EM iterations this estimate is not at a maximum: the Hessian
+        # has a positive eigenvalue, so -H^-1 is not a covariance matrix.
+        _, res = self._fit(gdf, mesh, max_iter=3)
+        with pytest.warns(RuntimeWarning, match="not negative definite"):
+            res.compute_cov_params()
+        with pytest.warns(RuntimeWarning, match="set to NaN"):  # from bse_vector
+            assert np.all(np.isnan(np.asarray(res.bse_vector)))
+
+
+class TestCompilation:
+    def test_refit_does_not_recompile_ks_objective(self, fitted):
+        # F20: the ks objective is compiled once per process and mesh size,
+        # not once per fit().
+        model, _ = fitted
+        before = _ks_value_and_grad._cache_size()
+        model.fit(options=_options(max_iter=2))
+        assert _ks_value_and_grad._cache_size() == before > 0
 
 
 class TestSimulate:

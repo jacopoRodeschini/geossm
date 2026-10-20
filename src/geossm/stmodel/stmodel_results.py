@@ -3,6 +3,7 @@ from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import Param, ModelParams, FitOptions
 from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
+from geossm.ssm.statespace import _highest_matmul_precision
 from types import SimpleNamespace
 from scipy import stats
 import time
@@ -441,8 +442,10 @@ class LRStateSpaceResults(StateSpaceResults):
             return logL(p)
 
         ts = time.time()
-        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
-        hesfun = jax.hessian(fun_flat)
+        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params).
+        # Jitted as one program (instead of ~265 eagerly compiled operations),
+        # at full matmul precision like the other kernels (F21, F31).
+        hesfun = jax.jit(_highest_matmul_precision(jax.hessian(fun_flat)))
         # Evaluate the Hessian at the estimated parameters
         hessian = hesfun(vec0)
         jax.block_until_ready(hessian)
@@ -488,10 +491,24 @@ class LRStateSpaceResults(StateSpaceResults):
         H = 0.5 * (H + H.T)
         # eps = 1e-6
         # H += eps * jnp.eye(H.shape[0], dtype=H.dtype)
-        cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
-        # check if it is postive definte
-        # chol = jnp.linalg.cholesky(cov_params)
+        # At a maximum the Hessian of the log-likelihood is negative definite;
+        # otherwise -H^-1 is not a covariance matrix and no SE is reported.
+        eig = np.asarray(jnp.linalg.eigvalsh(H))
+        n_bad = int(np.sum(~(eig < 0)))
+        if n_bad:
+            warnings.warn(
+                "The Hessian of the log-likelihood is not negative definite "
+                "({} of {} eigenvalues are non-negative or not finite; largest {:.3g}), "
+                "so the estimate is not at a strict maximum or the Hessian is "
+                "inaccurate. Standard errors are set to NaN.".format(
+                    n_bad, eig.size, float(np.max(eig)) if eig.size else float("nan")),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            cov_params = jnp.full(H.shape, jnp.nan, dtype=H.dtype)
+        else:
+            cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
         self._cov_params = cov_params
         return cov_params

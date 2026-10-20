@@ -354,6 +354,56 @@ def _compute_A2_jax_kernel(
     return jnp.stack(W_rows, axis=0)
 
 
+def _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner):
+    """Block-diagonal marginal precision of the inner FEM nodes, one block
+    per covariance function, differentiable in `ks`.
+
+    Same math as `spdeAppoxCov.precision(marginal=True)` (NumPy/SciPy, used by
+    `fit()`): Q = sigma2(k) K C^-1 K with K = k^2 C + G (nu = 1), then the
+    Schur complement Q_11 - Q_12 Q_22^-1 Q_12' of the inner nodes, solving for
+    Q_22^-1 Q_12' directly instead of inverting Q_22.
+
+    `perm_list` holds the inner-then-outer node permutations (integer
+    arrays) and `n_inner` the number of inner nodes (Python ints, static
+    under `jit`), so that the block sizes are known at trace time. Shared by
+    the M-step `ks` objective and the Hessian of the log-likelihood.
+    """
+    blocks = []
+    for ki, C, G, perm, ni in zip(ks, mass_list, stiff_list, perm_list, n_inner):
+        Ci = jnp.diag(1.0 / C.diagonal())
+        K = ki**2 * C + G
+        # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
+        sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
+                   (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
+        Qi = sigma2k * (K @ Ci @ K)
+
+        Qperm = Qi[perm][:, perm]
+        Q_11 = Qperm[:ni, :ni]
+        Q_12 = Qperm[:ni, ni:]
+        Q_22 = Qperm[ni:, ni:]
+        blocks.append(Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T))
+
+    return jax.scipy.linalg.block_diag(*blocks)
+
+
+def _ks_objective(params, T, Omega, mass_list, stiff_list, perm_list, n_inner):
+    """M-step objective for `ks = exp(params)`: the `ks`-dependent part of the
+    expected complete-data negative log-likelihood, -T log|Q^-1| + tr(Q^-1 Omega),
+    scaled by 1e-4 (as in `_minf`)."""
+    ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
+    invQ = _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner)
+    logdet_invQ = jnp.linalg.slogdet(invQ)[1]
+    fun = -T * logdet_invQ + jnp.trace(invQ @ Omega)
+    return fun / 1e4
+
+
+# Compiled once per process (per array shapes), not once per fit() (F20); full
+# matmul precision for the forward and backward pass (F31).
+_ks_value_and_grad = jax.jit(
+    _highest_matmul_precision(jax.value_and_grad(_ks_objective)), static_argnums=(6,)
+)
+
+
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
@@ -1714,9 +1764,9 @@ class LRStateSpaceModel(StateSpaceModel):
         # )
 
         # 'L-BFGS-B' with exact JAX gradients from `ks_value_and_grad`
-        # (built once per `fit()` call in `_build_ks_value_and_grad`, JIT
-        # compiled on its first call and reused for every EM iteration and
-        # every evaluation within each L-BFGS-B call): converges in far
+        # (`_build_ks_value_and_grad`; compiled once per process and mesh
+        # size, reused for every fit, EM iteration and evaluation within
+        # each L-BFGS-B call): converges in far
         # fewer objective evaluations than derivative-free Nelder-Mead,
         # since it exploits the analytic gradient instead of building a
         # discrete simplex around the current point.
@@ -1781,88 +1831,39 @@ class LRStateSpaceModel(StateSpaceModel):
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
-    def _build_ks_value_and_grad(self):
+    def _spde_mesh_arrays(self):
         """
-        Build a JIT-compiled value-and-gradient function for the M-step's
-        `ks` (Matern rescale) optimisation objective -- the same objective
-        `_minf` computes in plain NumPy/SciPy-sparse, but computing the
-        precision matrix with JAX (same math as `_compute_invQ_jax`, which
-        is used, via `jax.hessian` with no surrounding `jit`, for the
-        standard-error computation in `stmodel_results._compute_hessian`)
-        so `ks` can be optimised with exact gradients (L-BFGS-B) instead of
-        the derivative-free Nelder-Mead simplex `_minf` was used with.
-
-        Returns `value_and_grad_fn(params, T, Omega) -> (value, grad)`, as
-        plain JAX arrays (still on the model's `self.dtype` / `self.backend`).
-
-        stiff_list/mass_list/perm_list/n_inner_list depend only on the FEM
-        mesh -- fixed for the whole `fit()` call -- so the intent is to
-        build this once per `fit()` call (like `basis`/`Phi`) and reuse the
-        compiled function across every EM iteration and every one of
-        L-BFGS's internal evaluations, rather than rebuilding it (and
-        re-paying the one-off JIT compilation) every M-step.
-
-        This does NOT reuse `_compute_invQ_jax` directly: that function
-        derives the inner/outer permutation from a boolean mask via
-        `jnp.where(mask, size=n_inner)`, where `size` must be a concrete
-        (non-traced) Python int. That holds under `jax.grad` alone (as in
-        `_compute_hessian`, which never wraps it in `jit`) because only the
-        differentiated argument is abstracted there -- but under `jax.jit`,
-        *every* array-valued expression built during tracing becomes an
-        abstract tracer, including ones derived from closed-over "constant"
-        arrays, so `n_inner` would itself become a tracer and
-        `jnp.where(..., size=n_inner)` would raise a ConcretizationTypeError.
-        Precomputing the permutation as plain NumPy (Python ints and NumPy
-        index arrays, never touched by any JAX op) below keeps it a genuine
-        static constant that `jit` can bake in as a fixed output shape,
-        sidestepping the issue entirely.
+        Mesh inputs of `_spde_marginal_precision` for the model's covariance
+        functions: mass and stiffness matrices (dense, model dtype), the
+        inner-then-outer node permutations, and the inner-node counts
+        (Python ints, static under `jit`).
         """
-        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
         mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
-
+        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
         perm_list = []
-        n_inner_list = []
+        n_inner = []
         for cov in self.cov_function:
             inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
-            ii = np.where(inner_mask)[0]
-            oi = np.where(~inner_mask)[0]
-            perm_list.append(np.concatenate([ii, oi]))
-            n_inner_list.append(int(inner_mask.sum()))
+            perm_list.append(jnp.asarray(np.concatenate([np.where(inner_mask)[0], np.where(~inner_mask)[0]]),
+                                         dtype=self.itype))
+            n_inner.append(int(inner_mask.sum()))
+        return mass_list, stiff_list, perm_list, tuple(n_inner)
 
-        def objective(params, T, Omega):
-            ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
+    def _build_ks_value_and_grad(self):
+        """
+        Value-and-gradient function `(params, T, Omega) -> (value, grad)` of
+        the M-step's `ks` objective (`_ks_objective`), for L-BFGS-B with
+        exact gradients. It binds this model's mesh arrays to the
+        module-level compiled `_ks_value_and_grad`, so a new `fit()` (or a
+        new model on a mesh of the same size) reuses the compiled function
+        instead of recompiling it (F20).
+        """
+        mesh = self._spde_mesh_arrays()
 
-            invQ_blocks = []
-            for ki, C, G, perm, n_inner in zip(ks, mass_list, stiff_list, perm_list, n_inner_list):
-                Ci = jnp.diag(1.0 / C.diagonal())
-                K = ki**2 * C + G
-                # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
-                sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
-                           (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
-                Qi = sigma2k * (K @ Ci @ K)
+        def value_and_grad(params, T, Omega):
+            return _ks_value_and_grad(params, T, Omega, *mesh)
 
-                Qperm = Qi[perm][:, perm]
-                Q_11 = Qperm[:n_inner, :n_inner]
-                Q_12 = Qperm[:n_inner, n_inner:]
-                Q_22 = Qperm[n_inner:, n_inner:]
-                # Same Schur-complement idea as `spdeAppoxCov.precision(marginal=True)`
-                # (`spdeAppoxCov._schur_marginal_precision`): solve directly
-                # for Q_22^{-1} @ Q_12.T instead of inverting all of Q_22.
-                # Reimplemented here in pure JAX ops (rather than calling
-                # spdeAppoxCov, which is numpy/scipy.sparse-based) so `ks`
-                # stays differentiable end-to-end.
-                Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
-                invQ_blocks.append(Q_mar)
-
-            invQ = jax.scipy.linalg.block_diag(*invQ_blocks)
-            logdet_invQ = jnp.linalg.slogdet(invQ)[1]
-            fun = -T * logdet_invQ + jnp.trace(invQ @ Omega)
-            # Same 1e4 rescaling as `_minf`, to keep the two objectives
-            # (and their optimum) directly comparable.
-            return fun / 1e4
-
-        # Full matmul precision for the forward and backward pass (F31).
-        return jax.jit(_highest_matmul_precision(jax.value_and_grad(objective)))
+        return value_and_grad
 
     def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
         """
@@ -1876,18 +1877,10 @@ class LRStateSpaceModel(StateSpaceModel):
         # Compute the FEM basis functions for the latent field
         basis = self._buildBasis_list(self.points, self.cov_function)
 
-        # cov_function = self.cov_function
-        pdim = jnp.asarray(self.pdim, dtype=self.itype)
-
-        # Get latent dimension (i.e. the rank)
-        qdim = jnp.array(
-            [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=self.itype)
-
-        # get the stiff and the mass matrix list
-        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        ninner = [jnp.array(cov.fem_solver.inner, dtype=bool) for cov in self.cov_function]
+        # Block sizes as NumPy arrays: they must stay concrete (jnp.repeat
+        # sizes) when the closure is traced under jit (F21).
+        pdim = np.asarray(self.pdim)
+        qdim = np.asarray([cov.fem_solver.n_inner_points for cov in self.cov_function])
 
         observed_logL = partial(
             self._compute_observed_logL,
@@ -1898,9 +1891,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Sigma0=Sigma0,
             pdim=pdim,
             qdim=qdim,
-            stiff_list=stiff,
-            mass_list=mass,
-            inner_list=ninner,
+            mesh=self._spde_mesh_arrays(),
             nvar= self.nvar,
             nlat= self.nlat,
             )
@@ -1910,8 +1901,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
     def _compute_observed_logL(self, params, y_t, Xbeta, basis,
-                           x0, Sigma0, pdim, qdim,
-                           stiff_list, mass_list, inner_list,
+                           x0, Sigma0, pdim, qdim, mesh,
                            nvar, nlat):
         """
         Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
@@ -1928,7 +1918,7 @@ class LRStateSpaceModel(StateSpaceModel):
         R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
         
 
-        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
+        invQ = _spde_marginal_precision(ks0, *mesh)
         Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0], dtype=invQ.dtype))
 
         _, _, _, _, _, logL = _filter_kernelJAX(
@@ -1941,52 +1931,6 @@ class LRStateSpaceModel(StateSpaceModel):
         # return the positive log-likelihood (to be maximized)
         return logL
     
-    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_list):
-        """
-        Precision matrix — JAX-differenziabile rispetto a ks.
-        stiff_list, mass_list : liste di np.array (estratti da fem_solver)
-        inner_idx_list        : lista di np.array di indici interi
-                                (np.where(fcov.fem_solver.inner)[0])
-        """
-        invQ_blocks = []
-        for i in range(len(ks)):
-            ki = ks[i]
-            C  = jnp.array(mass_list[i])
-            G  = jnp.array(stiff_list[i])
-            current_inner = inner_list[i]
-            
-            Ci      = jnp.diag(1.0 / C.diagonal())
-            K       = ki**2 * C + G
-            # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
-            sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
-                    (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
-            Qi = sigma2k * (K @ Ci @ K)
-
-            # usa indici interi (non boolean) per compatibilità JAX
-            n = len(current_inner)
-            n_inner = sum(current_inner)
-            n_outer = n - n_inner
-            ii = jnp.where(current_inner, size=n_inner)[0]
-            oi = jnp.where(~current_inner, size=n_outer)[0]
-            
-            perm = jnp.concatenate((ii, oi))
-            Qperm = Qi[perm][:, perm]
-            
-            Q_11 = Qperm[:n_inner, :n_inner]
-            Q_12 = Qperm[:n_inner, n_inner:]
-            Q_22 = Qperm[n_inner:, n_inner:]
-               
-            # Same Schur-complement idea as `spdeAppoxCov.precision(marginal=True)`
-            # (used by the non-JAX fit()/sim()/_minf() paths): solve directly
-            # for Q_22^{-1} @ Q_12.T instead of inverting all of Q_22 via a
-            # solve against the identity, which is exactly as expensive as
-            # an explicit inverse and wastes the columns never used below.
-            # Reimplemented in pure JAX ops here so this stays differentiable.
-            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
-            invQ_blocks.append(Q_mar)
-
-        return jax.scipy.linalg.block_diag(*invQ_blocks)
-
     def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
         """
         Compute data-driven initial parameter values used by `fit()` when
@@ -2197,10 +2141,11 @@ class LRStateSpaceModel(StateSpaceModel):
         Returns:
             A tuple of two 1D JAX arrays: (R diagonal, F diagonal).
         """
-        rdiag_vec = jnp.repeat(s2error, repeats=jnp.array(pdim)).astype(
+        # NumPy repeat counts stay concrete when traced under jit (Hessian)
+        rdiag_vec = jnp.repeat(s2error, repeats=np.asarray(pdim)).astype(
             dtype=self.dtype
         )
-        fdiag_vec = jnp.repeat(flatent, repeats=jnp.array(qdim)).astype(
+        fdiag_vec = jnp.repeat(flatent, repeats=np.asarray(qdim)).astype(
             dtype=self.dtype
         )
 
