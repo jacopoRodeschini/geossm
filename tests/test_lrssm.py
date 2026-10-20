@@ -431,19 +431,26 @@ class TestResultsMethods:
         np.testing.assert_allclose(res.y_hat_back_list[0], res.y_hat_list[0], rtol=1e-6)
 
 
-@known_bug("F10", "to_poly(std=True) reuses the name `std` for an array inside its loop",
-           raises=ValueError)
 def test_to_poly_std_with_two_responses():
-    # Stubbed results object: the defect is in to_poly's own loop, so no fit is needed.
+    # F10. Stubbed results object: the defect was in to_poly's own loop, so
+    # no fit is needed. One polygon containing all 4 points, so W = 1/4 * 1'.
     res = object.__new__(LRStateSpaceResults)
     n, T = 4, 3
     pts = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]])
     ts = np.array(["2020-01-01", "2020-01-02", "2020-01-03"], dtype="datetime64[D]")
-    res.y_pred = np.ones((2 * n, T))
-    res.Sigma_y_pred = np.tile(np.eye(2 * n)[:, :, None], (1, 1, T))
+    res.y_pred = np.vstack([np.ones((n, T)), 2.0 * np.ones((n, T))])
+    # Response a: iid unit points. Response b: unit variances, correlation 0.5.
+    Sigma_b = 0.5 * np.eye(n) + 0.5 * np.ones((n, n))
+    Sigma = np.zeros((2 * n, 2 * n))
+    Sigma[:n, :n], Sigma[n:, n:] = np.eye(n), Sigma_b
+    res.Sigma_y_pred = np.tile(Sigma[:, :, None], (1, 1, T))
     res.block_p_pred = np.array([0, n, 2 * n])
     res.points_pred, res.timestamps_pred = [pts, pts], [ts, ts]
     res.crs_pred, res.y_pred_back_list = "EPSG:3857", None
     res.model = types.SimpleNamespace(y_name=["a", "b"])
     out = res.to_poly([Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], std=True)
-    np.testing.assert_allclose(out["std_a"], 0.5)  # sqrt(1/4 * 4 * 1/4) for 4 iid unit points
+    np.testing.assert_allclose(out["a"], 1.0)
+    np.testing.assert_allclose(out["b"], 2.0)
+    # sqrt(w' Sigma w), w = 1/4: a -> sqrt(4/16) = 0.5; b -> sqrt((4 + 12 * 0.5)/16)
+    np.testing.assert_allclose(out["std_a"], 0.5)
+    np.testing.assert_allclose(out["std_b"], np.sqrt(10 / 16))

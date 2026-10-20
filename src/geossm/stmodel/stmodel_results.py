@@ -151,7 +151,7 @@ class LRStateSpaceResults(StateSpaceResults):
         results = results.predict(new_df) # out-of-sample prediction
         results = results.back_transform(g_inv=jnp.exp)  # if y = np.log(...)
         geo = results.to_geo()
-        areal = results.to_poly("regions.shp", uncertainty=True)
+        areal = results.to_poly("regions.shp", std=True)
     """
 
     def __init__(
@@ -1014,7 +1014,7 @@ class LRStateSpaceResults(StateSpaceResults):
         aggregate::
 
             results = results.predict(fine_grid)
-            gdf = results.to_poly("regions.shp", uncertainty=True)
+            gdf = results.to_poly("regions.shp", std=True)
 
         Since the average is linear, with `W` the `(m, n)` averaging
         matrix (`W[k, j] = 1/n_k` for the `n_k` points in polygon `k`), the
@@ -1068,7 +1068,7 @@ class LRStateSpaceResults(StateSpaceResults):
         back_transform : bool, default False
             Aggregate the original-scale predictions instead. Requires
             `.back_transform(g_invs)` to have been run after `.predict()`.
-        uncertainty : bool, default False
+        std : bool, default False
             Also compute the areal predictive std of each polygon mean
             (`std_<var>` columns), `sqrt(diag(W Sigma_t W'))`.
 
@@ -1079,7 +1079,7 @@ class LRStateSpaceResults(StateSpaceResults):
             `timestamp`, the input polygon attributes, then, per response
             variable `<var>` in `model.y_name`: `n_points_<var>`
             (prediction points in the polygon), `<var>` (areal mean), and
-            `std_<var>` (if `uncertainty=True`) -- the last two suffixed
+            `std_<var>` (if `std=True`) -- the last two suffixed
             `_back` if `back_transform=True` -- and `geometry` last.
         """
         import geopandas as geopd
@@ -1150,9 +1150,9 @@ class LRStateSpaceResults(StateSpaceResults):
                 for t in range(T):
                     WS = W @ Sigma[:, :, t]  # (m, n)
                     var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
-                std = _safe_sqrt_variance(var, context="to_poly")
-                std[:, empty] = np.nan  # after the sqrt: already warned above
-                out[f"std_{col}"] = std.ravel()
+                sd = _safe_sqrt_variance(var, context="to_poly")
+                sd[:, empty] = np.nan  # after the sqrt: already warned above
+                out[f"std_{col}"] = sd.ravel()
 
         geom = polygons.geometry.name
         out = out[[c for c in out.columns if c != geom] + [geom]]
