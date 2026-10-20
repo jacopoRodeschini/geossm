@@ -44,7 +44,7 @@ from shapely.geometry import MultiPoint
 from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
-from .stmodel_results import LRStateSpaceResults
+from .stmodel_results import LRStateSpaceResults, FittedState, _read_only_copy
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
@@ -734,7 +734,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
     
 
-    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False):
+    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False,
+                                   builders=None, domain=None):
         """
         Build the design matrix for new (out-of-sample) locations/times,
         the way `predict()` needs it: reusing each formula's already-fitted
@@ -748,13 +749,17 @@ class LRStateSpaceModel(StateSpaceModel):
         returns it as a trailing `y_obs` array (`None` per-variable rows
         become `NaN` if `df` is missing that variable's response) -- see
         the public `getDesignMatrix`, the entry point for that case.
+
+        `builders`/`domain` default to the model's; `predict` passes those of
+        the fitted results (`FittedState`).
         """
         if verbose is None:
             verbose = self.verbose
 
         self._log("Building observation grid...")
         points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(
-            df, verbose=verbose, include_response=include_response
+            df, verbose=verbose, include_response=include_response,
+            builders=builders, domain=domain,
         )
         self._log("Building observation grid... Done.")
 
@@ -1049,7 +1054,12 @@ class LRStateSpaceModel(StateSpaceModel):
         modelresults : LRStateSpaceResults
             Results of a previous `fit()` call, providing the estimated
             parameters (`modelresults.params`) and smoothed states used to
-            build the prediction. Updated and returned in place.
+            build the prediction, together with the covariance functions
+            of that fit (so the prediction does not depend on later
+            `fit()`/`setup()` calls on the model, and neither the model nor
+            its covariance functions are modified). Updated and returned in
+            place: the `*_pred` attributes of a previous `predict()` on the
+            same results are replaced.
         verbose : bool, default True
             Verbosity for the observation-grid/design-matrix construction
             logging.
@@ -1080,7 +1090,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # and reuses its X_design_info so stateful transforms (e.g.
         # standardize()) are evaluated with the training mean/std rather
         # than recomputed on `df`.
-        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(df, verbose=verbose)
+        # The fit-time state of these results (F09): builders/domain for the
+        # design matrix, covariance functions and dtype for the basis.
+        state = getattr(modelresults, "_fitted_state", None)
+        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(
+            df, verbose=verbose,
+            builders=None if state is None else state.builders,
+            domain=None if state is None else state.domain,
+        )
 
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
@@ -1089,7 +1106,6 @@ class LRStateSpaceModel(StateSpaceModel):
         params = modelresults.params
         beta = params.beta.value
         A = params.A.value
-        ks = params.ks.value
 
         self._log("Get the filtered state")
         x_T = modelresults.x_smoothed
@@ -1119,14 +1135,14 @@ class LRStateSpaceModel(StateSpaceModel):
         x_T = x_T[:, cols]
         P_T = P_T[:, :, cols]
 
-        # update the cov_function rescale
-        for cov, ksi in zip(self.cov_function, ks):
-            cov.rescale = ksi
-        
         self._log("Computing the SSM model matrice H...")
 
-        # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(points, self.cov_function)
+        # Basis of the covariance functions these results were fitted with
+        # (their fit-time snapshot, F09), not the model's current ones. The
+        # basis does not depend on ks, so no covariance function is modified.
+        cov_function = state.cov_function if state is not None else self.cov_function
+        basis = self._buildBasis_list(points, cov_function,
+                                      dtype=None if state is None else state.dtype)
         
         # ---- build parametrised matrices
         H = self._buildH_dense(A, basis)  # dense
@@ -1175,6 +1191,28 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
         return y_hat_full, Sigma_y_hat_full, tdelta
+
+    def _get_fitted_state(self):
+        """
+        The model configuration that fitted results need later (a frozen
+        `FittedState`, F09): covariance functions, observation points,
+        block sizes, names, formula builders, domains and dtypes.
+        """
+        return FittedState(
+            cov_function=tuple(self.cov_function),
+            points=tuple(_read_only_copy(p) for p in self.points),
+            pdim=_read_only_copy(self.pdim),
+            nvar=int(self.nvar),
+            nlat=int(self.nlat),
+            # copies of the entries (one-element lists today, see F39), so
+            # that names and output column names are unchanged
+            y_name=tuple(list(n) if isinstance(n, list) else n for n in self.y_name),
+            xbeta_names=tuple(tuple(names) for names in self.xbeta_names),
+            builders=tuple(self.builders),
+            domain=tuple(self.domain),
+            dtype=np.dtype(self.dtype),
+            itype=np.dtype(self.itype),
+        )
 
     def _require_setup(self, method):
         """Raise a clear error if `setup()` (the latent covariance functions)
@@ -1576,6 +1614,7 @@ class LRStateSpaceModel(StateSpaceModel):
             convergence=converged,
             termination=termination,
             llf=logL_cur,
+            fitted_state=self._get_fitted_state(),
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
@@ -1844,21 +1883,24 @@ class LRStateSpaceModel(StateSpaceModel):
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
-    def _spde_mesh_arrays(self):
+    def _spde_mesh_arrays(self, cov_function=None, dtype=None, itype=None):
         """
-        Mesh inputs of `_spde_marginal_precision` for the model's covariance
-        functions: mass and stiffness matrices (dense, model dtype), the
-        inner-then-outer node permutations, and the inner-node counts
-        (Python ints, static under `jit`).
+        Mesh inputs of `_spde_marginal_precision` for `cov_function` (default:
+        the model's covariance functions): mass and stiffness matrices
+        (dense, model dtype), the inner-then-outer node permutations, and the
+        inner-node counts (Python ints, static under `jit`).
         """
-        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
+        cov_function = self.cov_function if cov_function is None else cov_function
+        dtype = self.dtype if dtype is None else dtype
+        itype = self.itype if itype is None else itype
+        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=dtype) for cov in cov_function]
+        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=dtype) for cov in cov_function]
         perm_list = []
         n_inner = []
-        for cov in self.cov_function:
+        for cov in cov_function:
             inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
             perm_list.append(jnp.asarray(np.concatenate([np.where(inner_mask)[0], np.where(~inner_mask)[0]]),
-                                         dtype=self.itype))
+                                         dtype=itype))
             n_inner.append(int(inner_mask.sum()))
         return mass_list, stiff_list, perm_list, tuple(n_inner)
 
@@ -1878,22 +1920,26 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return value_and_grad
 
-    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
+    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0, fitted_state=None):
         """
         Build a `ModelParams -> scalar` closure computing the observed
         log-likelihood at fixed `y_obs`/`Xbeta`/`x0`/`Sigma0`, used by
         `LRStateSpaceResults._compute_hessian` to differentiate the
         log-likelihood w.r.t. the free parameters via `jax.hessian`.
-        """
 
+        `fitted_state` (a `FittedState`) gives the observation points,
+        covariance functions, block sizes and dtypes to use; by default the
+        model's current ones. Results pass their own (F09).
+        """
+        state = self._get_fitted_state() if fitted_state is None else fitted_state
 
         # Compute the FEM basis functions for the latent field
-        basis = self._buildBasis_list(self.points, self.cov_function)
+        basis = self._buildBasis_list(state.points, state.cov_function, dtype=state.dtype)
 
         # Block sizes as NumPy arrays: they must stay concrete (jnp.repeat
         # sizes) when the closure is traced under jit (F21).
-        pdim = np.asarray(self.pdim)
-        qdim = np.asarray([cov.fem_solver.n_inner_points for cov in self.cov_function])
+        pdim = np.asarray(state.pdim)
+        qdim = np.asarray([cov.fem_solver.n_inner_points for cov in state.cov_function])
 
         observed_logL = partial(
             self._compute_observed_logL,
@@ -1904,9 +1950,10 @@ class LRStateSpaceModel(StateSpaceModel):
             Sigma0=Sigma0,
             pdim=pdim,
             qdim=qdim,
-            mesh=self._spde_mesh_arrays(),
-            nvar= self.nvar,
-            nlat= self.nlat,
+            mesh=self._spde_mesh_arrays(state.cov_function, dtype=state.dtype, itype=state.itype),
+            nvar=state.nvar,
+            nlat=state.nlat,
+            dtype=state.dtype,
             )
          
         return observed_logL
@@ -1915,7 +1962,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
     def _compute_observed_logL(self, params, y_t, Xbeta, basis,
                            x0, Sigma0, pdim, qdim, mesh,
-                           nvar, nlat):
+                           nvar, nlat, dtype=None):
         """
         Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
         Note that x0, Sigma0 are considered fixed and known, and are passed as arguments. No std computation on them.
@@ -1928,7 +1975,7 @@ class LRStateSpaceModel(StateSpaceModel):
         ks0   = params.ks.value
 
         H    = self._buildH_dense(A0, basis)
-        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
+        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim, dtype=dtype)
         
 
         invQ = _spde_marginal_precision(ks0, *mesh)
@@ -2097,7 +2144,7 @@ class LRStateSpaceModel(StateSpaceModel):
         return ModelParams(**fields)
 
     # dense matrix
-    def _buildBasis_list(self, points, hmesh):
+    def _buildBasis_list(self, points, hmesh, dtype=None):
         """
         Evaluate each latent factor's FEM basis functions at each response
         variable's observation sites, row-normalised so each site's basis
@@ -2125,7 +2172,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 notfindInxRow.append(notfindInxij)
 
                 # conver into coo format
-                hij = jnp.asarray(hij.toarray(), dtype=self.dtype)
+                hij = jnp.asarray(hij.toarray(), dtype=self.dtype if dtype is None else dtype)
 
                 # Append the sub matrices
                 hrow.append(hij)
@@ -2135,7 +2182,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return basis
 
-    def _buildRF_dense(self, s2error, flatent, pdim, qdim):
+    def _buildRF_dense(self, s2error, flatent, pdim, qdim, dtype=None):
         """
         Builds R and F as their diagonals (1D vectors).
 
@@ -2154,12 +2201,13 @@ class LRStateSpaceModel(StateSpaceModel):
         Returns:
             A tuple of two 1D JAX arrays: (R diagonal, F diagonal).
         """
+        dtype = self.dtype if dtype is None else dtype
         # NumPy repeat counts stay concrete when traced under jit (Hessian)
         rdiag_vec = jnp.repeat(s2error, repeats=np.asarray(pdim)).astype(
-            dtype=self.dtype
+            dtype=dtype
         )
         fdiag_vec = jnp.repeat(flatent, repeats=np.asarray(qdim)).astype(
-            dtype=self.dtype
+            dtype=dtype
         )
 
         return rdiag_vec, fdiag_vec
@@ -2329,7 +2377,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T, builders
 
-    def _asPredictionDataFrames(self, df):
+    def _asPredictionDataFrames(self, df, builders=None):
         """
         Normalize `df` (as accepted by `predict`/`getDesignMatrix`) to a
         list of GeoDataFrames, one per formula/builder (`self.builders`).
@@ -2342,15 +2390,16 @@ class LRStateSpaceModel(StateSpaceModel):
         one entry per formula.
         """
         if isinstance(df, (list, tuple)):
-            if len(df) != len(self.builders):
+            if len(df) != len(builders):
                 raise ValueError(
                     f"Number of dataframes ({len(df)}) must match number of "
-                    f"formulas ({len(self.builders)})"
+                    f"formulas ({len(builders)})"
                 )
             return list(df)
-        return [df] * len(self.builders)
+        return [df] * len(builders)
 
-    def _buildPredictionGrid(self, df, verbose=True, include_response=False):
+    def _buildPredictionGrid(self, df, verbose=True, include_response=False,
+                             builders=None, domain=None):
         """
         Build the design matrices for new (prediction) locations/times, one
         per formula, reusing each formula's fitted `DesignMatricesBuilder`
@@ -2367,11 +2416,13 @@ class LRStateSpaceModel(StateSpaceModel):
         response on its dataframe (see `DesignMatricesBuilder.build_predict`)
         -- that dataframe must then contain the response column.
         """
-        dfs_in = self._asPredictionDataFrames(df)
+        builders = self.builders if builders is None else builders
+        domain = self.domain if domain is None else domain
+        dfs_in = self._asPredictionDataFrames(df, builders)
 
         dfs = [
             b.build_predict(d, verbose=verbose, domain=dom, include_response=include_response)
-            for b, d, dom in zip(self.builders, dfs_in, self.domain)
+            for b, d, dom in zip(builders, dfs_in, domain)
         ]
 
         T = [gr.T for gr in dfs]

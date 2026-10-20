@@ -10,13 +10,71 @@ import time
 import warnings
 import jax
 import jax.numpy as jnp
-from dataclasses import replace, fields
+from dataclasses import dataclass, replace, fields
 from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
 
 
 ArrayLike = Optional[Any]
 
 # %% [Utils] Define pack/unpack helpers to flatten params to a 1D array
+
+def _read_only_copy(a):
+    a = np.array(a, copy=True)
+    a.setflags(write=False)
+    return a
+
+
+@dataclass(frozen=True)
+class FittedState:
+    """
+    Configuration of an `LRStateSpaceModel` at the end of a `fit()`: what
+    `LRStateSpaceResults` needs, besides the estimates it holds itself, to
+    recompute quantities later (the Hessian, predictions at new locations,
+    names in summaries), so that a later `fit()`/`setup()`/`set()` on the
+    model does not change those results (findings F09, F27).
+
+    Built by `LRStateSpaceModel._get_fitted_state()`. Fields cannot be
+    reassigned; sequences are tuples and arrays are read-only copies. The
+    covariance functions, formula builders and domains are kept by
+    reference: they are configuration and must not be modified (e.g.
+    re-`setup()`) after fitting.
+
+    Attributes
+    ----------
+    cov_function : tuple of spdeAppoxCov
+        Latent covariance functions of the fit (FEM mesh and basis).
+    points : tuple of numpy.ndarray
+        Observation sites of each response variable, shape ``(n_i, 2)``.
+    pdim : numpy.ndarray
+        Number of sites of each response variable.
+    nvar, nlat : int
+        Number of response variables and of latent factors.
+    y_name : tuple
+        Response-variable names, one entry per response variable, as on
+        the model (copies).
+    xbeta_names : tuple of tuple of str
+        Covariate names of each response variable.
+    builders : tuple of DesignMatricesBuilder
+        Fitted formula builders, used to build the design matrix at new
+        locations with the training transforms (e.g. `standardize()`).
+    domain : tuple
+        Measurement-equation domain of each response variable.
+    dtype, itype : numpy.dtype
+        Float and integer dtype of the model.
+    """
+
+    cov_function: tuple
+    points: tuple
+    pdim: np.ndarray
+    nvar: int
+    nlat: int
+    y_name: tuple
+    xbeta_names: tuple
+    builders: tuple
+    domain: tuple
+    dtype: np.dtype
+    itype: np.dtype
+
 
 def _pack_params(params, dtype=jnp.float32):
     """Flatten free parameter values into one 1D JAX array."""
@@ -133,6 +191,13 @@ class LRStateSpaceResults(StateSpaceResults):
       support from the prediction points to polygons (`to_poly`).
     - A `statsmodels`-style textual report (`summary`).
 
+    A results object is a snapshot of the fit that produced it: the
+    parameters, states, observation-noise variances, names and the
+    covariance functions of that fit are recorded when it is created, so a
+    later `fit()` or `setup()` on the model does not change it (the new fit
+    returns its own results). The covariance objects are kept by
+    reference and should not be re-`setup()` afterwards.
+
     Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
     (in-sample fitted), `y_obs_list` (training observations),
     `residuals_list`, and -- after `.predict()` -- `y_pred_list`/
@@ -162,6 +227,7 @@ class LRStateSpaceResults(StateSpaceResults):
         options: FitOptions = None,
         convergence: bool = None,
         termination: str = None,
+        fitted_state=None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -228,6 +294,11 @@ class LRStateSpaceResults(StateSpaceResults):
         self.options = options
         self.convergence = convergence
         self.termination = termination
+        # Fit-time snapshot of the model state (covariance functions,
+        # points, block sizes, names) used by the methods below, so that
+        # later fit()/setup() calls on the model do not change these
+        # results (F09); see `FittedState`.
+        self._fitted_state = fitted_state
 
         # Cumulative per-response-variable index boundaries for the
         # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
@@ -383,6 +454,18 @@ class LRStateSpaceResults(StateSpaceResults):
         if self.llf is None:
             self.llf = self.llf_path[-1]
     
+    def _snapshot(self, name):
+        """Fit-time value `name` of the model state (see `FittedState`);
+        falls back to the model's current attribute for results built
+        without one."""
+        state = getattr(self, "_fitted_state", None)
+        return getattr(state, name) if state is not None else getattr(self.model, name)
+
+    @property
+    def _y_names(self):
+        """Response-variable names of the fit (snapshot, see `_snapshot`)."""
+        return self._snapshot("y_name")
+
     def _inference_params(self):
         """
         Params used for Hessian/inference: a copy of self.params with x0 and
@@ -428,7 +511,8 @@ class LRStateSpaceResults(StateSpaceResults):
         Sigma0 = params.Sigma0.value
 
         # Get the scalar positive log-likelihood function
-        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
+        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0,
+                                         fitted_state=getattr(self, "_fitted_state", None))
         # fun(params)
 
         # Pack free params into a flat array
@@ -915,7 +999,7 @@ class LRStateSpaceResults(StateSpaceResults):
         geo["hat"].to_file("fitted.shp")
         geo["pred"].to_file("predictions.shp")
         """
-        y_names = self.model.y_name
+        y_names = self._y_names
 
         gdf_hat = self._build_geo_dataframe(
             y_names, self.points_hat, self.timestamps_hat,
@@ -1105,7 +1189,7 @@ class LRStateSpaceResults(StateSpaceResults):
                 )
             Sigma_list = [None] * len(y_list)
 
-        y_names = self.model.y_name
+        y_names = self._y_names
         ts = self.timestamps_pred[0]
         for name, t in zip(y_names, self.timestamps_pred):
             if len(t) != len(ts) or not np.array_equal(np.asarray(t), np.asarray(ts)):
@@ -1273,14 +1357,14 @@ class LRStateSpaceResults(StateSpaceResults):
 
         # check the len of g_invs and if it matches the number of response variables
         if isinstance(g_invs, (list, tuple)):
-            if len(g_invs) != len(self.model.y_name):
+            if len(g_invs) != len(self._y_names):
                 raise ValueError(
                     f"g_invs must be a single callable or a list/tuple of callables "
-                    f"matching the number of response variables ({len(self.model.y_name)}), "
+                    f"matching the number of response variables ({len(self._y_names)}), "
                     f"but got {len(g_invs)}."
                 )
         else:
-            g_invs = [g_invs] * len(self.model.y_name)
+            g_invs = [g_invs] * len(self._y_names)
 
 
         if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
@@ -1483,13 +1567,13 @@ class LRStateSpaceResults(StateSpaceResults):
         # Parameter names for every table below, padded to a common width so
         # the name column lines up across the (independently-sized) tables
         # produced by add_table_params.
-        xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
+        xnames_stack = [item for sublist in self._snapshot("xbeta_names") for item in sublist]
         meas_err_names = [f"s2e_{i}" for i in range(self.params.s2e.size)] + [
             f"A_{i}_{j}"
             for i in range(self.params.A.shape[0])
             for j in range(self.params.A.shape[1])
         ]
-        matern_names = [f"rescale_{j}" for j in range(len(self.model.cov_function))]
+        matern_names = [f"rescale_{j}" for j in range(len(self._snapshot("cov_function")))]
         latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
         state_names = matern_names + latent_names
 

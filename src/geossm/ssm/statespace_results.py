@@ -280,6 +280,15 @@ class StateSpaceResults:
         # ---- internal cache ----
         self._residuals: Optional[np.ndarray] = None
 
+        # ---- snapshot of the model state the methods below need (F09):
+        # later fit()/set() calls on the model must not change these results.
+        # The model holds the matrices of these results' parameters now.
+        R = getattr(model, "R", None) if model is not None else None
+        self._R = None if R is None else np.array(R, dtype=self._dtype, copy=True)
+        shape = getattr(model, "shape", None) if model is not None else None
+        self._model_shape = None if shape is None else tuple(int(v) for v in shape)
+        self._model_y_name = getattr(model, "y_name", None) if model is not None else None
+
         # convert arrays if needed
         self.to_numpy()
 
@@ -544,9 +553,11 @@ class StateSpaceResults:
         \\sqrt{\\mathrm{diag}(\\Sigma_{\\hat y, t})}`, where
         :math:`\\Sigma_{\\hat y, t}` is `Sigma_y_hat` (the state-driven
         predictive covariance, excluding observation noise) plus, when
-        ``prediction=True``, the observation noise covariance ``R`` read
-        from ``self.model`` - turning a confidence interval for the mean
-        response into a prediction interval for a new observation.
+        ``prediction=True``, the observation noise covariance ``R`` of the
+        parameters these results were computed with (recorded when they
+        were created, so a later fit of the model does not change them) -
+        turning a confidence interval for the mean response into a
+        prediction interval for a new observation.
 
         Parameters
         ----------
@@ -578,7 +589,6 @@ class StateSpaceResults:
             raise ValueError("y_hat not available.")
 
         p, T = y_hat.shape
-        model = getattr(self, "model", None)
 
         # Sigma_y_hat is snapshotted at fit time by the concrete model
         # subclass (e.g. LRStateSpaceResults), not reconstructed here from
@@ -593,8 +603,10 @@ class StateSpaceResults:
                 "available on this results object."
             )
 
-        R = np.asarray(getattr(model, "R", 0.0)) if model is not None else np.asarray(0.0)
-        R_diag_matrix = np.diag(R) if (prediction and R.ndim > 0) else None
+        # Observation-noise variances of the parameters these results were
+        # computed with (snapshotted at construction), not the model's current R
+        R = getattr(self, "_R", None)
+        R_diag_matrix = np.diag(R) if (prediction and R is not None and R.ndim > 0) else None
 
         lower = np.zeros((p, T), dtype=self.dtype)
         upper = np.zeros((p, T), dtype=self.dtype)
@@ -759,7 +771,8 @@ class StateSpaceResults:
 
 
         # top-left / top-right small tables
-        p, q, T = self.model.shape if hasattr(self.model, "shape") else ("N/A", "N/A", "N/A")
+        shape = getattr(self, "_model_shape", None)
+        p, q, T = shape if shape is not None else ("N/A", "N/A", "N/A")
 
         runtime_label, runtime_value = self._format_runtime_summary(
             [
@@ -778,7 +791,7 @@ class StateSpaceResults:
                         f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
                     ],
                 ),
-                ("Dep. Variables:", lambda: [self.model.y_name if hasattr(self.model, "y_name") else "N/A"]),
+                ("Dep. Variables:", lambda: [getattr(self, "_model_y_name", None) or "N/A"]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
                 ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),

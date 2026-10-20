@@ -3,6 +3,7 @@
 One EM fit is shared by the module (about 10 s including JIT compilation).
 """
 
+import dataclasses
 import types
 
 import jax
@@ -14,7 +15,7 @@ from shapely.geometry import Polygon
 from geossm.covmodel import spdeAppoxCov
 from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
 from geossm.stmodel.lrssm import _ks_value_and_grad
-from geossm.stmodel.stmodel_results import _pack_params, _unpack_params
+from geossm.stmodel.stmodel_results import FittedState, _pack_params, _unpack_params
 from tests._known_bugs import known_bug
 from tests._printing import assert_printing_is_side_effect_free
 from tests._reference import SSMProblem, kalman_filter
@@ -483,6 +484,41 @@ class TestResultsLifecycle:
         np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
         np.testing.assert_array_equal(res.predict(newdata, verbose=False, std=False).y_pred, y_pred)
         assert f"q = {q}" in text and f"q = {q}" in str(res.summary())
+
+
+class TestFittedState:
+    """The fit-time configuration kept by results (`FittedState`, F09/F27)."""
+
+    def _fit(self, gdf, mesh, max_iter=3):
+        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+        model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu").setup([cov])
+        return model, cov, model.fit(options=_options(max_iter=max_iter))
+
+    def test_fitted_state_is_frozen_and_read_only(self, gdf, mesh):
+        model, cov, res = self._fit(gdf, mesh, max_iter=2)
+        state = res._fitted_state
+        assert isinstance(state, FittedState)
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            state.y_name = ("z",)
+        assert not state.points[0].flags.writeable and not state.pdim.flags.writeable
+        assert state.cov_function == (cov,) and list(state.y_name) == model.y_name
+        assert state.builders == tuple(model.builders) and state.dtype == np.dtype(model.dtype)
+
+    def test_predict_and_hessian_ignore_later_changes_to_the_model(self, gdf, mesh):
+        model, _, res = self._fit(gdf, mesh)
+        newdata = gdf.drop(columns="y")
+        y_pred = res.predict(newdata, verbose=False, std=False).y_pred.copy()
+        H = np.asarray(res._compute_hessian()[0]).copy()
+
+        # Outside code changes the model configuration the results used: the
+        # formula builders (predict crashed with the live ones), points and
+        # block sizes (Hessian), and the domain (it only flags points).
+        model.domain = [Polygon([(0, 0), (5, 0), (5, 5), (0, 5)])]
+        model.builders = model.points = model.pdim = None
+
+        np.testing.assert_array_equal(res.predict(newdata, verbose=False, std=False).y_pred, y_pred)
+        res._hessian = None
+        np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
 
 
 class TestSimulate:
