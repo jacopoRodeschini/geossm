@@ -16,6 +16,7 @@ from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, M
 from geossm.stmodel.lrssm import _ks_value_and_grad
 from geossm.stmodel.stmodel_results import _pack_params, _unpack_params
 from tests._known_bugs import known_bug
+from tests._printing import assert_printing_is_side_effect_free
 from tests._reference import SSMProblem, kalman_filter
 from tests._synthetic import DOMAIN, make_panel_gdf, make_square_mesh
 
@@ -192,6 +193,11 @@ class TestFit:
     def test_max_iter_termination_is_recorded(self, fitted):
         _, res = fitted
         assert res.termination == "max_iter"
+
+    def test_printing_model_and_results_has_no_side_effects(self, fitted):
+        model, res = fitted
+        assert_printing_is_side_effect_free(model)
+        assert_printing_is_side_effect_free(res)
 
     def test_summary_renders(self, fitted):
         _, res = fitted

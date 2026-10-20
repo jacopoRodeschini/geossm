@@ -9,6 +9,7 @@ from shapely.geometry import Polygon
 
 from geossm.covmodel import FEMSolver, spdeAppoxCov
 from tests._known_bugs import known_bug
+from tests._printing import assert_printing_is_side_effect_free
 from tests._synthetic import make_square_mesh
 
 LO, HI = -3.0, 13.0
@@ -28,6 +29,11 @@ def fem(mesh):
 @pytest.fixture
 def cov(mesh):
     return spdeAppoxCov(latlon=False, rescale=0.8, verbose=False).setup(mesh, domain=[INNER], stats=False)
+
+
+def test_printing_has_no_side_effects(fem, cov):
+    assert_printing_is_side_effect_free(fem)
+    assert_printing_is_side_effect_free(cov)
 
 
 class TestFEMSolver:

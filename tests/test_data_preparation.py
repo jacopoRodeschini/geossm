@@ -7,6 +7,7 @@ from shapely.geometry import Polygon
 
 from geossm import DesignMatricesBuilder
 from geossm.data_preparation import check_regular_timestamps
+from tests._printing import assert_printing_is_side_effect_free
 from tests._synthetic import make_panel_gdf, make_sites
 
 N, T = 12, 8
@@ -31,6 +32,13 @@ def test_shapes_and_intercept(gdf):
     assert (dm.N, dm.b, dm.T) == (N, 2, T)
     np.testing.assert_allclose(np.asarray(dm.X[:, 0, :]), 1.0)
     assert list(dm.x_names) == ["Intercept", "x"]
+
+
+def test_printing_design_matrices_has_no_side_effects(gdf):
+    # F12: summary() used to set placeholder model/params/bse/... attributes
+    dm = _build(gdf)
+    assert_printing_is_side_effect_free(dm)
+    assert not any(hasattr(dm, a) for a in ("model", "params", "bse", "tvalues", "pvalues"))
 
 
 def test_rows_points_and_times_are_aligned(gdf):

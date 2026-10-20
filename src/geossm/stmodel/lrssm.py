@@ -37,7 +37,7 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table
+from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table, _summary_table_source
 
 
 from shapely.geometry import MultiPoint
@@ -45,7 +45,6 @@ from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
 from .stmodel_results import LRStateSpaceResults
-from types import SimpleNamespace
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
@@ -2708,15 +2707,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         statsmodels.iolib.summary.Summary
             Printable summary object (`str(...)`/`print(...)`).
         """
-        self.model = SimpleNamespace()
-
         # Generate the summary tables
         gen_top_left, gen_top_right = self.generate_summary(print_short=print_short)
 
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="LR State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,

@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
+from geossm.utils import _summary_table_source
+
 
 try:
     import jax
@@ -665,13 +667,6 @@ class DesignMatrices:
         :class:`statsmodels.iolib.summary.Summary`, in the same style as
         a statsmodels model-fit summary. Also used by `__str__`.
 
-        Notes
-        -----
-        As a side effect, sets placeholder `model`/`params`/`bse`/
-        `tvalues`/`pvalues` attributes on `self`, required by
-        `Summary.add_table_2cols`; these are not meaningful statistics
-        (`DesignMatrices` holds no fitted model).
-
         Returns
         -------
         statsmodels.iolib.summary.Summary
@@ -682,17 +677,10 @@ class DesignMatrices:
 
         smry = Summary()
 
-        self.model = None
-        self.params = np.zeros(1)
-        self.param_names = "Placeholder" #self.xbeta_names
-        self.bse = np.zeros(len(self.params))
-        self.tvalues = np.zeros(len(self.params))
-        self.pvalues = np.zeros(len(self.params))
-
         gen_top_left, gen_top_right = self.generate_summary()
 
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="Design Matrices Summary",
             gleft=gen_top_left,
             gright=gen_top_right,

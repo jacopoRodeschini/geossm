@@ -11,7 +11,7 @@ import warnings
 import jax
 import jax.numpy as jnp
 from dataclasses import replace, fields
-from geossm.utils import _on_device, split_by_block, format_info_table
+from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
 
 
 ArrayLike = Optional[Any]
@@ -1471,8 +1471,7 @@ class LRStateSpaceResults(StateSpaceResults):
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
-          
-            self,
+            _summary_table_source(),
             title="LR State Space Model Results",
             gleft=gen_top_left,
             gright=gen_top_right,

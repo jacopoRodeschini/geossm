@@ -7,6 +7,7 @@ import pytest
 
 from geossm.ssm import StateSpaceModel, StateSpaceResults
 from tests._known_bugs import known_bug
+from tests._printing import assert_printing_is_side_effect_free
 from tests._reference import kalman_filter, rts_smoother
 
 
@@ -183,13 +184,19 @@ class TestSimulation:
         np.testing.assert_array_equal(np.asarray(y1), np.asarray(y2))
 
 
-@known_bug("F12", "summary()/__str__ overwrite model.params and add model.model")
 def test_str_does_not_mutate_model(problem):
+    # F12: summary()/__str__ used to overwrite model.params and add model.model
     m = _model(problem)
     before = np.asarray(m.params).copy()
     str(m)
     np.testing.assert_array_equal(np.asarray(m.params), before)
     assert not hasattr(m, "model")
+
+
+def test_printing_model_and_results_has_no_side_effects(problem):
+    m = _model(problem)
+    assert_printing_is_side_effect_free(m)
+    assert_printing_is_side_effect_free(m.smoother(problem.y))
 
 
 def test_repr_is_side_effect_free(problem):

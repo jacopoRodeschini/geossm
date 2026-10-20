@@ -35,9 +35,8 @@ import time
 from geossm.utils import KeyStream
 from datetime import date
 from statsmodels.iolib.summary import Summary
-from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device, format_info_table
+from geossm.utils import _select_device, _to_backend, _on_device, format_info_table, _summary_table_source
 
 
 def _itype_for(dtype):
@@ -2431,21 +2430,12 @@ class StateSpaceModel:
             Printable summary table with model identity/type/order,
             shape ``(p, q, T)`` and mean system-matrix diagonals.
         """
-        self.model = SimpleNamespace()
-        self.model.results = jnp.array([0])
-        
-        self.params = ""
-        self.params_names = ""
-        self.model.bse = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-        self.model.tvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-        self.model.pvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-
         gen_top_left, gen_top_right = self.generate_summary()
 
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,

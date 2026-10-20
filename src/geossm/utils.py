@@ -8,6 +8,7 @@ import jax
 import platform
 import psutil
 from functools import wraps
+from types import SimpleNamespace
 
 
 # %% [Utils] Select the device for JAX computations
@@ -329,6 +330,19 @@ def getHardware():
 
 
 # %% [Utils] Minimal key/value formatting, shared by every class's __repr__
+
+def _summary_table_source():
+    """
+    Throwaway `res` argument for statsmodels' `Summary.add_table_2cols`.
+
+    With no names given, statsmodels reads `res.model` and `len(res.params)`
+    from it (and nothing else when every table value is provided). Passing
+    this instead of `self` keeps printing free of side effects: the objects
+    used to set placeholder `model`/`params` attributes on themselves
+    (finding F12).
+    """
+    return SimpleNamespace(model=SimpleNamespace(), params=())
+
 
 def format_info_table(items, indent=0):
     """Format a list of (key, value) tuples into a clean aligned string.
