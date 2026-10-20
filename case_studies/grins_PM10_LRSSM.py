@@ -166,7 +166,7 @@ gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
 # The formula is used to create the design matrices for the fixed effects.
 # Formula without the standardisation
-formula = "AQ_mean_PM10 ~ 1 + CL_t2m + CL_windspeed + CL_rh"
+formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh)"
 
 # Create the model
 backend = ["gpu"] if has_gpu else ["cpu"]
@@ -174,7 +174,7 @@ backend = ["gpu"] if has_gpu else ["cpu"]
 # Set the options for the fitting procedure
 opt = FitOptions()
 opt.max_iter = 50
-opt.tol_relat = 1e-4
+opt.tol_relat = 1e-3
 opt.verbose = True
 
 # Store the results in a list of dictionaries, one for each backend
@@ -202,3 +202,5 @@ print(
 )
 
 # %% How to compute the model standard error?
+
+# %% How to back transform the predicted values to the original scale?

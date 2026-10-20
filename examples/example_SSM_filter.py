@@ -4,6 +4,7 @@
 @author: jacopo
 """
 
+# %% 
 import numpy as np
 import matplotlib.pyplot as plt
 import jax
@@ -32,7 +33,8 @@ Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
 
 # %% Build the model
-model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
+model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, 
+            dtype=np.float32)
 
 print(model)
 
@@ -108,6 +110,34 @@ plt.show()
 inner = (x_sim[0, :T] >= lower[0, 1:]) & (x_sim[0, :T] <= upper[0, 1:])
 coverage_probability = np.mean(inner)
 print("Coverage Probability of the Filtered State:", coverage_probability)
+
+
+# %% plot the smoothed state
+results = model.smoother(y_sim)
+
+lower_s, upper_s = results.conf_int_state(alpha=0.05, which="smoothed")
+
+t = np.arange(T)
+
+
+plt.figure()
+plt.plot(t, x_sim[0, :T], label="Simulated state (x)")
+plt.plot(t, results.x_filtered[0, 1:], ":", label="Filtered state (x_filtered)")
+plt.plot(t, results.x_smoothed[0, 1:], ":", label="Smoothed state (x_smoothed)")
+plt.fill_between(
+    t, lower[0][1:], upper[0][1:], alpha=0.3, label="95% Confidence Interval"
+)
+plt.fill_between(
+    t, lower_s[0][1:], upper_s[0][1:], alpha=0.3, label="95% Confidence Interval (smoothed)"
+)
+
+plt.grid()
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.title("Filtered State with 95% Confidence Interval")
+plt.legend()
+plt.show()
+
 
 
 # %% The residual array are all numpy array
