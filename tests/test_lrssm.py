@@ -425,6 +425,66 @@ class TestCompilation:
         assert _ks_value_and_grad._cache_size() == before > 0
 
 
+class TestResultsLifecycle:
+    """Each results object is a snapshot of its own fit (F09, F27)."""
+
+    def _model(self, gdf, mesh):
+        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+        model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
+        return model.setup([cov]), cov
+
+    def test_refit_returns_new_results_and_leaves_earlier_ones_unchanged(self, gdf, mesh):
+        model, _ = self._model(gdf, mesh)
+        res_a = model.fit(options=_options(max_iter=3))
+        lo_a, hi_a = (a.copy() for a in res_a.conf_int_y(prediction=True))
+        cov_a = res_a.coverage_probability()
+        s2e_a = float(res_a.params.s2e.value[0])
+
+        res_b = model.fit(params0=ModelParams(s2e=Param("s2e", [2.0], fixed=True)), options=_options(max_iter=3))
+
+        # The earlier results are unchanged...
+        lo, hi = res_a.conf_int_y(prediction=True)
+        np.testing.assert_array_equal(lo, lo_a)
+        np.testing.assert_array_equal(hi, hi_a)
+        assert res_a.coverage_probability() == cov_a == res_a._compute_coverage_probability(0.05, "global")
+        assert float(res_a.params.s2e.value[0]) == s2e_a
+        # ...and the new results reflect the new fit: s2e = 2 in the noise
+        # part of their prediction intervals.
+        z = 1.959963984540054
+        var_b = np.diagonal(res_b.Sigma_y_hat, axis1=0, axis2=1).T + 2.0  # (p, T)
+        lo_b, hi_b = res_b.conf_int_y(prediction=True)
+        np.testing.assert_allclose(hi_b - lo_b, 2 * z * np.sqrt(var_b), rtol=1e-5)
+
+    def test_predict_with_earlier_results_after_refit(self, gdf, mesh):
+        model, cov = self._model(gdf, mesh)
+        newdata = gdf.drop(columns="y")
+        res_a = model.fit(options=_options(max_iter=3))
+        y_pred_a = res_a.predict(newdata, verbose=False, std=False).y_pred.copy()
+        model.fit(params0=ModelParams(s2e=Param("s2e", [2.0], fixed=True)), options=_options(max_iter=3))
+        rescale = cov.rescale
+        np.testing.assert_array_equal(res_a.predict(newdata, verbose=False, std=False).y_pred, y_pred_a)
+        assert cov.rescale == rescale  # predict does not modify the covariance functions
+
+    def test_results_survive_setup_with_another_mesh(self, gdf, mesh):
+        model, _ = self._model(gdf, mesh)
+        newdata = gdf.drop(columns="y")
+        res = model.fit(options=_options(max_iter=3))
+        H = np.asarray(res._compute_hessian()[0]).copy()
+        y_pred = res.predict(newdata, verbose=False, std=False).y_pred.copy()
+        p, q, T = model.shape
+        text = str(res.summary())
+
+        other = spdeAppoxCov(latlon=False, verbose=False).setup(make_square_mesh(mesh_size=2.5),
+                                                               domain=[DOMAIN], stats=False)
+        model.setup([other])
+        assert model.shape[1] != q  # the model now has another latent dimension
+
+        res._hessian = None  # recompute from the results' own fit-time state
+        np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
+        np.testing.assert_array_equal(res.predict(newdata, verbose=False, std=False).y_pred, y_pred)
+        assert f"q = {q}" in text and f"q = {q}" in str(res.summary())
+
+
 class TestSimulate:
     @pytest.mark.usefixtures("x64")
     @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64], ids=["float32", "float64"])
