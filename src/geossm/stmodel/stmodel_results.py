@@ -76,6 +76,10 @@ class FittedState:
     itype: np.dtype
 
 
+# Positive parameters whose confidence intervals are computed on the log scale.
+_LOG_SCALE_PARAMS = ("s2e", "ks")
+
+
 def _pack_params(params, dtype=jnp.float32):
     """Flatten free parameter values into one 1D JAX array."""
     parts = []
@@ -627,7 +631,10 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         if self._cov_params is None:
             return np.full(self.theta_hat.shape, np.nan)
-        return _safe_sqrt_variance(np.asarray(jnp.diag(self._cov_params)), context="bse_vector")
+        var = np.asarray(jnp.diag(self._cov_params))
+        if np.all(np.isnan(var)):  # not a covariance matrix: compute_cov_params warned
+            return np.full(var.shape, np.nan)
+        return _safe_sqrt_variance(var, context="bse_vector")
 
     @property
     def bse(self):
@@ -650,11 +657,17 @@ class LRStateSpaceResults(StateSpaceResults):
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
         return self._bse_params
 
-    def _stats_from_arrays(self, params, bse, alpha=0.05):
+    def _stats_from_arrays(self, params, bse, alpha=0.05, log_scale=False):
         """Compute t-values, two-sided p-values, and `alpha`-level confidence
         intervals for flat `params`/`bse` arrays, using the Student-t
         distribution with `df_resid` degrees of freedom (or the Normal
-        distribution if `df_resid` is unavailable)."""
+        distribution if `df_resid` is unavailable).
+
+        Where `log_scale` (bool, or a mask over `params`) is True the
+        interval is computed for `log(theta)`, with standard error
+        `bse / theta` (delta method), and mapped back:
+        `theta * exp(-+ crit * bse / theta)`. It is positive and asymmetric.
+        t-values and p-values are always on the natural scale."""
         params = np.asarray(params, dtype=float).ravel()
         bse = np.asarray(bse, dtype=float).ravel()
     
@@ -668,8 +681,21 @@ class LRStateSpaceResults(StateSpaceResults):
             p = 2 * stats.norm.sf(np.abs(t))
             crit = stats.norm.ppf(1 - alpha / 2.0)
     
-        ci = np.column_stack([params - crit * bse, params + crit * bse])
+        lo, hi = params - crit * bse, params + crit * bse
+        log_scale = np.broadcast_to(np.asarray(log_scale, dtype=bool), params.shape)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            r = np.exp(crit * bse / params)
+        ci = np.column_stack([np.where(log_scale, params / r, lo), np.where(log_scale, params * r, hi)])
         return t, p, ci
+
+    def _log_scale_mask(self):
+        """Flat mask, in the order of `theta_hat`, of the parameters whose
+        confidence intervals are on the log scale (`_LOG_SCALE_PARAMS`)."""
+        _, meta = _pack_params(self._inference_params(), dtype=self.dtype)
+        mask = np.zeros(self.theta_hat.size, dtype=bool)
+        for name, _shape, start, stop, _fixed in meta:
+            mask[start:stop] = name in _LOG_SCALE_PARAMS
+        return mask
 
        
     @property
@@ -706,6 +732,11 @@ class LRStateSpaceResults(StateSpaceResults):
         Confidence intervals for the free parameters. NaN until
         `compute_cov_params()` has been called (see `bse_vector`).
 
+        Wald intervals `theta +- crit * bse`, except for the positive
+        parameters `s2e` and `ks`, whose intervals are computed on the log
+        scale and mapped back (delta method, see `_stats_from_arrays`), so
+        they stay positive.
+
         Parameters
         ----------
         alpha : float, default 0.05
@@ -718,7 +749,8 @@ class LRStateSpaceResults(StateSpaceResults):
             Lower/upper confidence bounds, in the same flat parameter order
             as `theta_hat`.
         """
-        _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha)
+        _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha,
+                                           log_scale=self._log_scale_mask())
         return ci
 
 
@@ -1621,8 +1653,9 @@ class LRStateSpaceResults(StateSpaceResults):
         
         temp.params = np.hstack((s2e_vals, A_vals))
         temp.bse = np.hstack((s2e_bse, A_bse))
+        log_scale = np.r_[np.ones(s2e_vals.size, dtype=bool), np.zeros(A_vals.size, dtype=bool)]
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=log_scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.params_name, alpha=alpha)
 
@@ -1643,8 +1676,9 @@ class LRStateSpaceResults(StateSpaceResults):
 
         temp.params = np.hstack((ks_val, f_val))
         temp.bse = np.hstack((ks_bse, f_bse))
+        log_scale = np.r_[np.ones(ks_val.size, dtype=bool), np.zeros(f_val.size, dtype=bool)]
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=log_scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.param_names, alpha=alpha)
 

@@ -5,11 +5,13 @@ One EM fit is shared by the module (about 10 s including JIT compilation).
 
 import dataclasses
 import types
+import warnings
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
+from scipy import stats
 from shapely.geometry import Polygon
 
 from geossm.covmodel import spdeAppoxCov
@@ -370,6 +372,20 @@ class TestPredict:
         np.testing.assert_allclose(res.y_pred, y_hat, rtol=1e-5, atol=1e-5)
 
 
+@pytest.fixture(scope="module")
+def converged(gdf, mesh):
+    # float64 fit with a negative definite Hessian (30 iterations), with SEs.
+    before = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        model = _build_model(gdf, mesh, dtype=jnp.float64)
+        res = model.fit(options=_options(max_iter=30))
+        res.compute_cov_params()
+    finally:
+        jax.config.update("jax_enable_x64", before)
+    return model, res
+
+
 @pytest.mark.usefixtures("x64")
 class TestStandardErrors:
     """Hessian and standard errors (F21), float64 for finite differences."""
@@ -378,8 +394,8 @@ class TestStandardErrors:
         model = _build_model(gdf, mesh, dtype=jnp.float64)
         return model, model.fit(options=_options(max_iter=max_iter))
 
-    def test_hessian_matches_finite_differences(self, gdf, mesh):
-        model, res = self._fit(gdf, mesh, max_iter=30)
+    def test_hessian_matches_finite_differences(self, converged):
+        model, res = converged
         H = np.asarray(res._compute_hessian()[0])
 
         # Independent check: central second differences of the observed
@@ -402,9 +418,43 @@ class TestStandardErrors:
                 fd[i, j] = fd[j, i] = (fpp - fpm - fmp + fmm) / (4 * h[i] * h[j])
         np.testing.assert_allclose(H, fd, rtol=1e-3, atol=1e-4 * np.abs(H).max())
 
-        res.compute_cov_params()
         se = np.asarray(res.bse_vector)
         assert np.all(np.isfinite(se)) and np.all(se > 0)
+
+    def test_positive_parameters_have_log_scale_intervals(self, converged):
+        # s2e and ks: theta * exp(-+ z se / theta) (delta method on log theta);
+        # the other parameters keep theta +- z se.
+        _, res = converged
+        theta, se, ci = res.theta_hat, np.asarray(res.bse_vector), res.conf_int(alpha=0.05)
+        z = stats.t.ppf(0.975, df=res.df_resid)
+        names = [n for n, _, start, stop, _ in res._free_meta for _ in range(start, stop)]
+        log = np.isin(names, ["s2e", "ks"])
+        assert log.sum() == 2
+        r = np.exp(z * se[log] / theta[log])
+        np.testing.assert_allclose(ci[log], np.column_stack([theta[log] / r, theta[log] * r]), rtol=1e-12)
+        assert np.all(ci[log, 0] > 0)
+        np.testing.assert_allclose(ci[~log], np.column_stack([theta[~log] - z * se[~log],
+                                                              theta[~log] + z * se[~log]]), rtol=1e-12)
+        # t-values and p-values stay on the natural scale.
+        np.testing.assert_allclose(res.tvalues, theta / se, rtol=1e-12)
+
+    def test_summary_intervals_match_conf_int(self, converged):
+        _, res = converged
+        ci = res.conf_int(alpha=0.10)
+        rows = {}
+        for line in str(res.summary(alpha=0.10)).splitlines():
+            tok = line.split()
+            if len(tok) == 7 and tok[0] in ("Intercept", "x", "s2e_0", "f_0", "A_0_0", "rescale_0"):
+                rows[tok[0]] = [float(tok[5]), float(tok[6])]
+        # flat order of theta_hat: beta (Intercept, x), s2e, f, A, ks
+        printed = np.array([rows[k] for k in ("Intercept", "x", "s2e_0", "f_0", "A_0_0", "rescale_0")])
+        np.testing.assert_allclose(printed, ci, atol=5e-4)
+
+    def test_log_scale_interval_is_positive_where_wald_is_not(self, converged):
+        _, res = converged
+        _, _, wald = res._stats_from_arrays([0.1], [0.08])
+        _, _, logci = res._stats_from_arrays([0.1], [0.08], log_scale=True)
+        assert wald[0, 0] < 0 < logci[0, 0] < 0.1 < logci[0, 1]
 
     def test_indefinite_hessian_gives_nan_standard_errors(self, gdf, mesh):
         # After 3 EM iterations this estimate is not at a maximum: the Hessian
@@ -412,8 +462,11 @@ class TestStandardErrors:
         _, res = self._fit(gdf, mesh, max_iter=3)
         with pytest.warns(RuntimeWarning, match="not negative definite"):
             res.compute_cov_params()
-        with pytest.warns(RuntimeWarning, match="set to NaN"):  # from bse_vector
+        # Warned once, by compute_cov_params; not again on every access.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
             assert np.all(np.isnan(np.asarray(res.bse_vector)))
+            assert np.all(np.isnan(res.conf_int()))
 
 
 class TestCompilation:
