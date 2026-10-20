@@ -421,20 +421,26 @@ class TestStandardErrors:
         se = np.asarray(res.bse_vector)
         assert np.all(np.isfinite(se)) and np.all(se > 0)
 
-    def test_positive_parameters_have_log_scale_intervals(self, converged):
-        # s2e and ks: theta * exp(-+ z se / theta) (delta method on log theta);
-        # the other parameters keep theta +- z se.
+    def test_bounded_parameters_have_transformed_intervals(self, converged):
+        # Delta method: s2e and ks on log theta, theta * exp(-+ z se / theta);
+        # f on atanh theta, tanh(atanh f -+ z se / (1 - f^2)); the other
+        # parameters keep theta +- z se.
         _, res = converged
         theta, se, ci = res.theta_hat, np.asarray(res.bse_vector), res.conf_int(alpha=0.05)
         z = stats.t.ppf(0.975, df=res.df_resid)
-        names = [n for n, _, start, stop, _ in res._free_meta for _ in range(start, stop)]
-        log = np.isin(names, ["s2e", "ks"])
-        assert log.sum() == 2
+        names = np.array([n for n, _, start, stop, _ in res._free_meta for _ in range(start, stop)])
+        log, ath = np.isin(names, ["s2e", "ks"]), names == "f"
+        nat = ~(log | ath)
+        assert (log.sum(), ath.sum(), nat.sum()) == (2, 1, 3)
         r = np.exp(z * se[log] / theta[log])
         np.testing.assert_allclose(ci[log], np.column_stack([theta[log] / r, theta[log] * r]), rtol=1e-12)
         assert np.all(ci[log, 0] > 0)
-        np.testing.assert_allclose(ci[~log], np.column_stack([theta[~log] - z * se[~log],
-                                                              theta[~log] + z * se[~log]]), rtol=1e-12)
+        f, dz = theta[ath], z * se[ath] / (1 - theta[ath] ** 2)
+        np.testing.assert_allclose(ci[ath], np.column_stack([np.tanh(np.arctanh(f) - dz),
+                                                             np.tanh(np.arctanh(f) + dz)]), rtol=1e-12)
+        assert np.all((-1 < ci[ath, 0]) & (ci[ath, 1] < 1))
+        np.testing.assert_allclose(ci[nat], np.column_stack([theta[nat] - z * se[nat],
+                                                             theta[nat] + z * se[nat]]), rtol=1e-12)
         # t-values and p-values stay on the natural scale.
         np.testing.assert_allclose(res.tvalues, theta / se, rtol=1e-12)
 
@@ -453,8 +459,18 @@ class TestStandardErrors:
     def test_log_scale_interval_is_positive_where_wald_is_not(self, converged):
         _, res = converged
         _, _, wald = res._stats_from_arrays([0.1], [0.08])
-        _, _, logci = res._stats_from_arrays([0.1], [0.08], log_scale=True)
+        _, _, logci = res._stats_from_arrays([0.1], [0.08], scale="log")
         assert wald[0, 0] < 0 < logci[0, 0] < 0.1 < logci[0, 1]
+
+    def test_atanh_interval_stays_below_one_where_wald_does_not(self, converged):
+        _, res = converged
+        _, _, wald = res._stats_from_arrays([0.95], [0.05])
+        _, _, ath = res._stats_from_arrays([0.95], [0.05], scale="atanh")
+        assert ath[0, 0] < 0.95 < ath[0, 1] < 1 < wald[0, 1]
+        # |f| >= 1: atanh is undefined, the natural-scale interval is kept.
+        _, _, ci = res._stats_from_arrays([1.02, -1.0], [0.05, 0.05], scale="atanh")
+        _, _, wald = res._stats_from_arrays([1.02, -1.0], [0.05, 0.05])
+        np.testing.assert_array_equal(ci, wald)
 
     def test_indefinite_hessian_gives_nan_standard_errors(self, gdf, mesh):
         # After 3 EM iterations this estimate is not at a maximum: the Hessian

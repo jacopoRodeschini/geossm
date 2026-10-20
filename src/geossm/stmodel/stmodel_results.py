@@ -76,8 +76,9 @@ class FittedState:
     itype: np.dtype
 
 
-# Positive parameters whose confidence intervals are computed on the log scale.
-_LOG_SCALE_PARAMS = ("s2e", "ks")
+# Scale of the confidence intervals of bounded parameters (see
+# `_stats_from_arrays`): log for the positive ones, atanh for f.
+_CI_SCALE = {"s2e": "log", "ks": "log", "f": "atanh"}
 
 
 def _pack_params(params, dtype=jnp.float32):
@@ -657,16 +658,24 @@ class LRStateSpaceResults(StateSpaceResults):
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
         return self._bse_params
 
-    def _stats_from_arrays(self, params, bse, alpha=0.05, log_scale=False):
+    def _stats_from_arrays(self, params, bse, alpha=0.05, scale=""):
         """Compute t-values, two-sided p-values, and `alpha`-level confidence
         intervals for flat `params`/`bse` arrays, using the Student-t
         distribution with `df_resid` degrees of freedom (or the Normal
         distribution if `df_resid` is unavailable).
 
-        Where `log_scale` (bool, or a mask over `params`) is True the
-        interval is computed for `log(theta)`, with standard error
-        `bse / theta` (delta method), and mapped back:
-        `theta * exp(-+ crit * bse / theta)`. It is positive and asymmetric.
+        `scale` (a string, or one per element of `params`) sets the scale
+        of the interval; it is computed there, with the standard error from
+        the delta method, and mapped back:
+
+        * `""`: natural scale, `theta -+ crit * bse`;
+        * `"log"`: `log(theta)`, standard error `bse / theta`, giving
+          `theta * exp(-+ crit * bse / theta)` (positive);
+        * `"atanh"`: `atanh(theta)`, standard error `bse / (1 - theta**2)`,
+          giving `tanh(atanh(theta) -+ crit * bse / (1 - theta**2))`, inside
+          (-1, 1). For `|theta| >= 1` atanh is undefined and the natural
+          scale is used.
+
         t-values and p-values are always on the natural scale."""
         params = np.asarray(params, dtype=float).ravel()
         bse = np.asarray(bse, dtype=float).ravel()
@@ -682,20 +691,23 @@ class LRStateSpaceResults(StateSpaceResults):
             crit = stats.norm.ppf(1 - alpha / 2.0)
     
         lo, hi = params - crit * bse, params + crit * bse
-        log_scale = np.broadcast_to(np.asarray(log_scale, dtype=bool), params.shape)
+        scale = np.broadcast_to(np.asarray(scale, dtype=str), params.shape)
+        log, ath = scale == "log", (scale == "atanh") & (np.abs(params) < 1)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             r = np.exp(crit * bse / params)
-        ci = np.column_stack([np.where(log_scale, params / r, lo), np.where(log_scale, params * r, hi)])
-        return t, p, ci
+            z, dz = np.arctanh(params), crit * bse / (1 - params**2)
+            lo = np.where(log, params / r, np.where(ath, np.tanh(z - dz), lo))
+            hi = np.where(log, params * r, np.where(ath, np.tanh(z + dz), hi))
+        return t, p, np.column_stack([lo, hi])
 
-    def _log_scale_mask(self):
-        """Flat mask, in the order of `theta_hat`, of the parameters whose
-        confidence intervals are on the log scale (`_LOG_SCALE_PARAMS`)."""
+    def _ci_scale(self):
+        """Confidence-interval scale of each free parameter, in the order of
+        `theta_hat` (`_CI_SCALE`, `""` for the natural scale)."""
         _, meta = _pack_params(self._inference_params(), dtype=self.dtype)
-        mask = np.zeros(self.theta_hat.size, dtype=bool)
+        scale = np.full(self.theta_hat.size, "", dtype="<U5")
         for name, _shape, start, stop, _fixed in meta:
-            mask[start:stop] = name in _LOG_SCALE_PARAMS
-        return mask
+            scale[start:stop] = _CI_SCALE.get(name, "")
+        return scale
 
        
     @property
@@ -732,10 +744,11 @@ class LRStateSpaceResults(StateSpaceResults):
         Confidence intervals for the free parameters. NaN until
         `compute_cov_params()` has been called (see `bse_vector`).
 
-        Wald intervals `theta +- crit * bse`, except for the positive
-        parameters `s2e` and `ks`, whose intervals are computed on the log
-        scale and mapped back (delta method, see `_stats_from_arrays`), so
-        they stay positive.
+        Wald intervals `theta +- crit * bse`, except for the bounded
+        parameters, whose intervals are computed on a transformed scale and
+        mapped back (delta method, see `_stats_from_arrays`): log scale for
+        `s2e` and `ks`, so they stay positive, and atanh scale for `f`, so
+        it stays inside (-1, 1) (natural scale if `|f| >= 1`).
 
         Parameters
         ----------
@@ -750,7 +763,7 @@ class LRStateSpaceResults(StateSpaceResults):
             as `theta_hat`.
         """
         _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha,
-                                           log_scale=self._log_scale_mask())
+                                           scale=self._ci_scale())
         return ci
 
 
@@ -1653,9 +1666,9 @@ class LRStateSpaceResults(StateSpaceResults):
         
         temp.params = np.hstack((s2e_vals, A_vals))
         temp.bse = np.hstack((s2e_bse, A_bse))
-        log_scale = np.r_[np.ones(s2e_vals.size, dtype=bool), np.zeros(A_vals.size, dtype=bool)]
+        scale = ["log"] * s2e_vals.size + [""] * A_vals.size
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=log_scale: self._stats_from_arrays(v, s, alpha, m)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.params_name, alpha=alpha)
 
@@ -1676,9 +1689,9 @@ class LRStateSpaceResults(StateSpaceResults):
 
         temp.params = np.hstack((ks_val, f_val))
         temp.bse = np.hstack((ks_bse, f_bse))
-        log_scale = np.r_[np.ones(ks_val.size, dtype=bool), np.zeros(f_val.size, dtype=bool)]
+        scale = ["log"] * ks_val.size + ["atanh"] * f_val.size
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=log_scale: self._stats_from_arrays(v, s, alpha, m)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.param_names, alpha=alpha)
 
