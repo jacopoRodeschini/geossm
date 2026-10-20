@@ -549,6 +549,18 @@ class TestResultsMethods:
         assert res.bic == pytest.approx(np.log(n_obs) * res.n_params - 2 * res.llf, rel=1e-12)
         assert res.df_resid == n_obs - res.n_params
 
+    def test_n_params_excludes_initial_state(self, gdf, mesh):
+        # F36: x0 and Sigma0 counted as one parameter each.
+        model = _build_model(gdf, mesh)
+        q = model.shape[1]
+        res_free = model.fit(options=_options(max_iter=1))
+        sizes = {k: np.asarray(getattr(res_free.params, k).value).size for k in ("beta", "s2e", "f", "A", "ks")}
+        assert res_free.n_params == sum(sizes.values())
+        params0 = ModelParams(x0=Param("x0", np.zeros(q), fixed=True), Sigma0=Param("Sigma0", np.eye(q), fixed=True),
+                              f=Param("f", [0.5], fixed=True))
+        res_fixed = model.fit(params0=params0, options=_options(max_iter=1))
+        assert res_fixed.n_params == sum(sizes.values()) - sizes["f"]
+
     def test_intervals_and_coverage(self, fitted):
         _, res = fitted
         lo, hi = res.conf_int_y(alpha=0.05, prediction=True)

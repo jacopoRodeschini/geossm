@@ -415,12 +415,15 @@ class LRStateSpaceResults(StateSpaceResults):
     def n_params(self):
         """
         int : Total number of *free* (not `fixed`) scalar parameters across
-        `beta`, `s2e`, `f`, `A`, `ks`, `x0`, `Sigma0`, used as the degrees
-        of freedom / penalty term `k` in `df_resid`, `compute_aic`, and
-        `compute_bic`.
+        `beta`, `s2e`, `f`, `A`, `ks`, used as the degrees of freedom /
+        penalty term `k` in `df_resid`, `compute_aic`, and `compute_bic`.
+        The initial state (`x0`, `Sigma0`) is a nuisance parameter and is
+        not counted, whether fixed or estimated (as in the Hessian, see
+        `_inference_params`).
         """
         if self._n_params is None:
-            self._n_params = sum(d for d, f in zip(self.param_dim, self.param_fixed) if not f) if self.param_dim is not None and self.param_fixed else 0
+            self._n_params = sum(d for n, d, f in zip(self.param_names, self.param_dim, self.param_fixed)
+                                 if not f and n not in ("x0", "Sigma0")) if self.param_dim is not None and self.param_fixed else 0
         return self._n_params
     
     def _process_nstats(self):
