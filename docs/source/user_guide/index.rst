@@ -23,6 +23,7 @@ The typical pipeline is:
    covariance_models
    state_space_models
    low_rank_ssm
+   jax_configuration
 
 Development: building this documentation
 -------------------------------------------

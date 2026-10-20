@@ -178,6 +178,27 @@ Remove an entire environment
 conda remove -n geossm --all
 ```
 
+### JAX configuration (CPU/GPU, memory, float64)
+
+geossm computes with JAX. Some JAX settings are process-wide, so geossm never
+changes them itself. Set them at the top of your script, **before** importing
+JAX or geossm:
+
+```python
+import os
+os.environ.setdefault("JAX_PLATFORMS", "cpu")                   # CPU only: leaves the GPU untouched
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false") # GPU: allocate on demand, not 75 % upfront
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/jax"))  # reuse compiled kernels
+
+import jax
+jax.config.update("jax_enable_x64", True)  # only if you use dtype=jnp.float64 (otherwise a ValueError is raised)
+```
+
+Without `JAX_PLATFORMS=cpu`, JAX reserves 75 % of the GPU memory as soon as a
+model is created, even with `backend="cpu"`. See the user guide page
+[JAX configuration](https://jacopoRodeschini.github.io/geossm/user_guide/jax_configuration.html)
+for details and measurements.
+
 ## Quick Start
 
 ### Loading Data

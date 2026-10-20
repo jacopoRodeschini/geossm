@@ -7,6 +7,25 @@ The example is run on a GPU and CPU device.
 """
 
 # %% Import the necessary libraries
+import os
+
+# JAX configuration (see the user guide page "JAX configuration"). These are
+# process-wide and must be set before JAX starts, i.e. before `import jax`.
+# This study compares CPU and GPU, so none is set here; uncomment as needed:
+#
+# CPU only: JAX does not start its GPU backend (0 GB of GPU memory used).
+# Without it, JAX reserves GPU memory even for backend="cpu" models.
+# os.environ["JAX_PLATFORMS"] = "cpu"
+#
+# GPU: allocate memory on demand instead of reserving 75 % of it upfront
+# (Agrimonia, float32: 1.3 GB after fitting, 9.0 GB peak with standard
+# errors, same speed), or cap the reserved fraction instead.
+# os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".30"
+#
+# Reuse compiled kernels across runs (the first fit is mostly compilation).
+# os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax")
+
 import numpy as np
 import pandas as pd
 import geopandas as gpd
