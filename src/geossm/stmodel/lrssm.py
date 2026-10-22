@@ -1226,7 +1226,8 @@ class LRStateSpaceModel(StateSpaceModel):
         Build `H`, `R`, `F`, `Q` from `params` (setting the covariance
         functions' `rescale` to `params.ks`) and set them, with `x0`,
         `Sigma0` and `beta`, on the underlying `StateSpaceModel` for the
-        next E-step. Returns the dense `H`.
+        next E-step. Returns the dense `H` and the block-diagonal precision
+        `Q^-1` (used by the M-step update of `f`).
         """
         if params.ks.value is not None:
             for fcov, ksi in zip(self.cov_function, params.ks.value):
@@ -1241,8 +1242,6 @@ class LRStateSpaceModel(StateSpaceModel):
         # not depend on the global x64 flag (F03).
         invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
                 for fcov in self.cov_function]
-
-        
         Q = block_diag(
             *[
                 jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
@@ -1261,7 +1260,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Sigma0=params.Sigma0.value,
             beta=params.beta.value,
         )
-        return H, R, F, Q, invQ
+        return H, invQ
 
     @_on_device
     def fit(
@@ -1319,7 +1318,8 @@ class LRStateSpaceModel(StateSpaceModel):
             The model's system matrices are left at those parameters.
             `llf_path` is the per-iteration trace; entry ``k`` is the
             log-likelihood of the E-step of iteration ``k``, so `llf` can
-            exceed `llf_path[-1]`.
+            exceed `llf_path[-1]`. Entry 0 (the initial parameters, before
+            any E-step) is ``nan``.
 
         Raises
         ------
@@ -1402,8 +1402,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # Flag of the EM convergence
         flag = True
         niter = 0
-        logL_prev = 0
-        logL_cur = 0
+        logL_prev = jnp.nan  # no E-step before iteration 1 (F41)
+        logL_cur = jnp.nan
         delta_par = jnp.nan
         delta_lik = jnp.nan
         relat_lik = jnp.nan
@@ -1422,7 +1422,7 @@ class LRStateSpaceModel(StateSpaceModel):
             niter,
             est_params,
             0,
-            logL_cur,
+            jnp.nan,  # iteration 0 has no log-likelihood value (F41)
             delta_par,
             delta_lik,
             relat_lik,
@@ -1444,8 +1444,7 @@ class LRStateSpaceModel(StateSpaceModel):
             tStart_iter = time.time()
 
             # ---- build parametrised matrices and set them for the E step
-            # use self. to access the matrices 
-            H, _, _, _, invQ = self._set_system_matrices(est_params, basis, pdim, qdim)
+            H, invQ = self._set_system_matrices(est_params, basis, pdim, qdim)
 
             # ---- E step
             # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
@@ -1468,9 +1467,10 @@ class LRStateSpaceModel(StateSpaceModel):
                 S11,
                 S10,
                 S00,
-                invQ, 
+                invQ,
                 Phi,
                 ks_value_and_grad,
+                f_fixed=est_params.f.fixed,
             )
 
             # Log-likelihood change, absolute and per observation
@@ -1480,8 +1480,8 @@ class LRStateSpaceModel(StateSpaceModel):
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Check the step. Skipped at the first iteration: logL_prev is a
-            # placeholder (0), so delta_lik is not a real likelihood increment.
+            # Check the step. Skipped at the first iteration: there is no
+            # previous E-step (logL_prev is nan), so delta_lik is nan.
             # - NaN/Inf always stops.
             # - A decrease within tol_relat counts as convergence: the iterates
             #   oscillate on the plateau.
@@ -1570,7 +1570,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # covariance functions' rescale) are left at the returned parameters.
         if not restored:
             self._log("Final E-step at the estimated parameters...")
-            H, _, _, _, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
+            H, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
             final = self._E_step(y_obs)
             logL_final = final[6]
             if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
@@ -1708,9 +1708,10 @@ class LRStateSpaceModel(StateSpaceModel):
         S11,
         S10,
         S00,
-        invQ, 
+        invQ,
         Phi,
         ks_value_and_grad,
+        f_fixed=False,
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1718,6 +1719,11 @@ class LRStateSpaceModel(StateSpaceModel):
         (`_compute_s2e_jax_kernel`), `A` (`_compute_A2_jax_kernel`), and
         `ks` (L-BFGS-B against `ks_value_and_grad`), and package them into a
         new `ModelParams` via `_createParams`.
+
+        The state parameters are updated in ECM order (F40): `f` maximises
+        the expected complete-data log-likelihood given the current `ks`
+        (`invQ`, the precision `Q^-1` of the E-step), then `ks` maximises it
+        given the new `f` (the current `F` if `f_fixed`).
         """
 
         # convert all input to save memory
@@ -1735,10 +1741,11 @@ class LRStateSpaceModel(StateSpaceModel):
         for q in range(nlat):
             s = slice(block_q[q], block_q[q + 1])
 
-            # Added the fix for the f update (Eq 3a) 
+            # Added the fix for the f update (Eq 3a)
             # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
-            num = jnp.trace(invQ[s, s] @ S10[s, s])
-            den = jnp.trace(invQ[s, s] @ S00[s, s])
+            # tr(A B) = sum(A * B'), without forming the product
+            num = jnp.sum(invQ[s, s] * S10[s, s].T)
+            den = jnp.sum(invQ[s, s] * S00[s, s].T)
 
             # print(q, num, den)
             est_f = est_f.at[q].set(num / den)
@@ -1798,7 +1805,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # matmul: S10 @ F.T scales S10's columns, F @ S10.T scales S10.T's
         # rows, and F @ S00 @ F.T scales S00 by outer(f_diag, f_diag) -- the
         # same pattern already used for `FF` in `_filter_kernelJAX`.
-        f_diag = F
+        # ECM: Omega at the new f (F40), or at the current F if f is fixed.
+        f_diag = F if f_fixed else jnp.repeat(est_f, ldim, total_repeat_length=int(block_q[-1]))
         Omega = (
             S11
             - S10 * f_diag[None, :]

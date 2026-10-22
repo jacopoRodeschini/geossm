@@ -4,6 +4,7 @@ One EM fit is shared by the module (about 10 s including JIT compilation).
 """
 
 import dataclasses
+import inspect
 import types
 import warnings
 
@@ -11,12 +12,12 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from scipy import stats
+from scipy import optimize, stats
 from shapely.geometry import Polygon
 
 from geossm.covmodel import spdeAppoxCov
 from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
-from geossm.stmodel.lrssm import _ks_value_and_grad
+from geossm.stmodel.lrssm import _ks_value_and_grad, _spde_marginal_precision
 from geossm.stmodel.stmodel_results import FittedState, _pack_params, _unpack_params
 from tests._known_bugs import known_bug
 from tests._printing import assert_printing_is_side_effect_free
@@ -149,6 +150,14 @@ class TestFit:
         llf = np.asarray(res.llf_path[1:], dtype=float)
         assert np.all(np.isfinite(llf))
         assert np.all(np.diff(llf) > 0)
+
+    def test_llf_path_entry_zero_is_nan(self, fitted):
+        # F41: iteration 0 is logged before any E-step, so it has no
+        # log-likelihood; nor has iteration 1 a previous one to differ from.
+        _, res = fitted
+        assert np.isnan(res.llf_path[0])
+        assert np.all(np.isfinite(res.llf_path[1:]))
+        assert np.isnan(float(res.nstats[1]["deltaL"]))
 
     def test_refit_is_deterministic(self, fitted):
         model, res = fitted
@@ -483,6 +492,97 @@ class TestStandardErrors:
             warnings.simplefilter("error")
             assert np.all(np.isnan(np.asarray(res.bse_vector)))
             assert np.all(np.isnan(res.conf_int()))
+
+
+def _state_G(model, f, ks, T, S11, S10, S00, ldim):
+    """State part of the expected complete-data log-likelihood (no constants):
+    -1/2 [-T log|Q^-1| + tr(Q^-1 Omega(f))], Q^-1 the SPDE precision at ks."""
+    P = np.asarray(_spde_marginal_precision(jnp.asarray(ks, dtype=jnp.float64), *model._spde_mesh_arrays()))
+    Fd = np.repeat(np.asarray(f, dtype=float), ldim)
+    Omega = S11 - S10 * Fd[None, :] - Fd[:, None] * S10.T + np.outer(Fd, Fd) * S00
+    return -0.5 * (-T * np.linalg.slogdet(P)[1] + np.trace(P @ Omega))
+
+
+@pytest.fixture(scope="module")
+def m_step_call(gdf, mesh):
+    """Arguments and result of the third M-step of a float64 fit."""
+    before = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    try:
+        model = _build_model(gdf, mesh, dtype=jnp.float64)
+        orig, calls = model._M_step, []
+
+        def spy(*args, **kwargs):
+            bound = inspect.signature(orig).bind(*args, **kwargs).arguments
+            ks_cur = [float(c.rescale) for c in bound["est_covList"]]
+            out = orig(*args, **kwargs)
+            calls.append((bound, ks_cur, out[0]))
+            return out
+
+        model._M_step = spy
+        model.fit(options=_options(max_iter=3))
+    finally:
+        jax.config.update("jax_enable_x64", before)
+    bound, ks_cur, new = calls[-1]
+    a = {k: np.asarray(v, dtype=float) for k, v in bound.items() if k in ("F", "S11", "S10", "S00", "invQ")}
+    bq = np.asarray(bound["block_q"])
+    return dict(model=model, orig=orig, bound=bound, ks_cur=np.array(ks_cur), new=new, ldim=bq[1:] - bq[:-1],
+                T=bound["y_t"].shape[1], f_cur=a["F"][bq[:-1]], **{k: a[k] for k in ("S11", "S10", "S00", "invQ")})
+
+
+@pytest.mark.usefixtures("x64")
+class TestMStepF40:
+    """M-step of f and ks (F40): with Q not proportional to I, f must weight
+    the traces by Q^-1, and ks is optimised given the new f (ECM)."""
+
+    def test_score_in_f_matches_the_weighted_formula(self, converged):
+        # Fisher identity: d llf / df = d/df E[log p(x, y)] at the current
+        # parameters = tr(Q^-1 S10) - f tr(Q^-1 S00), from the E-step at those
+        # parameters (res.S10/S00). The weighted f update is its root.
+        model, res = converged
+        params = res._inference_params()
+        logL = model._observed_logL(res.y_obs, res.Xbeta, params.x0.value, params.Sigma0.value,
+                                    fitted_state=res._fitted_state)
+        vec, meta = _pack_params(params, dtype=jnp.float64)
+        score = np.asarray(jax.grad(lambda v: logL(_unpack_params(v, params, meta)))(vec))
+        (i,) = [start for n, _, start, _, _ in meta if n == "f"]
+        P = np.asarray(_spde_marginal_precision(jnp.asarray(res.params.ks.value, dtype=jnp.float64),
+                                                *model._spde_mesh_arrays()))
+        f = float(np.asarray(res.params.f.value)[0])
+        expected = np.trace(P @ res.S10) - f * np.trace(P @ res.S00)
+        assert abs(expected) > 1.0  # not yet converged in f: a non-trivial check
+        assert score[i] == pytest.approx(expected, rel=1e-6)
+
+    def test_f_update_maximises_the_expected_loglik(self, m_step_call):
+        c = m_step_call
+        P, S10, S00 = c["invQ"], c["S10"], c["S00"]
+        f_new = float(np.asarray(c["new"].f.value)[0])
+        assert f_new == pytest.approx(np.trace(P @ S10) / np.trace(P @ S00), rel=1e-10)
+        G = lambda f: _state_G(c["model"], [f], c["ks_cur"], c["T"], c["S11"], S10, S00, c["ldim"])  # noqa: E731
+        opt = optimize.minimize_scalar(lambda f: -G(f), bounds=(-1.5, 1.5), method="bounded",
+                                       options={"xatol": 1e-10})
+        assert f_new == pytest.approx(opt.x, abs=1e-6)
+        f_unweighted = np.trace(S10) / np.trace(S00)
+        assert abs(f_unweighted - f_new) > 1e-3 and G(f_new) > G(f_unweighted)
+
+    def test_ks_is_updated_given_the_new_f(self, m_step_call):
+        c = m_step_call
+        G = lambda f, ks: _state_G(c["model"], f, ks, c["T"], c["S11"], c["S10"], c["S00"], c["ldim"])  # noqa: E731
+        f_new, ks_new = np.asarray(c["new"].f.value), np.asarray(c["new"].ks.value)
+        # Each conditional step increases G (ECM).
+        assert G(c["f_cur"], c["ks_cur"]) <= G(f_new, c["ks_cur"]) <= G(f_new, ks_new)
+        # The old order (ks given the current f) does worse at the new f.
+        covs = c["bound"]["est_covList"]
+        for cov, k in zip(covs, c["ks_cur"]):
+            cov.rescale = k
+        ks_old_order = np.asarray(c["orig"](**{**c["bound"], "f_fixed": True})[0].ks.value)
+        assert not np.allclose(ks_old_order, ks_new, rtol=1e-6)
+        assert G(f_new, ks_new) > G(f_new, ks_old_order)
+
+    def test_loglik_never_decreases(self, converged):
+        _, res = converged
+        llf = np.asarray(res.llf_path[1:])  # [0] is nan: no E-step at iteration 0 (F41)
+        assert np.all(np.diff(llf) >= -1e-9 * np.abs(llf[1:]))
 
 
 class TestCompilation:
