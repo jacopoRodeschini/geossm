@@ -6,7 +6,7 @@ from .statespace_results import StateSpaceResults, _safe_sqrt_variance
 
 # this function is needed to be imported here so that it can be used in the LRSSM class,
 # which is defined in the stmodel submodule
-from .statespace import _filter_kernelJAX, _itype_for, _ensure_x64_for_dtype
+from .statespace import _filter_kernelJAX, _itype_for, _check_x64_for_dtype
 
 
 __all__ = [
@@ -15,5 +15,5 @@ __all__ = [
     "_safe_sqrt_variance",
     "_filter_kernelJAX",
     "_itype_for",
-    "_ensure_x64_for_dtype",
+    "_check_x64_for_dtype",
 ]

@@ -35,9 +35,8 @@ import time
 from geossm.utils import KeyStream
 from datetime import date
 from statsmodels.iolib.summary import Summary
-from types import SimpleNamespace
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device, format_info_table
+from geossm.utils import _select_device, _to_backend, _on_device, format_info_table, _summary_table_source
 
 
 def _itype_for(dtype):
@@ -45,16 +44,24 @@ def _itype_for(dtype):
     return jnp.int64 if jnp.dtype(dtype).itemsize == 8 else jnp.int32
 
 
-def _ensure_x64_for_dtype(dtype):
-    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
 
-    JAX silently truncates float64/int64 arrays back to 32-bit unless x64 mode
-    is enabled, so requesting a 64-bit dtype only takes effect if we flip this
-    flag on. Left untouched (and off by default) for 32-bit dtypes so that the
-    default, fast 32-bit path is unaffected.
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
+
+    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
+    enabled. Enabling it is a process-wide setting, so it is left to the user
+    rather than switched on here (finding F03).
     """
     if jnp.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=jnp.dtype(dtype).name))
 
 
 def _highest_matmul_precision(f):
@@ -80,21 +87,6 @@ def _highest_matmul_precision(f):
         with jax.default_matmul_precision("highest"):
             return f(*args, **kwargs)
     return wrapper
-
-
-def _chol_jitter(mat):
-    """Scale-aware jitter added before a stabilizing Cholesky decomposition.
-
-    A fixed 1e-6 (the historical constant here) is only meaningful relative
-    to an O(1)-magnitude matrix; scaling it by the matrix's own mean diagonal
-    keeps it proportionate for differently-scaled covariances. This is a
-    defense-in-depth measure for genuine float32 rounding on borderline
-    (near-singular) matrices -- it is NOT a fix for reduced-precision-matmul
-    errors, which can be orders of magnitude larger than any jitter should
-    reasonably be; see `_highest_matmul_precision` for that.
-    """
-    scale = jnp.maximum(jnp.mean(jnp.abs(jnp.diag(mat))), 1.0)
-    return 1e-6 * scale
 
 
 # %% JAX kernel functions for SSM
@@ -148,7 +140,8 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
 
     # --- Initial State (t=0) ---
-    initial_noise = jax.random.normal(keys.next(), shape=(q,))
+    # Draws in the model dtype: without it they follow the global x64 flag.
+    initial_noise = jax.random.normal(keys.next(), shape=(q,), dtype=H.dtype)
     x_current = x0 + chol_Sigma0 @ initial_noise  # This is state x_0
 
     # --- Simulation using a Python for-loop ---
@@ -160,13 +153,13 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     # Loop T times to generate T observations (y_0, ..., y_{T-1})
     for t in range(T):
         # 1. Generate the observation y_t based on the current state x_t
-        obs_noise = chol_R_diag * jax.random.normal(keys.next(), shape=(p,))
+        obs_noise = chol_R_diag * jax.random.normal(keys.next(), shape=(p,), dtype=H.dtype)
         mean_reg = Xbeta[:, :, t] @ beta
         y_t = mean_reg + H @ x_current + obs_noise
         y_history.append(y_t)
 
         # 2. Evolve the state to the next step: x_{t+1} from x_t
-        process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,))
+        process_noise = chol_Q @ jax.random.normal(keys.next(), shape=(q,), dtype=H.dtype)
         x_next = F * x_current + process_noise
 
         # 3. Store the new state and update the current state for the next loop iteration
@@ -253,8 +246,9 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     ``R`` and ``F`` are used only through their diagonal (see
     `_prepare_diag_array`), so the ``F @ P @ F.T`` and ``H.T @ R^{-1}``
     products above reduce to elementwise scalings rather than dense
-    matmuls. Matrix inverses are computed via a jittered Cholesky
-    factorization (`_chol_jitter`) for numerical stability.
+    matmuls. Matrix inverses and log-determinants are computed from a
+    Cholesky factorization. No jitter is added: it biased states and
+    log-likelihood without preventing any failure (finding F15).
 
     Missing observations (``NaN`` entries in ``y_t``) are handled by
     zeroing both the corresponding residual entries and the
@@ -263,10 +257,10 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     all arrays at their static, missingness-independent shape (required
     by ``jax.lax.scan``/``jit``).
 
-    The log-likelihood accumulated here is the Gaussian log-likelihood
-    up to the additive normalizing constant :math:`-\\tfrac{1}{2}\\sum_t
-    p \\log(2\\pi)`, which this kernel omits (it is constant with respect
-    to the model parameters).
+    The log-likelihood accumulated here is the full observed-data
+    Gaussian log-likelihood, including the normalizing constant
+    :math:`-\\tfrac{1}{2} n_t \\log(2\\pi)` for the :math:`n_t` observed
+    entries of each time step.
 
     Only the final Kalman gain ``K`` (from the last time step) is
     returned - it is the only one the smoother's boundary condition
@@ -298,8 +292,8 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         One-step-ahead predicted state covariances :math:`P_{t|t-1}`
         (index 0 is a zero placeholder).
     logL : float
-        Gaussian log-likelihood of ``y_t`` under the model, up to the
-        additive constant described above.
+        Gaussian log-likelihood of the observed entries of ``y_t``
+        under the model.
     """
 
     dtype = y_t.dtype.type()
@@ -316,6 +310,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     H_dense = H.astype(dtype)
     f_diag = F
     FF = jnp.outer(f_diag, f_diag)
+    log2pi = jnp.log(jnp.asarray(2.0 * jnp.pi, dtype=y_t.dtype))
 
     # This is the function for a single loop iteration
     def kalman_step(carry, step_data):
@@ -348,7 +343,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # reuse, but that duplicated a full (q, q, T) array for something the
         # smoother can recompute inline from the (already stored) P_t_1.
         #invP_pred = solve(P_pred, Iq)
-        L_P = jnp.linalg.cholesky(P_pred + _chol_jitter(P_pred) * Iq)  # jitter for numerical stability
+        L_P = jnp.linalg.cholesky(P_pred)
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
 
@@ -362,7 +357,7 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         M = invP_pred + HtinvRH
 
-        L_M = jnp.linalg.cholesky(M + _chol_jitter(M) * Iq)  # jitter for numerical stability
+        L_M = jnp.linalg.cholesky(M)
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
 
@@ -391,14 +386,20 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
         logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
         logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
-        logdetSigmaE = logdet_M + logdet_Ppred + jnp.sum(jnp.log(R_diag))
+        # With the missing rows of H zeroed, the innovation covariance is
+        # block-diagonal (observed block, diag(R) of the missing rows), so the
+        # determinant lemma above gives log|S_obs| + sum_missing log R_ii.
+        # Only the observed rows belong to the observed-data likelihood.
+        logdet_R_obs = jnp.sum(jnp.where(nan_mask, 0.0, jnp.log(R_diag)))
+        logdetSigmaE = logdet_M + logdet_Ppred + logdet_R_obs
 
         # e.T @ invSigmaE @ e, expanded the same way as K above so this is
         # O(p*q) instead of O(p^2) via an explicit invSigmaE.
         v = HtinvR @ e
         quad_e = jnp.sum(invR_diag * e * e) - v @ (invM @ v)
 
-        logL_accum += logdetSigmaE + quad_e
+        n_obs_t = jnp.sum(~nan_mask, dtype=y_t.dtype)
+        logL_accum += logdetSigmaE + quad_e + n_obs_t * log2pi
 
         # 2. Pack carry for next step and outputs for this step
         next_carry = (x_upd, P_upd, logL_accum, K)
@@ -476,10 +477,10 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
 
     As in `_filter_kernelJAX`, ``F`` is used only through its diagonal,
     so ``F @ P`` products reduce to elementwise column scaling, and all
-    matrix inverses use a jittered Cholesky factorization
-    (`_chol_jitter`). ``P_t_1`` (the filter's one-step-ahead predicted
-    covariances) is reused directly rather than a separately stored
-    inverse, since it is already available from the filter pass.
+    matrix inverses use a Cholesky factorization. ``P_t_1`` (the filter's
+    one-step-ahead predicted covariances) is reused directly rather than a
+    separately stored inverse, since it is already available from the
+    filter pass.
 
     Parameters
     ----------
@@ -513,11 +514,11 @@ def _smoother_kernelJAX(H, F, x_t, P_t, Klast, x_t_1, P_t_1):
     Iq = jnp.eye(q, dtype=dtype)
 
     def _chol_inv(P):
-        # Same Cholesky-based inverse the filter uses for the Woodbury step
-        # (with the same jitter for numerical stability). Recomputed here
-        # instead of being read from a stored (q, q, T) invP_t_1 array,
-        # since P_t_1 (its input) is already available from the filter pass.
-        L = jnp.linalg.cholesky(P + _chol_jitter(P) * Iq)
+        # Same Cholesky-based inverse the filter uses for the Woodbury step.
+        # Recomputed here instead of being read from a stored (q, q, T)
+        # invP_t_1 array, since P_t_1 (its input) is already available from
+        # the filter pass.
+        L = jnp.linalg.cholesky(P)
         invL = jax.scipy.linalg.solve_triangular(L, Iq, lower=True)
         return invL.T @ invL
 
@@ -890,9 +891,10 @@ class StateSpaceModel:
             ``'auto'`` lets JAX pick its default device.
         dtype : numpy/jax dtype, default jax.numpy.float32
             Floating-point precision used for all internal computations.
-            Requesting a 64-bit dtype (e.g. ``jax.numpy.float64``)
-            transparently enables JAX's x64 mode (see
-            `_ensure_x64_for_dtype`).
+            A 64-bit dtype (e.g. ``jax.numpy.float64``) requires JAX's
+            x64 mode to be enabled beforehand
+            (``jax.config.update("jax_enable_x64", True)``); otherwise a
+            `ValueError` is raised (see `_check_x64_for_dtype`).
 
         Raises
         ------
@@ -902,7 +904,7 @@ class StateSpaceModel:
         """
         self.dtype = jnp.dtype(dtype)  # Data type for computations
         self.itype = _itype_for(self.dtype)  # Matching integer dtype for index/block arrays
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
         self._backend = _select_device(backend)  # Computational backend (e.g., 'cpu', 'gpu', 'tpu')
 
         self._F = None  # State transition matrix
@@ -1083,15 +1085,15 @@ class StateSpaceModel:
 
         if x0 is not None:
             self._x0 = self._prepare_array(x0)
-        else:
-            if self.q is not None:
-                self._x0 = self._prepare_array(jnp.zeros(self.q))
+        elif self.q is not None and (self._x0 is None or self._x0.shape != (self.q,)):
+            self._x0 = self._prepare_array(jnp.zeros(self.q))
 
         if Sigma0 is not None:
             self._Sigma0 = self._prepare_array(Sigma0)
-        else:
-            if self.q is not None:
-                self._Sigma0 = self._prepare_array(jnp.eye(self.q))
+        elif self.q is not None and (
+            self._Sigma0 is None or self._Sigma0.shape != (self.q, self.q)
+        ):
+            self._Sigma0 = self._prepare_array(jnp.eye(self.q))
 
         if Xbeta is not None:
             Xbeta_arr = self._prepare_array(Xbeta)
@@ -1506,7 +1508,7 @@ class StateSpaceModel:
         tStart = time.time()
 
         x_t, P_t, K, x_t_1, P_t_1, logL = _filter_kernelJAX(
-            y_t,
+            self.y_t,  # in the model dtype (set() casts it), not as passed (F43)
             self.H,
             self.R,
             self.F,
@@ -2255,7 +2257,7 @@ class StateSpaceModel:
                 self.dtype = jnp.dtype(jnp.float32)
 
         self.itype = _itype_for(self.dtype)
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
 
         # Restore the backend device. Fall back to 'auto' if the platform
         # requested at pickle time (e.g. 'gpu') isn't available on this
@@ -2428,21 +2430,12 @@ class StateSpaceModel:
             Printable summary table with model identity/type/order,
             shape ``(p, q, T)`` and mean system-matrix diagonals.
         """
-        self.model = SimpleNamespace()
-        self.model.results = jnp.array([0])
-        
-        self.params = ""
-        self.params_names = ""
-        self.model.bse = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-        self.model.tvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-        self.model.pvalues = jnp.zeros(len(self.beta)) if self.beta is not None else jnp.array([0])
-
         gen_top_left, gen_top_right = self.generate_summary()
 
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,

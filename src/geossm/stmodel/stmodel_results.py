@@ -3,19 +3,82 @@ from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import Param, ModelParams, FitOptions
 from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
+from geossm.ssm.statespace import _highest_matmul_precision
 from types import SimpleNamespace
 from scipy import stats
 import time
 import warnings
 import jax
 import jax.numpy as jnp
-from dataclasses import replace, fields
-from geossm.utils import _on_device, split_by_block, format_info_table
+from dataclasses import dataclass, replace, fields
+from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
 
 
 ArrayLike = Optional[Any]
 
 # %% [Utils] Define pack/unpack helpers to flatten params to a 1D array
+
+def _read_only_copy(a):
+    a = np.array(a, copy=True)
+    a.setflags(write=False)
+    return a
+
+
+@dataclass(frozen=True)
+class FittedState:
+    """
+    Configuration of an `LRStateSpaceModel` at the end of a `fit()`: what
+    `LRStateSpaceResults` needs, besides the estimates it holds itself, to
+    recompute quantities later (the Hessian, predictions at new locations,
+    names in summaries), so that a later `fit()`/`setup()`/`set()` on the
+    model does not change those results (findings F09, F27).
+
+    Built by `LRStateSpaceModel._get_fitted_state()`. Fields cannot be
+    reassigned; sequences are tuples and arrays are read-only copies. The
+    covariance functions, formula builders and domains are kept by
+    reference: they are configuration and must not be modified (e.g.
+    re-`setup()`) after fitting.
+
+    Attributes
+    ----------
+    cov_function : tuple of spdeAppoxCov
+        Latent covariance functions of the fit (FEM mesh and basis).
+    points : tuple of numpy.ndarray
+        Observation sites of each response variable, shape ``(n_i, 2)``.
+    pdim : numpy.ndarray
+        Number of sites of each response variable.
+    nvar, nlat : int
+        Number of response variables and of latent factors.
+    y_name : tuple of str
+        Response-variable names, one per response variable.
+    xbeta_names : tuple of tuple of str
+        Covariate names of each response variable.
+    builders : tuple of DesignMatricesBuilder
+        Fitted formula builders, used to build the design matrix at new
+        locations with the training transforms (e.g. `standardize()`).
+    domain : tuple
+        Measurement-equation domain of each response variable.
+    dtype, itype : numpy.dtype
+        Float and integer dtype of the model.
+    """
+
+    cov_function: tuple
+    points: tuple
+    pdim: np.ndarray
+    nvar: int
+    nlat: int
+    y_name: tuple
+    xbeta_names: tuple
+    builders: tuple
+    domain: tuple
+    dtype: np.dtype
+    itype: np.dtype
+
+
+# Scale of the confidence intervals of bounded parameters (see
+# `_stats_from_arrays`): log for the positive ones, atanh for f.
+_CI_SCALE = {"s2e": "log", "ks": "log", "f": "atanh"}
+
 
 def _pack_params(params, dtype=jnp.float32):
     """Flatten free parameter values into one 1D JAX array."""
@@ -132,6 +195,13 @@ class LRStateSpaceResults(StateSpaceResults):
       support from the prediction points to polygons (`to_poly`).
     - A `statsmodels`-style textual report (`summary`).
 
+    A results object is a snapshot of the fit that produced it: the
+    parameters, states, observation-noise variances, names and the
+    covariance functions of that fit are recorded when it is created, so a
+    later `fit()` or `setup()` on the model does not change it (the new fit
+    returns its own results). The covariance objects are kept by
+    reference and should not be re-`setup()` afterwards.
+
     Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
     (in-sample fitted), `y_obs_list` (training observations),
     `residuals_list`, and -- after `.predict()` -- `y_pred_list`/
@@ -150,7 +220,7 @@ class LRStateSpaceResults(StateSpaceResults):
         results = results.predict(new_df) # out-of-sample prediction
         results = results.back_transform(g_inv=jnp.exp)  # if y = np.log(...)
         geo = results.to_geo()
-        areal = results.to_poly("regions.shp", uncertainty=True)
+        areal = results.to_poly("regions.shp", std=True)
     """
 
     def __init__(
@@ -160,6 +230,8 @@ class LRStateSpaceResults(StateSpaceResults):
         nstats: list = None,
         options: FitOptions = None,
         convergence: bool = None,
+        termination: str = None,
+        fitted_state=None,
         block_p=None,
         points_hat: list = None,
         timestamps_hat: list = None,
@@ -184,11 +256,17 @@ class LRStateSpaceResults(StateSpaceResults):
             The `FitOptions` the model was fit with (stored as-is, for
             reference).
         convergence : bool, optional
-            `True` if the EM algorithm stopped because the relative
-            log-likelihood tolerance (`tol_relat`) was met; `False` if it
-            stopped for any other reason (`max_iter` reached, or a
-            decreasing/NaN/Inf log-likelihood, in which case the last
-            valid estimate is kept).
+            `True` if the EM algorithm stopped because the per-observation
+            log-likelihood change was within `tol_relat`; `False` if it
+            stopped for any other reason (see `termination`).
+        termination : str, optional
+            Why the EM algorithm stopped: ``"tolerance"`` (converged; this
+            includes a decrease within `tol_relat`, i.e. the iterates
+            oscillating on the plateau), ``"decrease"`` (a larger decrease
+            with `force_iter=False`), ``"invalid"`` (NaN/Inf
+            log-likelihood) or ``"max_iter"``. On ``"decrease"``,
+            ``"invalid"`` and a converged decrease, the highest-likelihood
+            iterate seen is returned.
         block_p : array-like, optional
             Cumulative index boundaries splitting the stacked training
             arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
@@ -219,6 +297,12 @@ class LRStateSpaceResults(StateSpaceResults):
         self.nstats = nstats
         self.options = options
         self.convergence = convergence
+        self.termination = termination
+        # Fit-time snapshot of the model state (covariance functions,
+        # points, block sizes, names) used by the methods below, so that
+        # later fit()/setup() calls on the model do not change these
+        # results (F09); see `FittedState`.
+        self._fitted_state = fitted_state
 
         # Cumulative per-response-variable index boundaries for the
         # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
@@ -335,12 +419,15 @@ class LRStateSpaceResults(StateSpaceResults):
     def n_params(self):
         """
         int : Total number of *free* (not `fixed`) scalar parameters across
-        `beta`, `s2e`, `f`, `A`, `ks`, `x0`, `Sigma0`, used as the degrees
-        of freedom / penalty term `k` in `df_resid`, `compute_aic`, and
-        `compute_bic`.
+        `beta`, `s2e`, `f`, `A`, `ks`, used as the degrees of freedom /
+        penalty term `k` in `df_resid`, `compute_aic`, and `compute_bic`.
+        The initial state (`x0`, `Sigma0`) is a nuisance parameter and is
+        not counted, whether fixed or estimated (as in the Hessian, see
+        `_inference_params`).
         """
         if self._n_params is None:
-            self._n_params = sum(d for d, f in zip(self.param_dim, self.param_fixed) if not f) if self.param_dim is not None and self.param_fixed else 0
+            self._n_params = sum(d for n, d, f in zip(self.param_names, self.param_dim, self.param_fixed)
+                                 if not f and n not in ("x0", "Sigma0")) if self.param_dim is not None and self.param_fixed else 0
         return self._n_params
     
     def _process_nstats(self):
@@ -368,9 +455,37 @@ class LRStateSpaceResults(StateSpaceResults):
         self.time_expectation = sum(runtime_expectation)
         self.time_total = sum(runtime_each)
         
-        self.llf_path = [v["logL"] for v in self.nstats]
-        self.llf = self.llf_path[-1]
+        self.llf_path = [float(v["logL"]) for v in self.nstats]
+        # fit() passes the llf of the returned estimate, which is not the
+        # last logged one when an earlier best iterate is restored.
+        if self.llf is None:
+            self.llf = self.llf_path[-1]
     
+    def _after_update(self, keys):
+        """`update` hook: also clear the inference caches and reprocess
+        `params`/`nstats` when they are replaced."""
+        super()._after_update(keys)
+        self._n_params = self._aic = self._bic = None
+        self._hessian = self._cov_params = self._free_meta = self._frozen_params = None
+        self._bse_params = None
+        if "params" in keys and self.params is not None:
+            self._process_params()
+        if "nstats" in keys and self.nstats is not None and "llf" not in keys:
+            self.llf = None  # taken from the new nstats
+            self._process_nstats()
+
+    def _snapshot(self, name):
+        """Fit-time value `name` of the model state (see `FittedState`);
+        falls back to the model's current attribute for results built
+        without one."""
+        state = getattr(self, "_fitted_state", None)
+        return getattr(state, name) if state is not None else getattr(self.model, name)
+
+    @property
+    def _y_names(self):
+        """Response-variable names of the fit (snapshot, see `_snapshot`)."""
+        return self._snapshot("y_name")
+
     def _inference_params(self):
         """
         Params used for Hessian/inference: a copy of self.params with x0 and
@@ -416,7 +531,8 @@ class LRStateSpaceResults(StateSpaceResults):
         Sigma0 = params.Sigma0.value
 
         # Get the scalar positive log-likelihood function
-        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0)
+        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0,
+                                         fitted_state=getattr(self, "_fitted_state", None))
         # fun(params)
 
         # Pack free params into a flat array
@@ -430,8 +546,10 @@ class LRStateSpaceResults(StateSpaceResults):
             return logL(p)
 
         ts = time.time()
-        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params)
-        hesfun = jax.hessian(fun_flat)
+        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params).
+        # Jitted as one program (instead of ~265 eagerly compiled operations),
+        # at full matmul precision like the other kernels (F21, F31).
+        hesfun = jax.jit(_highest_matmul_precision(jax.hessian(fun_flat)))
         # Evaluate the Hessian at the estimated parameters
         hessian = hesfun(vec0)
         jax.block_until_ready(hessian)
@@ -477,10 +595,24 @@ class LRStateSpaceResults(StateSpaceResults):
         H = 0.5 * (H + H.T)
         # eps = 1e-6
         # H += eps * jnp.eye(H.shape[0], dtype=H.dtype)
-        cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
-        # check if it is postive definte
-        # chol = jnp.linalg.cholesky(cov_params)
+        # At a maximum the Hessian of the log-likelihood is negative definite;
+        # otherwise -H^-1 is not a covariance matrix and no SE is reported.
+        eig = np.asarray(jnp.linalg.eigvalsh(H))
+        n_bad = int(np.sum(~(eig < 0)))
+        if n_bad:
+            warnings.warn(
+                "The Hessian of the log-likelihood is not negative definite "
+                "({} of {} eigenvalues are non-negative or not finite; largest {:.3g}), "
+                "so the estimate is not at a strict maximum or the Hessian is "
+                "inaccurate. Standard errors are set to NaN.".format(
+                    n_bad, eig.size, float(np.max(eig)) if eig.size else float("nan")),
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            cov_params = jnp.full(H.shape, jnp.nan, dtype=H.dtype)
+        else:
+            cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
         self._cov_params = cov_params
         return cov_params
@@ -512,7 +644,10 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         if self._cov_params is None:
             return np.full(self.theta_hat.shape, np.nan)
-        return _safe_sqrt_variance(np.asarray(jnp.diag(self._cov_params)), context="bse_vector")
+        var = np.asarray(jnp.diag(self._cov_params))
+        if np.all(np.isnan(var)):  # not a covariance matrix: compute_cov_params warned
+            return np.full(var.shape, np.nan)
+        return _safe_sqrt_variance(var, context="bse_vector")
 
     @property
     def bse(self):
@@ -535,11 +670,25 @@ class LRStateSpaceResults(StateSpaceResults):
             self._bse_params = _vector_to_bse_params(self.bse_vector, self.params, self._free_meta)
         return self._bse_params
 
-    def _stats_from_arrays(self, params, bse, alpha=0.05):
+    def _stats_from_arrays(self, params, bse, alpha=0.05, scale=""):
         """Compute t-values, two-sided p-values, and `alpha`-level confidence
         intervals for flat `params`/`bse` arrays, using the Student-t
         distribution with `df_resid` degrees of freedom (or the Normal
-        distribution if `df_resid` is unavailable)."""
+        distribution if `df_resid` is unavailable).
+
+        `scale` (a string, or one per element of `params`) sets the scale
+        of the interval; it is computed there, with the standard error from
+        the delta method, and mapped back:
+
+        * `""`: natural scale, `theta -+ crit * bse`;
+        * `"log"`: `log(theta)`, standard error `bse / theta`, giving
+          `theta * exp(-+ crit * bse / theta)` (positive);
+        * `"atanh"`: `atanh(theta)`, standard error `bse / (1 - theta**2)`,
+          giving `tanh(atanh(theta) -+ crit * bse / (1 - theta**2))`, inside
+          (-1, 1). For `|theta| >= 1` atanh is undefined and the natural
+          scale is used.
+
+        t-values and p-values are always on the natural scale."""
         params = np.asarray(params, dtype=float).ravel()
         bse = np.asarray(bse, dtype=float).ravel()
     
@@ -553,8 +702,24 @@ class LRStateSpaceResults(StateSpaceResults):
             p = 2 * stats.norm.sf(np.abs(t))
             crit = stats.norm.ppf(1 - alpha / 2.0)
     
-        ci = np.column_stack([params - crit * bse, params + crit * bse])
-        return t, p, ci
+        lo, hi = params - crit * bse, params + crit * bse
+        scale = np.broadcast_to(np.asarray(scale, dtype=str), params.shape)
+        log, ath = scale == "log", (scale == "atanh") & (np.abs(params) < 1)
+        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+            r = np.exp(crit * bse / params)
+            z, dz = np.arctanh(params), crit * bse / (1 - params**2)
+            lo = np.where(log, params / r, np.where(ath, np.tanh(z - dz), lo))
+            hi = np.where(log, params * r, np.where(ath, np.tanh(z + dz), hi))
+        return t, p, np.column_stack([lo, hi])
+
+    def _ci_scale(self):
+        """Confidence-interval scale of each free parameter, in the order of
+        `theta_hat` (`_CI_SCALE`, `""` for the natural scale)."""
+        _, meta = _pack_params(self._inference_params(), dtype=self.dtype)
+        scale = np.full(self.theta_hat.size, "", dtype="<U5")
+        for name, _shape, start, stop, _fixed in meta:
+            scale[start:stop] = _CI_SCALE.get(name, "")
+        return scale
 
        
     @property
@@ -591,6 +756,12 @@ class LRStateSpaceResults(StateSpaceResults):
         Confidence intervals for the free parameters. NaN until
         `compute_cov_params()` has been called (see `bse_vector`).
 
+        Wald intervals `theta +- crit * bse`, except for the bounded
+        parameters, whose intervals are computed on a transformed scale and
+        mapped back (delta method, see `_stats_from_arrays`): log scale for
+        `s2e` and `ks`, so they stay positive, and atanh scale for `f`, so
+        it stays inside (-1, 1) (natural scale if `|f| >= 1`).
+
         Parameters
         ----------
         alpha : float, default 0.05
@@ -603,7 +774,8 @@ class LRStateSpaceResults(StateSpaceResults):
             Lower/upper confidence bounds, in the same flat parameter order
             as `theta_hat`.
         """
-        _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha)
+        _, _, ci = self._stats_from_arrays(self.theta_hat, self.bse_vector, alpha=alpha,
+                                           scale=self._ci_scale())
         return ci
 
 
@@ -844,7 +1016,7 @@ class LRStateSpaceResults(StateSpaceResults):
                 if sigma is not None:
                     var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
                     std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
-                    data[f"std_{col_prefix}_{name}"] = std.ravel()
+                    data[f"std_{col_prefix}_{name}"] = std.ravel().astype(y.dtype)
 
         add_columns(y_names, y_list, Sigma_list, prefix)
         if y_back_list is not None:
@@ -880,14 +1052,19 @@ class LRStateSpaceResults(StateSpaceResults):
         points/timestamps.
 
         Columns: `point_id`, `timestamp`, then `y_<hat|pred>_<var>`/
-        `std_<hat|pred>_<var>` for every response variable.
+        `std_<hat|pred>_<var>` for every response variable, in the dtype of
+        the fit. `std_*` is the standard deviation of the latent mean
+        (`sqrt(diag(H P H'))`, plug-in parameters), without the
+        measurement error: for a prediction interval of a new observation,
+        add `s2e` to its square (as `conf_int_y(prediction=True)` does
+        in-sample).
 
         results = results.predict(grid, verbose=True)
         geo = results.to_geo()
         geo["hat"].to_file("fitted.shp")
         geo["pred"].to_file("predictions.shp")
         """
-        y_names = self.model.y_name
+        y_names = self._y_names
 
         gdf_hat = self._build_geo_dataframe(
             y_names, self.points_hat, self.timestamps_hat,
@@ -986,7 +1163,7 @@ class LRStateSpaceResults(StateSpaceResults):
         aggregate::
 
             results = results.predict(fine_grid)
-            gdf = results.to_poly("regions.shp", uncertainty=True)
+            gdf = results.to_poly("regions.shp", std=True)
 
         Since the average is linear, with `W` the `(m, n)` averaging
         matrix (`W[k, j] = 1/n_k` for the `n_k` points in polygon `k`), the
@@ -1040,7 +1217,7 @@ class LRStateSpaceResults(StateSpaceResults):
         back_transform : bool, default False
             Aggregate the original-scale predictions instead. Requires
             `.back_transform(g_invs)` to have been run after `.predict()`.
-        uncertainty : bool, default False
+        std : bool, default False
             Also compute the areal predictive std of each polygon mean
             (`std_<var>` columns), `sqrt(diag(W Sigma_t W'))`.
 
@@ -1051,7 +1228,7 @@ class LRStateSpaceResults(StateSpaceResults):
             `timestamp`, the input polygon attributes, then, per response
             variable `<var>` in `model.y_name`: `n_points_<var>`
             (prediction points in the polygon), `<var>` (areal mean), and
-            `std_<var>` (if `uncertainty=True`) -- the last two suffixed
+            `std_<var>` (if `std=True`) -- the last two suffixed
             `_back` if `back_transform=True` -- and `geometry` last.
         """
         import geopandas as geopd
@@ -1077,7 +1254,7 @@ class LRStateSpaceResults(StateSpaceResults):
                 )
             Sigma_list = [None] * len(y_list)
 
-        y_names = self.model.y_name
+        y_names = self._y_names
         ts = self.timestamps_pred[0]
         for name, t in zip(y_names, self.timestamps_pred):
             if len(t) != len(ts) or not np.array_equal(np.asarray(t), np.asarray(ts)):
@@ -1122,9 +1299,9 @@ class LRStateSpaceResults(StateSpaceResults):
                 for t in range(T):
                     WS = W @ Sigma[:, :, t]  # (m, n)
                     var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
-                std = _safe_sqrt_variance(var, context="to_poly")
-                std[:, empty] = np.nan  # after the sqrt: already warned above
-                out[f"std_{col}"] = std.ravel()
+                sd = _safe_sqrt_variance(var, context="to_poly")
+                sd[:, empty] = np.nan  # after the sqrt: already warned above
+                out[f"std_{col}"] = sd.ravel()
 
         geom = polygons.geometry.name
         out = out[[c for c in out.columns if c != geom] + [geom]]
@@ -1234,6 +1411,19 @@ class LRStateSpaceResults(StateSpaceResults):
         variance, quadrature is the natural drop-in replacement since it
         reuses the same `mu`/`Sigma` this method already computes.
 
+        What is estimated: `mu` and `Sigma` are the plug-in mean and the
+        state-driven covariance of the latent signal (`Sigma_y_hat`/
+        `Sigma_y_pred`, `H P H'`, without the measurement error `s2e` and
+        with the parameters treated as known). `y_*_back_list` therefore
+        approximates the original-scale mean of the signal, `E[h(signal)]`,
+        not of a new noisy observation (which would add `s2e` to the
+        variance in the second-order term), and `Sigma_*_back_list` its
+        covariance. `residuals_back_list` is `h(y_obs) - E[h(signal)]`.
+
+        A fitted or predicted mean without its covariance (`std=False`)
+        cannot be back-transformed this way: it is left as `None`, with a
+        warning.
+
         Parameters
         ----------
         g_invs : Callable[[float], float] or list/tuple of callables
@@ -1241,18 +1431,23 @@ class LRStateSpaceResults(StateSpaceResults):
             (e.g. `jnp.exp` for a `np.log(y)` response), as a scalar ->
             scalar JAX-traceable function, or a list/tuple of such functions
             matching the number of response variables.
+
+        Returns
+        -------
+        LRStateSpaceResults
+            `self`, with the `*_back_list` attributes set.
         """
 
         # check the len of g_invs and if it matches the number of response variables
         if isinstance(g_invs, (list, tuple)):
-            if len(g_invs) != len(self.model.y_name):
+            if len(g_invs) != len(self._y_names):
                 raise ValueError(
                     f"g_invs must be a single callable or a list/tuple of callables "
-                    f"matching the number of response variables ({len(self.model.y_name)}), "
+                    f"matching the number of response variables ({len(self._y_names)}), "
                     f"but got {len(g_invs)}."
                 )
         else:
-            g_invs = [g_invs] * len(self.model.y_name)
+            g_invs = [g_invs] * len(self._y_names)
 
 
         if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
@@ -1264,6 +1459,9 @@ class LRStateSpaceResults(StateSpaceResults):
 
             self.y_hat_back_list = y_hat_back_list
             self.Sigma_y_hat_back_list = Sigma_hat_back_list
+        elif self.y_hat_list is not None:
+            warnings.warn("back_transform(): the fitted values have no covariance (Sigma_y_hat), "
+                          "so they are not back-transformed.", RuntimeWarning, stacklevel=2)
 
         if self.y_obs_list is not None:
             self.y_obs_back_list = [
@@ -1285,6 +1483,10 @@ class LRStateSpaceResults(StateSpaceResults):
             
             self.y_pred_back_list = y_pred_back_list
             self.Sigma_y_pred_back_list = Sigma_pred_back_list
+        elif self.y_pred_list is not None:
+            warnings.warn("back_transform(): the predictions have no covariance (predict(std=False)), "
+                          "so they are not back-transformed; run predict(df, std=True).",
+                          RuntimeWarning, stacklevel=2)
 
         return self
 
@@ -1443,26 +1645,25 @@ class LRStateSpaceResults(StateSpaceResults):
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
-          
-            self,
+            _summary_table_source(),
             title="LR State Space Model Results",
             gleft=gen_top_left,
             gright=gen_top_right,
             yname=None,
             xname=None,
         )
-        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
+        smry.add_extra_txt(list(self._DIAGNOSTICS_NOTE))
 
         # Parameter names for every table below, padded to a common width so
         # the name column lines up across the (independently-sized) tables
         # produced by add_table_params.
-        xnames_stack = [item for sublist in self.model.xbeta_names for item in sublist]
+        xnames_stack = [item for sublist in self._snapshot("xbeta_names") for item in sublist]
         meas_err_names = [f"s2e_{i}" for i in range(self.params.s2e.size)] + [
             f"A_{i}_{j}"
             for i in range(self.params.A.shape[0])
             for j in range(self.params.A.shape[1])
         ]
-        matern_names = [f"rescale_{j}" for j in range(len(self.model.cov_function))]
+        matern_names = [f"rescale_{j}" for j in range(len(self._snapshot("cov_function")))]
         latent_names = [f"f_{i}" for i in range(self.params.f.value.size)]
         state_names = matern_names + latent_names
 
@@ -1507,8 +1708,9 @@ class LRStateSpaceResults(StateSpaceResults):
         
         temp.params = np.hstack((s2e_vals, A_vals))
         temp.bse = np.hstack((s2e_bse, A_bse))
+        scale = ["log"] * s2e_vals.size + [""] * A_vals.size
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.params_name, alpha=alpha)
 
@@ -1529,8 +1731,9 @@ class LRStateSpaceResults(StateSpaceResults):
 
         temp.params = np.hstack((ks_val, f_val))
         temp.bse = np.hstack((ks_bse, f_bse))
+        scale = ["log"] * ks_val.size + ["atanh"] * f_val.size
         temp.tvalues, temp.pvalues, _ = self._stats_from_arrays(temp.params, temp.bse)
-        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse: self._stats_from_arrays(v, s, alpha)[2]
+        temp.conf_int = lambda alpha=alpha, v=temp.params, s=temp.bse, m=scale: self._stats_from_arrays(v, s, alpha, m)[2]
         
         smry.add_table_params(temp, xname=temp.param_names, alpha=alpha)
 

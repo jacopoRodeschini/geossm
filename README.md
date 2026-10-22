@@ -101,19 +101,20 @@ The `*` symbol indicates dataset more than 10MB.
 - **Multiple Model Types**: Support for linear time-invariant and time-varying SSMs
 
 ## Requirements
-- **OS**: Linux or macOS (Windows not currently supported)
-- **Python**: 3.10 or higher (required by the `jax` dependency)
+- **OS**: Linux (x86-64). macOS and Windows are not supported: the `mfem` wheels required on Python 3.10 are Linux-only.
+- **Python**: 3.10 to 3.13. These are the tested versions; on 3.10, pip resolves `jax` 0.6.x, the last JAX series that supports it.
 - **Key Dependencies**:
-  - `geopandas` ≥ 1.1.2 (geospatial data handling)
+  - `geopandas` ≥ 1.1.2 (geospatial data handling; `pyarrow`, `pyogrio` and `pyproj` for its I/O and CRS support)
   - `pandas` ≥ 2.2.2 (data manipulation)
   - `numpy` ≥ 2.2.6 (numerical computing)
   - `scipy` ≥ 1.15.3 (scientific computing)
   - `jax` ≥ 0.6.2 (automatic differentiation & optimization)
   - `statsmodels` ≥ 0.14.6 (statistical modeling)
   - `matplotlib` ≥ 3.9.1 (visualization)
-  - Additional spatial & mesh packages: `shapely`, `gmsh`, `meshio`, `pygmsh`, `pyproj`
+  - Additional spatial & mesh packages: `shapely`, `gmsh`, `meshio`, `pygmsh`, `mfem`, `gstools`
 
-See [pyproject.toml](pyproject.toml) or [environment.yml](environment.yml) for the complete dependency list.
+[pyproject.toml](pyproject.toml) holds the complete dependency list and its supported ranges. The lower bounds are tested in CI.
+The wheel includes the example datasets, so it is about 43 MB.
 
 ## Installation
 
@@ -131,21 +132,7 @@ git clone https://github.com/jacopoRodeschini/geossm.git
 cd geossm
 ```
 
-2. **Create the conda environment** (named `geossm`) with all required packages. 
-Before creating the environment, make sure your **Conda installation is updated to the latest version** and configured to use the faster `libmamba` solver (recommended for significantly faster dependency resolution).
-
-- Update Conda (recommended)
-```bash
-# Enable the faster libmamba solver
-conda config --set solver libmamba
-
-# Update conda in the base environment
-conda update -n base -c defaults conda
-```
-
-- Create the environment
-Once Conda is updated, create the environment (named `geossm`) using:
-
+2. **Create the conda environment** (named `geossm`). It takes the native geospatial/mesh stack from conda-forge, then uses pip to install geossm in editable mode with the `test` and `interactive` extras. Versions are not pinned: the supported ranges live in `pyproject.toml`.
 ```bash
 conda env create -f environment.yml
 ```
@@ -155,9 +142,9 @@ conda env create -f environment.yml
 conda activate geossm
 ```
 
-4. **Install the package in development mode**:
+4. **(GPU only) Install the CUDA build of JAX**:
 ```bash
-pip install -e .
+pip install -U "jax[cuda12]"
 ```
 
 ### Verify Installation
@@ -177,6 +164,27 @@ Remove an entire environment
 ```bash
 conda remove -n geossm --all
 ```
+
+### JAX configuration (CPU/GPU, memory, float64)
+
+geossm computes with JAX. Some JAX settings are process-wide, so geossm never
+changes them itself. Set them at the top of your script, **before** importing
+JAX or geossm:
+
+```python
+import os
+os.environ.setdefault("JAX_PLATFORMS", "cpu")                   # CPU only: leaves the GPU untouched
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false") # GPU: allocate on demand, not 75 % upfront
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/jax"))  # reuse compiled kernels
+
+import jax
+jax.config.update("jax_enable_x64", True)  # only if you use dtype=jnp.float64 (otherwise a ValueError is raised)
+```
+
+Without `JAX_PLATFORMS=cpu`, JAX reserves 75 % of the GPU memory as soon as a
+model is created, even with `backend="cpu"`. See the user guide page
+[JAX configuration](https://jacopoRodeschini.github.io/geossm/user_guide/jax_configuration.html)
+for details and measurements.
 
 ## Quick Start
 

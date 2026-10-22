@@ -13,6 +13,7 @@ DesignMatricesBuilder class handles the preparation of the DesignMatrices object
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import ast
+import warnings
 import numpy as np
 import shapely
 from scipy.spatial.distance import cdist
@@ -25,6 +26,8 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
+from geossm.utils import _summary_table_source
+
 
 try:
     import jax
@@ -34,16 +37,24 @@ except ImportError:
     JAX_AVAILABLE = False
 
 
-def _ensure_x64_for_dtype(dtype):
-    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
 
-    JAX silently truncates float64 arrays back to 32-bit unless x64 mode is
-    enabled. Mirrors geossm.ssm.statespace._ensure_x64_for_dtype; duplicated
-    here (rather than imported) to avoid a circular import with geossm.ssm
-    during package initialization.
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested for JAX arrays while x64 is off.
+
+    Mirrors geossm.ssm.statespace._check_x64_for_dtype; duplicated here
+    (rather than imported) to avoid a circular import with geossm.ssm during
+    package initialization.
     """
     if JAX_AVAILABLE and np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
 
 
 class _NAPassthrough(NAAction):
@@ -278,7 +289,15 @@ def check_regular_timestamps(timestamps):
         return False, None, None
 
     # 3) Try calendar-aware frequency first (works for month/year)
-    inferred = pd.infer_freq(ts_unique) if ts_unique.size >= 3 else None
+    inferred = None
+    if ts_unique.size >= 3:
+        with warnings.catch_warnings():
+            # pandas >= 3.1 warns that infer_freq will return a BaseOffset
+            # instead of a string; both are handled below.
+            warnings.filterwarnings("ignore", message="A future version of pandas will return a BaseOffset")
+            inferred = pd.infer_freq(ts_unique)
+        if inferred is not None and not isinstance(inferred, str):
+            inferred = inferred.freqstr
     if inferred is not None:
         # Normalize aliases like '2MS', 'M', 'YS', etc.
         n = ""
@@ -363,9 +382,10 @@ class DesignMatrices:
 
     Parameters
     ----------
-    X : numpy.ndarray
+    X : numpy.ndarray or jax.Array
         Covariate design array of shape ``[N, P, T]`` (sites x covariates
-        x timesteps), built from the right-hand side of `formula`.
+        x timesteps), built from the right-hand side of `formula`. Stored
+        as a JAX array (converted in `__post_init__`).
     X_design_info : patsy.design_info.DesignInfo
         Patsy metadata describing how `X`'s columns were built from
         `formula` (term names, factor info, etc.). Reused by
@@ -404,9 +424,10 @@ class DesignMatrices:
         in the unit given by `unit` (see `check_regular_timestamps`).
     unit : str
         Unit of `delta` (e.g. ``"day"``, ``"hour"``, ``"month"``).
-    y : numpy.ndarray, optional
+    y : numpy.ndarray or jax.Array, optional
         Response array of shape ``[N, T]``, built from the left-hand side
-        of `formula`. ``None`` if `formula` has no response (covariates
+        of `formula`, stored as a JAX array (converted in
+        `__post_init__`). ``None`` if `formula` has no response (covariates
         only). Missing observations are ``NaN`` rather than dropped, so
         the site x time grid stays complete.
     y_design_info : patsy.design_info.DesignInfo, optional
@@ -422,9 +443,9 @@ class DesignMatrices:
         Name of the column in the source GeoDataFrame that held the
         timestamps.
     dtype : numpy.dtype, default numpy.float32
-        Numeric precision used for `X`, `y` and `points`. Passing a
-        64-bit dtype (e.g. `numpy.float64`) also enables JAX's x64 mode,
-        since JAX otherwise silently truncates float64 arrays to 32-bit.
+        Numeric precision used for `X`, `y` (JAX arrays) and `points`
+        (NumPy array); `astype` converts them, and for a 64-bit dtype requires
+        JAX's x64 mode to be enabled.
 
     Attributes
     ----------
@@ -494,7 +515,6 @@ class DesignMatrices:
             self.dtype = np.dtype(self.dtype)
         except TypeError:
             raise TypeError(f"Invalid dtype: {self.dtype}")
-        _ensure_x64_for_dtype(self.dtype)
 
         # Cast arrays to dtype
         self.y = np.asarray(self.y, dtype=self.dtype) if self.y is not None else None
@@ -550,9 +570,10 @@ class DesignMatrices:
         ----------
         dtype : numpy.dtype or str
             Target numeric precision (e.g. `numpy.float32`,
-            `numpy.float64`). If it is 64-bit, JAX's x64 mode is enabled
-            (see `dtype` on the class), since JAX otherwise silently
-            truncates float64 arrays to 32-bit.
+            `numpy.float64`). A 64-bit dtype requires JAX's x64 mode to be
+            enabled beforehand (`jax.config.update("jax_enable_x64", True)`),
+            since JAX otherwise silently truncates float64 arrays to 32-bit;
+            a `ValueError` is raised if it is not.
 
         Returns
         -------
@@ -565,7 +586,7 @@ class DesignMatrices:
         if dtype == self.dtype:
             return self
 
-        _ensure_x64_for_dtype(dtype)
+        _check_x64_for_dtype(dtype)
 
         self.dtype = dtype
         self.X = jnp.asarray(self.X, dtype=dtype)
@@ -657,13 +678,6 @@ class DesignMatrices:
         :class:`statsmodels.iolib.summary.Summary`, in the same style as
         a statsmodels model-fit summary. Also used by `__str__`.
 
-        Notes
-        -----
-        As a side effect, sets placeholder `model`/`params`/`bse`/
-        `tvalues`/`pvalues` attributes on `self`, required by
-        `Summary.add_table_2cols`; these are not meaningful statistics
-        (`DesignMatrices` holds no fitted model).
-
         Returns
         -------
         statsmodels.iolib.summary.Summary
@@ -674,17 +688,10 @@ class DesignMatrices:
 
         smry = Summary()
 
-        self.model = None
-        self.params = np.zeros(1)
-        self.param_names = "Placeholder" #self.xbeta_names
-        self.bse = np.zeros(len(self.params))
-        self.tvalues = np.zeros(len(self.params))
-        self.pvalues = np.zeros(len(self.params))
-
         gen_top_left, gen_top_right = self.generate_summary()
 
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="Design Matrices Summary",
             gleft=gen_top_left,
             gright=gen_top_right,
@@ -766,8 +773,7 @@ class DesignMatricesBuilder:
         dtype : numpy.dtype, default numpy.float32
             Numeric precision used when casting `geodf`'s numeric columns
             and when building the resulting `DesignMatrices` (`X`, `y`,
-            `points`). Passing a 64-bit dtype also enables JAX's x64
-            mode, which is otherwise off by default.
+            `points`).
         verbose : bool, default True
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.
@@ -1297,7 +1303,7 @@ class DesignMatricesBuilder:
         return DesignMatrices(
             y=y,
             y_design_info=y_design_info,
-            y_name=y_design_info.column_names if y_design_info else None,
+            y_name=y_design_info.column_names[0] if y_design_info else None,
             y_expr=self.formula_info.response_expr,
             X=Xbeta,
             X_design_info=x_design_info,
@@ -1435,8 +1441,8 @@ class DesignMatricesBuilder:
             y_matrix[np.isinf(y_matrix)] = np.nan
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
-            y_name = y_design_info.column_names
-            self._log(f"y name: {y_name[0]}, shape={y.shape}")
+            y_name = y_design_info.column_names[0]
+            self._log(f"y name: {y_name}, shape={y.shape}")
 
         self._log(f"Computed prediction design matrices with N={N}, P={Xbeta.shape[1]}, T={T}")
 

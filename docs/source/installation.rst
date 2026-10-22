@@ -4,14 +4,18 @@ Installation
 Requirements
 -------------
 
-- **OS**: Linux or macOS (Windows is not currently supported).
-- **Python**: 3.10 or higher (required by the ``jax`` dependency).
-- Key runtime dependencies: ``geopandas``, ``pandas``, ``numpy``, ``scipy``,
-  ``jax``/``jaxlib``, ``statsmodels``, ``matplotlib``, and the mesh/geospatial
-  stack (``shapely``, ``gmsh``, ``meshio``, ``pygmsh``, ``pyproj``).
+- **OS**: Linux (x86-64). macOS and Windows are not supported: the ``mfem``
+  wheels required on Python 3.10 are Linux-only.
+- **Python**: 3.10 to 3.13 (tested). On 3.10, pip resolves ``jax`` 0.6.x,
+  the last JAX series that supports it.
+- Key runtime dependencies: ``geopandas`` (with ``pyarrow``, ``pyogrio`` and
+  ``pyproj`` for its I/O and CRS support), ``pandas``, ``numpy``, ``scipy``,
+  ``jax``/``jaxlib``, ``statsmodels``, ``matplotlib``, and the mesh/FEM stack
+  (``shapely``, ``gmsh``, ``meshio``, ``pygmsh``, ``mfem``, ``gstools``).
 
-See :file:`pyproject.toml` or :file:`environment.yml` in the repository for
-the complete, versioned dependency list.
+:file:`pyproject.toml` in the repository holds the complete dependency list and
+its supported ranges. The lower bounds are tested in CI. The wheel includes the
+example datasets, so it is about 43 MB.
 
 Option 1: pip
 --------------
@@ -23,9 +27,11 @@ Option 1: pip
 Option 2: from source with Conda (recommended for development)
 -----------------------------------------------------------------
 
-Several of geossm's dependencies (``gmsh``, ``mfem``, ``jax``) are easiest to
-install consistently through Conda, so this is the recommended route if you
-plan to build meshes, run the low-rank models, or work on the package itself.
+:file:`environment.yml` takes the native geospatial/mesh stack (``geopandas``,
+``pyarrow``, ``gmsh``) from conda-forge, then uses pip to install geossm in
+editable mode with the ``test`` and ``interactive`` extras. The CI workflows
+use the same recipe. Versions are not pinned: the supported ranges live in
+:file:`pyproject.toml`.
 
 #. Clone the repository:
 
@@ -34,21 +40,18 @@ plan to build meshes, run the low-rank models, or work on the package itself.
       git clone https://github.com/jacopoRodeschini/geossm.git
       cd geossm
 
-#. Create the ``geossm`` Conda environment from :file:`environment.yml`
-   (using the faster ``libmamba`` solver is recommended):
+#. Create and activate the ``geossm`` Conda environment:
 
    .. code-block:: bash
 
-      conda config --set solver libmamba
-      conda update -n base -c defaults conda
       conda env create -f environment.yml
+      conda activate geossm
 
-#. Activate the environment and install the package in editable mode:
+#. (GPU only) Install the CUDA build of JAX:
 
    .. code-block:: bash
 
-      conda activate geossm
-      pip install -e .
+      pip install -U "jax[cuda12]"
 
 Verifying the installation
 ----------------------------

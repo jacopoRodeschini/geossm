@@ -17,7 +17,8 @@ import jax.numpy as jnp
 # inmport the state space model
 from geossm.ssm import StateSpaceModel
 from geossm.ssm import _filter_kernelJAX
-from geossm.ssm import _itype_for, _ensure_x64_for_dtype
+from geossm.ssm import _itype_for, _check_x64_for_dtype
+from geossm.ssm.statespace import _highest_matmul_precision
 from geossm.covmodel import spdeAppoxCov
 from geossm.covmodel.covmodels import _validate_domain, _domain_hull
 from statsmodels.iolib.summary import Summary
@@ -36,20 +37,20 @@ from scipy.optimize import minimize
 
 from geossm import DesignMatricesBuilder
 from geossm import block_diag_3D
-from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table
+from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table, _summary_table_source
 
 
 from shapely.geometry import MultiPoint
 from dataclasses import replace
 from geossm.stmodel import Param, FitOptions, ModelParams
 
-from .stmodel_results import LRStateSpaceResults
-from types import SimpleNamespace
+from .stmodel_results import LRStateSpaceResults, FittedState, _read_only_copy
 
 
 # %% [Utils] Updating formula, JAX (M-Step)
 
 @partial(jax.jit, static_argnums=(2, 3))
+@_highest_matmul_precision
 def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     """
     Computes initial parameter values for a model using JAX.
@@ -132,6 +133,7 @@ def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 
 
 @partial(jit, static_argnames=["b"])
+@_highest_matmul_precision
 def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
     """M-step update of the regression coefficients `beta`, accumulating the
     (masked, missing-data-aware) normal equations over time via `lax.scan`
@@ -195,6 +197,7 @@ def _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta):
 
 
 @partial(jit, static_argnames=["block_p"])
+@_highest_matmul_precision
 def _compute_s2e_jax_kernel(err, H, P_T, block_p):
     """M-step update of the measurement-error variances `s2e`, one value per
     response-variable block, from the smoothed residuals and smoothed state
@@ -270,6 +273,7 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
 
 
 @partial(jit, static_argnames=["block_p", "block_q", "nvar", "nlat", "T"])
+@_highest_matmul_precision
 def _compute_A2_jax_kernel(
     y_t, Xbeta, beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi
 ):
@@ -347,6 +351,56 @@ def _compute_A2_jax_kernel(
         W_rows.append(w_i)
 
     return jnp.stack(W_rows, axis=0)
+
+
+def _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner):
+    """Block-diagonal marginal precision of the inner FEM nodes, one block
+    per covariance function, differentiable in `ks`.
+
+    Same math as `spdeAppoxCov.precision(marginal=True)` (NumPy/SciPy, used by
+    `fit()`): Q = sigma2(k) K C^-1 K with K = k^2 C + G (nu = 1), then the
+    Schur complement Q_11 - Q_12 Q_22^-1 Q_12' of the inner nodes, solving for
+    Q_22^-1 Q_12' directly instead of inverting Q_22.
+
+    `perm_list` holds the inner-then-outer node permutations (integer
+    arrays) and `n_inner` the number of inner nodes (Python ints, static
+    under `jit`), so that the block sizes are known at trace time. Shared by
+    the M-step `ks` objective and the Hessian of the log-likelihood.
+    """
+    blocks = []
+    for ki, C, G, perm, ni in zip(ks, mass_list, stiff_list, perm_list, n_inner):
+        Ci = jnp.diag(1.0 / C.diagonal())
+        K = ki**2 * C + G
+        # gamma() of a Python float is float64 under x64: use ki's dtype (F03)
+        sigma2k = (jax.scipy.special.gamma(jnp.asarray(1.0, dtype=ki.dtype)) /
+                   (jax.scipy.special.gamma(jnp.asarray(2.0, dtype=ki.dtype)) * 4 * jnp.pi * ki**2))
+        Qi = sigma2k * (K @ Ci @ K)
+
+        Qperm = Qi[perm][:, perm]
+        Q_11 = Qperm[:ni, :ni]
+        Q_12 = Qperm[:ni, ni:]
+        Q_22 = Qperm[ni:, ni:]
+        blocks.append(Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T))
+
+    return jax.scipy.linalg.block_diag(*blocks)
+
+
+def _ks_objective(params, T, Omega, mass_list, stiff_list, perm_list, n_inner):
+    """M-step objective for `ks = exp(params)`: the `ks`-dependent part of the
+    expected complete-data negative log-likelihood, -T log|Q^-1| + tr(Q^-1 Omega),
+    scaled by 1e-4 (as in `_minf`)."""
+    ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
+    invQ = _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner)
+    logdet_invQ = jnp.linalg.slogdet(invQ)[1]
+    fun = -T * logdet_invQ + jnp.trace(invQ @ Omega)
+    return fun / 1e4
+
+
+# Compiled once per process (per array shapes), not once per fit() (F20); full
+# matmul precision for the forward and backward pass (F31).
+_ks_value_and_grad = jax.jit(
+    _highest_matmul_precision(jax.value_and_grad(_ks_objective)), static_argnums=(6,)
+)
 
 
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
@@ -464,7 +518,9 @@ class LRStateSpaceModel(StateSpaceModel):
             pinned to it (see `geossm.utils._on_device`).
         dtype : numpy/jax dtype, default `jnp.float32`
             Floating-point precision used for the design matrices and all
-            model computations.
+            model computations. `jnp.float64` requires JAX's x64 mode to be
+            enabled beforehand (``jax.config.update("jax_enable_x64", True)``);
+            otherwise a `ValueError` is raised.
 
         Raises
         ------
@@ -479,7 +535,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # re-derives the same values from `dtype` further down (harmless).
         self.dtype = jnp.dtype(dtype)
         self.itype = _itype_for(self.dtype)
-        _ensure_x64_for_dtype(self.dtype)
+        _check_x64_for_dtype(self.dtype)
 
         self.df = df.copy()
         self.formulas = formulas
@@ -678,7 +734,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
     
 
-    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False):
+    def _getPredictionDesignMatrix(self, df, verbose=None, include_response=False,
+                                   builders=None, domain=None):
         """
         Build the design matrix for new (out-of-sample) locations/times,
         the way `predict()` needs it: reusing each formula's already-fitted
@@ -692,13 +749,17 @@ class LRStateSpaceModel(StateSpaceModel):
         returns it as a trailing `y_obs` array (`None` per-variable rows
         become `NaN` if `df` is missing that variable's response) -- see
         the public `getDesignMatrix`, the entry point for that case.
+
+        `builders`/`domain` default to the model's; `predict` passes those of
+        the fitted results (`FittedState`).
         """
         if verbose is None:
             verbose = self.verbose
 
         self._log("Building observation grid...")
         points, gridList, ndim, pdim, block_p, T = self._buildPredictionGrid(
-            df, verbose=verbose, include_response=include_response
+            df, verbose=verbose, include_response=include_response,
+            builders=builders, domain=domain,
         )
         self._log("Building observation grid... Done.")
 
@@ -785,11 +846,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         Returns
         -------
-        y_sim : ndarray
+        y_sim : jax.numpy.ndarray
             Simulated observations, stacked across all response variables
             (shape `(p, T)`, `p = sum(pdim)`).
-        x_sim : ndarray
-            Simulated latent state trajectory (shape `(q, T)`).
+        x_sim : jax.numpy.ndarray
+            Simulated latent state trajectory `[x_0, ..., x_T]` (shape
+            `(q, T+1)`, as in `StateSpaceModel.sim`).
         info : dict
             Metadata about the simulation: `formulas`, `y_name`,
             `xbeta_names`, `Xbeta`, `params`, `points`, `T`, `stats`
@@ -810,6 +872,7 @@ class LRStateSpaceModel(StateSpaceModel):
             covariance functions, respectively).
         """
 
+        self._require_setup("sim")
         if formulas is None and self.formulas is None:
             raise ValueError("Formulas must be provided for simulation")
         
@@ -851,19 +914,16 @@ class LRStateSpaceModel(StateSpaceModel):
 
             self._log("Building the design matrix... Done.")
         
-        # check if the covariance function is defined
-        if self._cov_matern is None or len(self._cov_matern) == 0:
-            raise ValueError("Covariance function is not defined. Please run the setup method first.")
-        else:
-            qdim = self.qdim
-            block_q = self.block_q
-            nlat = self.nlat
+        qdim = self.qdim
+        block_q = self.block_q
+        nlat = self.nlat
 
         
         # Get the model parameters (if not provided, they will be set to None and the model will use default initial values)
         self._log("Parsing the parameters (ModelParams|None)...")
         
         params = self._parseParams(params)
+        params = self._cast_params(params)
         A = params.A.value
         s2e = params.s2e.value
         f = params.f.value
@@ -910,7 +970,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
         # Compute the maginal precision matrix
-        invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
+        # precision() returns NumPy float64; cast explicitly so the result does
+        # not depend on the global x64 flag (F03).
+        invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
+                for fcov in self.cov_function]
 
         # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
         Q = block_diag(
@@ -926,7 +989,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Simulate the SSM using the parent class method (we need to pass the parameters to it)
         # Create a new SSM with the same parameters as the current model, but with the matrices H, R, F and Q computed above
 
-        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None, backend=self.backend)
+        sim_model = StateSpaceModel(H=H, R=R, F=F, Q=Q,Xbeta=Xbeta, beta=beta, xbeta_names=xbeta_names, x0=None, Sigma0=None, backend=self.backend, dtype=self.dtype)
 
         y_sim, x_sim, variance_stats, tdelta = sim_model.sim(
             seed, R=R, F=F, H=H, Q=Q, Xbeta=Xbeta, beta=beta, block_p=block_p, block_q=self.block_q, stats=stats, verbose=verbose
@@ -992,7 +1055,14 @@ class LRStateSpaceModel(StateSpaceModel):
         modelresults : LRStateSpaceResults
             Results of a previous `fit()` call, providing the estimated
             parameters (`modelresults.params`) and smoothed states used to
-            build the prediction. Updated and returned in place.
+            build the prediction, together with the covariance functions
+            of that fit (so the prediction does not depend on later
+            `fit()`/`setup()` calls on the model, and neither the model nor
+            its covariance functions are modified). Updated and returned in
+            place: the `*_pred` attributes of a previous `predict()` on the
+            same results are replaced, and its back-transformed predictions
+            (`y_pred_back_list`/`Sigma_y_pred_back_list`) are cleared
+            (rerun `back_transform` for the new prediction).
         verbose : bool, default True
             Verbosity for the observation-grid/design-matrix construction
             logging.
@@ -1005,7 +1075,8 @@ class LRStateSpaceModel(StateSpaceModel):
         -------
         LRStateSpaceResults
             The same `modelresults` object, with `points_pred`,
-            `y_pred`/`Sigma_y_pred` (and their per-variable views
+            `y_pred`/`Sigma_y_pred` (NumPy arrays in the dtype of the fit,
+            and their per-variable views
             `y_pred_list`/`Sigma_y_pred_list`; `Sigma_y_pred` is `None`
             if `std=False`), `tdelta_pred`,
             `timestamps_pred`, and `crs_pred` populated (one entry per
@@ -1023,7 +1094,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # and reuses its X_design_info so stateful transforms (e.g.
         # standardize()) are evaluated with the training mean/std rather
         # than recomputed on `df`.
-        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(df, verbose=verbose)
+        # The fit-time state of these results (F09): builders/domain for the
+        # design matrix, covariance functions and dtype for the basis.
+        state = getattr(modelresults, "_fitted_state", None)
+        points, gridList, ndim, pdim, block_p, T, Xbeta_predict = self._getPredictionDesignMatrix(
+            df, verbose=verbose,
+            builders=None if state is None else state.builders,
+            domain=None if state is None else state.domain,
+        )
 
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
@@ -1032,7 +1110,6 @@ class LRStateSpaceModel(StateSpaceModel):
         params = modelresults.params
         beta = params.beta.value
         A = params.A.value
-        ks = params.ks.value
 
         self._log("Get the filtered state")
         x_T = modelresults.x_smoothed
@@ -1062,22 +1139,24 @@ class LRStateSpaceModel(StateSpaceModel):
         x_T = x_T[:, cols]
         P_T = P_T[:, :, cols]
 
-        # update the cov_function rescale
-        for cov, ksi in zip(self.cov_function, ks):
-            cov.rescale = ksi
-        
         self._log("Computing the SSM model matrice H...")
 
-        # Compute the basis matrix (just one) - no boundary
-        basis = self._buildBasis_list(points, self.cov_function)
+        # Basis of the covariance functions these results were fitted with
+        # (their fit-time snapshot, F09), not the model's current ones. The
+        # basis does not depend on ks, so no covariance function is modified.
+        cov_function = state.cov_function if state is not None else self.cov_function
+        basis = self._buildBasis_list(points, cov_function,
+                                      dtype=None if state is None else state.dtype)
         
         # ---- build parametrised matrices
         H = self._buildH_dense(A, basis)  # dense
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
-        # Predict the response variable (stacked across all variables)
+        # Predict the response variable (stacked across all variables), in
+        # the dtype of the fit (the design matrix is not cast, F45)
+        dtype = np.dtype(self.dtype if state is None else state.dtype)
         y_pred_full, Sigma_y_pred_full, tdelta = self._predict(
-            H, x_T, P_T, Xbeta_predict, beta, std=std
+            H, x_T, P_T, jnp.asarray(Xbeta_predict, dtype=dtype), beta, std=std
         )
 
         # block_p for the *prediction* grid, snapshotted separately from
@@ -1087,9 +1166,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # y_pred_list/Sigma_y_pred_list (see LRStateSpaceResults).
         modelresults.points_pred = points
         modelresults.block_p_pred = block_p
-        modelresults.y_pred = y_pred_full
-        modelresults.Sigma_y_pred = Sigma_y_pred_full
+        # NumPy arrays in the fit's dtype, like the other result arrays (F45)
+        modelresults.y_pred = np.asarray(y_pred_full, dtype=dtype)
+        modelresults.Sigma_y_pred = (None if Sigma_y_pred_full is None
+                                     else np.asarray(Sigma_y_pred_full, dtype=dtype))
         modelresults.tdelta_pred = tdelta
+        # The original-scale predictions belong to the previous prediction (F46)
+        modelresults.y_pred_back_list = None
+        modelresults.Sigma_y_pred_back_list = None
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
         modelresults.timestamps_pred = [grid.timestamps for grid in gridList]
@@ -1119,6 +1203,76 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_hat_full, Sigma_y_hat_full, tdelta
 
+    def _get_fitted_state(self):
+        """
+        The model configuration that fitted results need later (a frozen
+        `FittedState`, F09): covariance functions, observation points,
+        block sizes, names, formula builders, domains and dtypes.
+        """
+        return FittedState(
+            cov_function=tuple(self.cov_function),
+            points=tuple(_read_only_copy(p) for p in self.points),
+            pdim=_read_only_copy(self.pdim),
+            nvar=int(self.nvar),
+            nlat=int(self.nlat),
+            y_name=tuple(self.y_name),
+            xbeta_names=tuple(tuple(names) for names in self.xbeta_names),
+            builders=tuple(self.builders),
+            domain=tuple(self.domain),
+            dtype=np.dtype(self.dtype),
+            itype=np.dtype(self.itype),
+        )
+
+    def _require_setup(self, method):
+        """Raise a clear error if `setup()` (the latent covariance functions)
+        has not been called before `method`."""
+        if not self._cov_matern:
+            raise ValueError(
+                f"{method}() needs the latent covariance functions: call "
+                f"setup(cov_fun=[...]) on the model first."
+            )
+
+    def _set_system_matrices(self, params, basis, pdim, qdim):
+        """
+        Build `H`, `R`, `F`, `Q` from `params` (setting the covariance
+        functions' `rescale` to `params.ks`) and set them, with `x0`,
+        `Sigma0` and `beta`, on the underlying `StateSpaceModel` for the
+        next E-step. Returns the dense `H` and the block-diagonal precision
+        `Q^-1` (used by the M-step update of `f`).
+        """
+        if params.ks.value is not None:
+            for fcov, ksi in zip(self.cov_function, params.ks.value):
+                fcov.rescale = ksi
+
+        H = self._buildH_dense(params.A.value, basis)  # dense
+        R, F = self._buildRF_dense(params.s2e.value, params.f.value, pdim, qdim)
+
+        # Block-diagonal covariance of the latent factors, from the marginal
+        # precision of each covariance function
+        # precision() returns NumPy float64; cast explicitly so the result does
+        # not depend on the global x64 flag (F03).
+        invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
+                for fcov in self.cov_function]
+        Q = block_diag(
+            *[
+                jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
+                for mt in invQ
+            ]
+        )
+
+        invQ = block_diag(*invQ)
+
+        super().set(
+            H=H,
+            R=R,
+            F=F,
+            Q=Q,
+            x0=params.x0.value,
+            Sigma0=params.Sigma0.value,
+            beta=params.beta.value,
+        )
+        return H, invQ
+
     @_on_device
     def fit(
         self, params0: ModelParams | None = None, options: FitOptions | None = None
@@ -1136,8 +1290,9 @@ class LRStateSpaceModel(StateSpaceModel):
         `ks` (Matern rescale/range parameters, one per covariance function,
         optimised with L-BFGS-B against exact JAX gradients -- see
         `_build_ks_value_and_grad`) from those statistics. Iteration stops
-        when the relative change in log-likelihood drops to `tol_relat` or
-        `max_iter` iterations are reached (see `FitOptions`).
+        when the log-likelihood change per observation drops to `tol_relat`
+        or `max_iter` iterations are reached (see `FitOptions`; the reason
+        is recorded in the results' `termination`).
 
         Parameters
         ----------
@@ -1151,8 +1306,8 @@ class LRStateSpaceModel(StateSpaceModel):
             parameter is initialised and freely estimated.
         options : FitOptions, optional
             EM stopping-rule and logging options: `max_iter` caps the
-            number of EM iterations, `tol_relat` is the relative
-            log-likelihood-improvement tolerance below which EM is
+            number of EM iterations, `tol_relat` is the tolerance on the
+            log-likelihood change per observation below which EM is
             considered converged, and `verbose` overrides `self.verbose`
             for the whole call (including the per-iteration log printed via
             `logger`). Defaults to `max_iter=100`, `tol_relat=1e-3` if not
@@ -1167,7 +1322,24 @@ class LRStateSpaceModel(StateSpaceModel):
             statistics (`nstats`/`llf_path`), in-sample fitted values
             (`y_hat`/`y_hat_list` and their covariances), the smoothed
             states, and the sufficient statistics `S11`/`S10`/`S00`.
+            `params`, `llf`, the states, `S11`/`S10`/`S00` and `y_hat` all
+            refer to the same parameter vector: the last M-step's output,
+            evaluated by a final E-step (or, if that is not an improvement
+            or EM stopped on a decrease/NaN, the best evaluated iterate).
+            The model's system matrices are left at those parameters.
+            `llf_path` is the per-iteration trace; entry ``k`` is the
+            log-likelihood of the E-step of iteration ``k``, so `llf` can
+            exceed `llf_path[-1]`. Entry 0 (the initial parameters, before
+            any E-step) is ``nan``.
+
+        Raises
+        ------
+        ValueError
+            If `setup()` has not been called (no latent covariance
+            functions).
         """
+
+        self._require_setup("fit")
 
         # set the global options
         self.verbose = options.verbose if options is not None else self.verbose
@@ -1202,6 +1374,10 @@ class LRStateSpaceModel(StateSpaceModel):
 
         points = self.points
         p, T = y_obs.shape
+        # Observed entries: the stopping rule uses the log-likelihood change
+        # per observation, which (unlike a change relative to |llf|) does not
+        # depend on additive constants in the log-likelihood.
+        n_obs = int(jnp.sum(~jnp.isnan(y_obs)))
 
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
@@ -1237,8 +1413,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # Flag of the EM convergence
         flag = True
         niter = 0
-        logL_prev = 0
-        logL_cur = 0
+        logL_prev = jnp.nan  # no E-step before iteration 1 (F41)
+        logL_cur = jnp.nan
         delta_par = jnp.nan
         delta_lik = jnp.nan
         relat_lik = jnp.nan
@@ -1246,8 +1422,10 @@ class LRStateSpaceModel(StateSpaceModel):
         tdelta_Edet = np.zeros(3)
         tdelta_Mdet = np.zeros(3)
         nstat = []  # list to store the results of each iteration
-        converged = False  # True only if the relative tolerance was met
-        last_valid = None  # snapshot of the last valid (params, E-step outputs)
+        converged = False  # True only if the tolerance was met
+        termination = None  # why EM stopped: tolerance | decrease | invalid | max_iter
+        best = None  # snapshot of the highest-llf (params, E-step outputs) so far
+        restored = False  # True if EM stopped by restoring `best`
 
         # Log the initial state before starting the EM iterations
         nstat = self._log_iteration(
@@ -1255,7 +1433,7 @@ class LRStateSpaceModel(StateSpaceModel):
             niter,
             est_params,
             0,
-            logL_cur,
+            jnp.nan,  # iteration 0 has no log-likelihood value (F41)
             delta_par,
             delta_lik,
             relat_lik,
@@ -1276,34 +1454,8 @@ class LRStateSpaceModel(StateSpaceModel):
             # Start the timer for the iteration
             tStart_iter = time.time()
 
-            # ---- build parametrised matrices
-            H = self._buildH_dense(est_params.A.value, basis)  # dense
-
-            # R, F = buildRF(est_s2e, est_f, pdim, qdim)
-            R, F = self._buildRF_dense(
-                est_params.s2e.value, est_params.f.value, pdim, qdim)
-
-            # Compute the maginal precision matrix
-            invQ = [fcov.precision(marginal=True) for fcov in self.cov_function]
-
-            # Compute the block diagonal covariance matrix Q of the latent factors (i.e. the points of the latent domain)
-            Q = block_diag(
-                *[
-                    jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
-                    for mt in invQ
-                ]
-            )
-
-            # Inizialisate the SSM with the current parameters (we need it for the E step)
-            super().set(
-                H=H,
-                R=R,
-                F=F,
-                Q=Q,
-                x0=est_params.x0.value,
-                Sigma0=est_params.Sigma0.value,
-                beta=est_params.beta.value,
-            )
+            # ---- build parametrised matrices and set them for the E step
+            H, invQ = self._set_system_matrices(est_params, basis, pdim, qdim)
 
             # ---- E step
             # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
@@ -1326,40 +1478,57 @@ class LRStateSpaceModel(StateSpaceModel):
                 S11,
                 S10,
                 S00,
+                invQ,
                 Phi,
                 ks_value_and_grad,
+                f_fixed=est_params.f.fixed,
             )
 
-            # Compute the delta log likelihood ( 0 < current - previous < tol_lik )
+            # Log-likelihood change, absolute and per observation
             delta_lik = logL_cur - logL_prev
-            relat_lik = delta_lik / abs(logL_prev) if logL_prev != 0 else jnp.inf
+            relat_lik = delta_lik / n_obs if niter > 1 else jnp.inf
 
             # End the timer for the iteration
             tdelta_iter = time.time() - tStart_iter
 
-            # Check if the step is valid. Skipped at the first iteration:
-            # logL_prev is a placeholder (0), so delta_lik is not a real
-            # likelihood increment. NaN/Inf always stop the algorithm; a
-            # decrease stops it only if force_iter is False.
+            # Check the step. Skipped at the first iteration: there is no
+            # previous E-step (logL_prev is nan), so delta_lik is nan.
+            # - NaN/Inf always stops.
+            # - A decrease within tol_relat counts as convergence: the iterates
+            #   oscillate on the plateau.
+            # - A larger decrease stops unless force_iter is True.
+            # Every stop on a decrease or NaN/Inf returns the best iterate so far.
             if niter > 1:
                 invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
                 decreased = bool(delta_lik < 0)
-                if invalid or (decreased and not force_iter):
+                within_tol = not invalid and abs(float(relat_lik)) <= tol_relat
+                if decreased and not within_tol and force_iter:
                     msg = self._log_warning_emstep(delta_lik, niter)
                     self._log(msg)
-                    warnings.warn(
-                        msg + ". The EM algorithm was stopped and the last valid "
-                        "estimate is returned (convergence=False).",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                    warnings.warn(msg + " (force_iter=True: continuing).", RuntimeWarning, stacklevel=2)
+                elif invalid or decreased:
+                    if within_tol:
+                        termination, converged = "tolerance", True
+                    else:
+                        termination = "invalid" if invalid else "decrease"
+                        msg = self._log_warning_emstep(delta_lik, niter)
+                        self._log(msg)
+                        warnings.warn(
+                            msg + ". The EM algorithm was stopped and the best "
+                            "estimate so far is returned (convergence=False).",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
-                    # restore the last valid estimate and its E-step outputs
-                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = last_valid
+                    # restore the best estimate and its E-step outputs
+                    est_params, H, x_T, P_T, S11, S10, S00, logL_cur = best
+                    restored = True
                     break
-            
-            # snapshot the current (finite) parameters and their E-step outputs
-            last_valid = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
+
+            # snapshot the current parameters and their E-step outputs if they
+            # are the best so far
+            if best is None or logL_cur >= best[-1]:
+                best = (est_params, H, x_T, P_T, S11, S10, S00, logL_cur)
 
             # Update the paramiters to be used in the next EM iteration
             est_params = self._updateParams(est_params, update_params)
@@ -1391,10 +1560,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
             # Check the EM convergence (if the log-likelihood is not improving more than tol_lik or the max number of iterations is reached)
             if abs(relat_lik) <= tol_relat:
-                converged = True
+                termination, converged = "tolerance", True
                 flag = False
-            
+
             elif niter == max_iter:
+                termination = "max_iter"
                 warnings.warn(
                     "The EM algorithm reached max_iter={} without meeting "
                     "tol_relat={}.".format(max_iter, tol_relat),
@@ -1403,6 +1573,31 @@ class LRStateSpaceModel(StateSpaceModel):
                 )
                 flag = False
 
+        # Make every returned quantity refer to the same parameters. On a
+        # normal stop est_params is the output of the last M-step, which no
+        # E-step has evaluated yet: run a final E-step at it, unless it is not
+        # better than the best evaluated iterate. On a restore, `best` already
+        # holds its E-step outputs. Either way the model's matrices (and the
+        # covariance functions' rescale) are left at the returned parameters.
+        if not restored:
+            self._log("Final E-step at the estimated parameters...")
+            H, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
+            final = self._E_step(y_obs)
+            logL_final = final[6]
+            if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
+                _, x_T, P_T, S11, S10, S00, logL_cur, _ = final
+            else:
+                if not bool(jnp.isfinite(logL_final)):
+                    warnings.warn(
+                        "The log-likelihood at the last M-step's parameters is "
+                        "{}; the best estimate so far is returned.".format(logL_final),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                est_params, H, x_T, P_T, S11, S10, S00, logL_cur = best
+                self._set_system_matrices(est_params, basis, pdim, qdim)
+        else:
+            self._set_system_matrices(est_params, basis, pdim, qdim)
 
         if converged:
             self._log("EM algorithm converged after {} iterations.".format(niter))
@@ -1432,6 +1627,9 @@ class LRStateSpaceModel(StateSpaceModel):
             nstats=nstat,
             options=options,
             convergence=converged,
+            termination=termination,
+            llf=logL_cur,
+            fitted_state=self._get_fitted_state(),
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
@@ -1521,8 +1719,10 @@ class LRStateSpaceModel(StateSpaceModel):
         S11,
         S10,
         S00,
+        invQ,
         Phi,
         ks_value_and_grad,
+        f_fixed=False,
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1530,6 +1730,11 @@ class LRStateSpaceModel(StateSpaceModel):
         (`_compute_s2e_jax_kernel`), `A` (`_compute_A2_jax_kernel`), and
         `ks` (L-BFGS-B against `ks_value_and_grad`), and package them into a
         new `ModelParams` via `_createParams`.
+
+        The state parameters are updated in ECM order (F40): `f` maximises
+        the expected complete-data log-likelihood given the current `ks`
+        (`invQ`, the precision `Q^-1` of the E-step), then `ks` maximises it
+        given the new `f` (the current `F` if `f_fixed`).
         """
 
         # convert all input to save memory
@@ -1542,13 +1747,16 @@ class LRStateSpaceModel(StateSpaceModel):
         ldim = block_q[1:] - block_q[:-1]  # latent dimensions
 
         # Update f (Eq 3a)
-        est_f = jnp.zeros((nlat))
+        est_f = jnp.zeros((nlat), dtype=self.dtype)
         tStart = time.time()
         for q in range(nlat):
             s = slice(block_q[q], block_q[q + 1])
 
-            num = jnp.trace(S10[s, s])
-            den = jnp.trace(S00[s, s])
+            # Added the fix for the f update (Eq 3a)
+            # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
+            # tr(A B) = sum(A * B'), without forming the product
+            num = jnp.sum(invQ[s, s] * S10[s, s].T)
+            den = jnp.sum(invQ[s, s] * S00[s, s].T)
 
             # print(q, num, den)
             est_f = est_f.at[q].set(num / den)
@@ -1608,7 +1816,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # matmul: S10 @ F.T scales S10's columns, F @ S10.T scales S10.T's
         # rows, and F @ S00 @ F.T scales S00 by outer(f_diag, f_diag) -- the
         # same pattern already used for `FF` in `_filter_kernelJAX`.
-        f_diag = F
+        # ECM: Omega at the new f (F40), or at the current F if f is fixed.
+        f_diag = F if f_fixed else jnp.repeat(est_f, ldim, total_repeat_length=int(block_q[-1]))
         Omega = (
             S11
             - S10 * f_diag[None, :]
@@ -1633,9 +1842,9 @@ class LRStateSpaceModel(StateSpaceModel):
         # )
 
         # 'L-BFGS-B' with exact JAX gradients from `ks_value_and_grad`
-        # (built once per `fit()` call in `_build_ks_value_and_grad`, JIT
-        # compiled on its first call and reused for every EM iteration and
-        # every evaluation within each L-BFGS-B call): converges in far
+        # (`_build_ks_value_and_grad`; compiled once per process and mesh
+        # size, reused for every fit, EM iteration and evaluation within
+        # each L-BFGS-B call): converges in far
         # fewer objective evaluations than derivative-free Nelder-Mead,
         # since it exploits the analytic gradient instead of building a
         # discrete simplex around the current point.
@@ -1662,7 +1871,9 @@ class LRStateSpaceModel(StateSpaceModel):
             [tdelta_beta, tdelta_s2e, tdelta_f, tdelta_ks, tdelta_A], dtype=jnp.float32
         )
 
-        est_ks = jnp.exp(opt.x)
+        # opt.x is NumPy float64: cast before exp, so that the result does not
+        # depend on the global x64 flag (F03)
+        est_ks = jnp.exp(jnp.asarray(opt.x, dtype=self.dtype))
         # print("est_ks", est_ks)
 
         # Note that the Cov. function is updated in place with the new rescale parameter (i.e. the range parameter of the Matern covariance function)
@@ -1698,111 +1909,63 @@ class LRStateSpaceModel(StateSpaceModel):
         # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
         return fun / 1e4
 
+    def _spde_mesh_arrays(self, cov_function=None, dtype=None, itype=None):
+        """
+        Mesh inputs of `_spde_marginal_precision` for `cov_function` (default:
+        the model's covariance functions): mass and stiffness matrices
+        (dense, model dtype), the inner-then-outer node permutations, and the
+        inner-node counts (Python ints, static under `jit`).
+        """
+        cov_function = self.cov_function if cov_function is None else cov_function
+        dtype = self.dtype if dtype is None else dtype
+        itype = self.itype if itype is None else itype
+        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=dtype) for cov in cov_function]
+        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=dtype) for cov in cov_function]
+        perm_list = []
+        n_inner = []
+        for cov in cov_function:
+            inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
+            perm_list.append(jnp.asarray(np.concatenate([np.where(inner_mask)[0], np.where(~inner_mask)[0]]),
+                                         dtype=itype))
+            n_inner.append(int(inner_mask.sum()))
+        return mass_list, stiff_list, perm_list, tuple(n_inner)
+
     def _build_ks_value_and_grad(self):
         """
-        Build a JIT-compiled value-and-gradient function for the M-step's
-        `ks` (Matern rescale) optimisation objective -- the same objective
-        `_minf` computes in plain NumPy/SciPy-sparse, but computing the
-        precision matrix with JAX (same math as `_compute_invQ_jax`, which
-        is used, via `jax.hessian` with no surrounding `jit`, for the
-        standard-error computation in `stmodel_results._compute_hessian`)
-        so `ks` can be optimised with exact gradients (L-BFGS-B) instead of
-        the derivative-free Nelder-Mead simplex `_minf` was used with.
-
-        Returns `value_and_grad_fn(params, T, Omega) -> (value, grad)`, as
-        plain JAX arrays (still on the model's `self.dtype` / `self.backend`).
-
-        stiff_list/mass_list/perm_list/n_inner_list depend only on the FEM
-        mesh -- fixed for the whole `fit()` call -- so the intent is to
-        build this once per `fit()` call (like `basis`/`Phi`) and reuse the
-        compiled function across every EM iteration and every one of
-        L-BFGS's internal evaluations, rather than rebuilding it (and
-        re-paying the one-off JIT compilation) every M-step.
-
-        This does NOT reuse `_compute_invQ_jax` directly: that function
-        derives the inner/outer permutation from a boolean mask via
-        `jnp.where(mask, size=n_inner)`, where `size` must be a concrete
-        (non-traced) Python int. That holds under `jax.grad` alone (as in
-        `_compute_hessian`, which never wraps it in `jit`) because only the
-        differentiated argument is abstracted there -- but under `jax.jit`,
-        *every* array-valued expression built during tracing becomes an
-        abstract tracer, including ones derived from closed-over "constant"
-        arrays, so `n_inner` would itself become a tracer and
-        `jnp.where(..., size=n_inner)` would raise a ConcretizationTypeError.
-        Precomputing the permutation as plain NumPy (Python ints and NumPy
-        index arrays, never touched by any JAX op) below keeps it a genuine
-        static constant that `jit` can bake in as a fixed output shape,
-        sidestepping the issue entirely.
+        Value-and-gradient function `(params, T, Omega) -> (value, grad)` of
+        the M-step's `ks` objective (`_ks_objective`), for L-BFGS-B with
+        exact gradients. It binds this model's mesh arrays to the
+        module-level compiled `_ks_value_and_grad`, so a new `fit()` (or a
+        new model on a mesh of the same size) reuses the compiled function
+        instead of recompiling it (F20).
         """
-        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
+        mesh = self._spde_mesh_arrays()
 
-        perm_list = []
-        n_inner_list = []
-        for cov in self.cov_function:
-            inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
-            ii = np.where(inner_mask)[0]
-            oi = np.where(~inner_mask)[0]
-            perm_list.append(np.concatenate([ii, oi]))
-            n_inner_list.append(int(inner_mask.sum()))
+        def value_and_grad(params, T, Omega):
+            return _ks_value_and_grad(params, T, Omega, *mesh)
 
-        def objective(params, T, Omega):
-            ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
+        return value_and_grad
 
-            invQ_blocks = []
-            for ki, C, G, perm, n_inner in zip(ks, mass_list, stiff_list, perm_list, n_inner_list):
-                Ci = jnp.diag(1.0 / C.diagonal())
-                K = ki**2 * C + G
-                sigma2k = (jax.scipy.special.gamma(1.0) /
-                           (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
-                Qi = sigma2k * (K @ Ci @ K)
-
-                Qperm = Qi[perm][:, perm]
-                Q_11 = Qperm[:n_inner, :n_inner]
-                Q_12 = Qperm[:n_inner, n_inner:]
-                Q_22 = Qperm[n_inner:, n_inner:]
-                # Same Schur-complement idea as `spdeAppoxCov.precision(marginal=True)`
-                # (`spdeAppoxCov._schur_marginal_precision`): solve directly
-                # for Q_22^{-1} @ Q_12.T instead of inverting all of Q_22.
-                # Reimplemented here in pure JAX ops (rather than calling
-                # spdeAppoxCov, which is numpy/scipy.sparse-based) so `ks`
-                # stays differentiable end-to-end.
-                Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
-                invQ_blocks.append(Q_mar)
-
-            invQ = jax.scipy.linalg.block_diag(*invQ_blocks)
-            logdet_invQ = jnp.linalg.slogdet(invQ)[1]
-            fun = -T * logdet_invQ + jnp.trace(invQ @ Omega)
-            # Same 1e4 rescaling as `_minf`, to keep the two objectives
-            # (and their optimum) directly comparable.
-            return fun / 1e4
-
-        return jax.jit(jax.value_and_grad(objective))
-
-    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0):
+    def _observed_logL(self, y_obs, Xbeta, x0, Sigma0, fitted_state=None):
         """
         Build a `ModelParams -> scalar` closure computing the observed
         log-likelihood at fixed `y_obs`/`Xbeta`/`x0`/`Sigma0`, used by
         `LRStateSpaceResults._compute_hessian` to differentiate the
         log-likelihood w.r.t. the free parameters via `jax.hessian`.
-        """
 
+        `fitted_state` (a `FittedState`) gives the observation points,
+        covariance functions, block sizes and dtypes to use; by default the
+        model's current ones. Results pass their own (F09).
+        """
+        state = self._get_fitted_state() if fitted_state is None else fitted_state
 
         # Compute the FEM basis functions for the latent field
-        basis = self._buildBasis_list(self.points, self.cov_function)
+        basis = self._buildBasis_list(state.points, state.cov_function, dtype=state.dtype)
 
-        # cov_function = self.cov_function
-        pdim = jnp.asarray(self.pdim, dtype=self.itype)
-
-        # Get latent dimension (i.e. the rank)
-        qdim = jnp.array(
-            [cov.fem_solver.n_inner_points for cov in self.cov_function],
-            dtype=self.itype)
-
-        # get the stiff and the mass matrix list
-        stiff = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        mass = [jnp.array(cov.fem_solver.mass.toarray(), dtype=self.dtype) for cov in self.cov_function]
-        ninner = [jnp.array(cov.fem_solver.inner, dtype=bool) for cov in self.cov_function]
+        # Block sizes as NumPy arrays: they must stay concrete (jnp.repeat
+        # sizes) when the closure is traced under jit (F21).
+        pdim = np.asarray(state.pdim)
+        qdim = np.asarray([cov.fem_solver.n_inner_points for cov in state.cov_function])
 
         observed_logL = partial(
             self._compute_observed_logL,
@@ -1813,11 +1976,10 @@ class LRStateSpaceModel(StateSpaceModel):
             Sigma0=Sigma0,
             pdim=pdim,
             qdim=qdim,
-            stiff_list=stiff,
-            mass_list=mass,
-            inner_list=ninner,
-            nvar= self.nvar,
-            nlat= self.nlat,
+            mesh=self._spde_mesh_arrays(state.cov_function, dtype=state.dtype, itype=state.itype),
+            nvar=state.nvar,
+            nlat=state.nlat,
+            dtype=state.dtype,
             )
          
         return observed_logL
@@ -1825,9 +1987,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
 
     def _compute_observed_logL(self, params, y_t, Xbeta, basis,
-                           x0, Sigma0, pdim, qdim,
-                           stiff_list, mass_list, inner_list,
-                           nvar, nlat):
+                           x0, Sigma0, pdim, qdim, mesh,
+                           nvar, nlat, dtype=None):
         """
         Compute the observed log-likelihood, or empirical log-likelihood (differenziabile via JAX AD).
         Note that x0, Sigma0 are considered fixed and known, and are passed as arguments. No std computation on them.
@@ -1840,10 +2001,10 @@ class LRStateSpaceModel(StateSpaceModel):
         ks0   = params.ks.value
 
         H    = self._buildH_dense(A0, basis)
-        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim)
+        R, F = self._buildRF_dense(s2e0, f0, pdim, qdim, dtype=dtype)
         
 
-        invQ = self._compute_invQ_jax(ks0, stiff_list, mass_list, inner_list)
+        invQ = _spde_marginal_precision(ks0, *mesh)
         Q    = jnp.linalg.solve(invQ, jnp.eye(invQ.shape[0], dtype=invQ.dtype))
 
         _, _, _, _, _, logL = _filter_kernelJAX(
@@ -1856,51 +2017,6 @@ class LRStateSpaceModel(StateSpaceModel):
         # return the positive log-likelihood (to be maximized)
         return logL
     
-    def _compute_invQ_jax(self, ks, stiff_list, mass_list, inner_list):
-        """
-        Precision matrix — JAX-differenziabile rispetto a ks.
-        stiff_list, mass_list : liste di np.array (estratti da fem_solver)
-        inner_idx_list        : lista di np.array di indici interi
-                                (np.where(fcov.fem_solver.inner)[0])
-        """
-        invQ_blocks = []
-        for i in range(len(ks)):
-            ki = ks[i]
-            C  = jnp.array(mass_list[i])
-            G  = jnp.array(stiff_list[i])
-            current_inner = inner_list[i]
-            
-            Ci      = jnp.diag(1.0 / C.diagonal())
-            K       = ki**2 * C + G
-            sigma2k = (jax.scipy.special.gamma(1.0) /
-                    (jax.scipy.special.gamma(2.0) * 4 * jnp.pi * ki**2))
-            Qi = sigma2k * (K @ Ci @ K)
-
-            # usa indici interi (non boolean) per compatibilità JAX
-            n = len(current_inner)
-            n_inner = sum(current_inner)
-            n_outer = n - n_inner
-            ii = jnp.where(current_inner, size=n_inner)[0]
-            oi = jnp.where(~current_inner, size=n_outer)[0]
-            
-            perm = jnp.concatenate((ii, oi))
-            Qperm = Qi[perm][:, perm]
-            
-            Q_11 = Qperm[:n_inner, :n_inner]
-            Q_12 = Qperm[:n_inner, n_inner:]
-            Q_22 = Qperm[n_inner:, n_inner:]
-               
-            # Same Schur-complement idea as `spdeAppoxCov.precision(marginal=True)`
-            # (used by the non-JAX fit()/sim()/_minf() paths): solve directly
-            # for Q_22^{-1} @ Q_12.T instead of inverting all of Q_22 via a
-            # solve against the identity, which is exactly as expensive as
-            # an explicit inverse and wastes the columns never used below.
-            # Reimplemented in pure JAX ops here so this stays differentiable.
-            Q_mar = Q_11 - Q_12 @ jnp.linalg.solve(Q_22, Q_12.T)
-            invQ_blocks.append(Q_mar)
-
-        return jax.scipy.linalg.block_diag(*invQ_blocks)
-
     def _getInitialValues(self, y_obs, Xbeta, block_p, block_q):
         """
         Compute data-driven initial parameter values used by `fit()` when
@@ -1919,8 +2035,14 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
         box = [cv.fem_solver.box for cv in self.cov_function]
+        # The box is NumPy float64: cast the extents to the model dtype first
+        # (as JAX did implicitly with x64 off), so that the result does not
+        # depend on the global x64 flag (F03)
+        dt = self.dtype
         est_ks = [
-            jnp.sqrt(8.0) / (jnp.minimum(jnp.abs(bx[2] - bx[0]), jnp.abs(bx[3] - bx[1])) / 3.0)
+            jnp.sqrt(jnp.asarray(8.0, dtype=dt))
+            / (jnp.minimum(jnp.abs(jnp.asarray(bx[2] - bx[0], dtype=dt)),
+                           jnp.abs(jnp.asarray(bx[3] - bx[1], dtype=dt))) / 3.0)
             for bx in box
         ]
 
@@ -1989,7 +2111,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 value=jnp.asarray(new_param.value),
             )
 
-        new_params = ModelParams(**updated_fields)
+        new_params = self._cast_params(ModelParams(**updated_fields))
 
         # Special handling for ks update covariance scaling
         if not new_params.ks.fixed and new_params.ks.value is not None:
@@ -2023,7 +2145,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 value=jnp.asarray(new_param.value),
             )
 
-        new_params = ModelParams(**updated_fields)
+        new_params = self._cast_params(ModelParams(**updated_fields))
 
         # Special handling for ks update covariance scaling
         if not new_params.ks.fixed and new_params.ks.value is not None:
@@ -2032,8 +2154,23 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return new_params
 
+    def _cast_params(self, params: ModelParams) -> ModelParams:
+        """
+        Return `params` with every value in the model dtype. User-supplied
+        values (`Param` converts them with JAX's default dtype) and
+        intermediate results would otherwise follow the global x64 flag
+        (F03).
+        """
+        fields = {}
+        for name in params.__dataclass_fields__:
+            p = getattr(params, name)
+            if p is not None and p.value is not None:
+                p = replace(p, value=jnp.asarray(p.value, dtype=self.dtype))
+            fields[name] = p
+        return ModelParams(**fields)
+
     # dense matrix
-    def _buildBasis_list(self, points, hmesh):
+    def _buildBasis_list(self, points, hmesh, dtype=None):
         """
         Evaluate each latent factor's FEM basis functions at each response
         variable's observation sites, row-normalised so each site's basis
@@ -2061,7 +2198,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 notfindInxRow.append(notfindInxij)
 
                 # conver into coo format
-                hij = jnp.asarray(hij.toarray(), dtype=self.dtype)
+                hij = jnp.asarray(hij.toarray(), dtype=self.dtype if dtype is None else dtype)
 
                 # Append the sub matrices
                 hrow.append(hij)
@@ -2071,7 +2208,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return basis
 
-    def _buildRF_dense(self, s2error, flatent, pdim, qdim):
+    def _buildRF_dense(self, s2error, flatent, pdim, qdim, dtype=None):
         """
         Builds R and F as their diagonals (1D vectors).
 
@@ -2090,11 +2227,13 @@ class LRStateSpaceModel(StateSpaceModel):
         Returns:
             A tuple of two 1D JAX arrays: (R diagonal, F diagonal).
         """
-        rdiag_vec = jnp.repeat(s2error, repeats=jnp.array(pdim)).astype(
-            dtype=self.dtype
+        dtype = self.dtype if dtype is None else dtype
+        # NumPy repeat counts stay concrete when traced under jit (Hessian)
+        rdiag_vec = jnp.repeat(s2error, repeats=np.asarray(pdim)).astype(
+            dtype=dtype
         )
-        fdiag_vec = jnp.repeat(flatent, repeats=jnp.array(qdim)).astype(
-            dtype=self.dtype
+        fdiag_vec = jnp.repeat(flatent, repeats=np.asarray(qdim)).astype(
+            dtype=dtype
         )
 
         return rdiag_vec, fdiag_vec
@@ -2264,7 +2403,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return nvar, points, dfs, ndim, pdim, block_p, T, builders
 
-    def _asPredictionDataFrames(self, df):
+    def _asPredictionDataFrames(self, df, builders=None):
         """
         Normalize `df` (as accepted by `predict`/`getDesignMatrix`) to a
         list of GeoDataFrames, one per formula/builder (`self.builders`).
@@ -2277,15 +2416,16 @@ class LRStateSpaceModel(StateSpaceModel):
         one entry per formula.
         """
         if isinstance(df, (list, tuple)):
-            if len(df) != len(self.builders):
+            if len(df) != len(builders):
                 raise ValueError(
                     f"Number of dataframes ({len(df)}) must match number of "
-                    f"formulas ({len(self.builders)})"
+                    f"formulas ({len(builders)})"
                 )
             return list(df)
-        return [df] * len(self.builders)
+        return [df] * len(builders)
 
-    def _buildPredictionGrid(self, df, verbose=True, include_response=False):
+    def _buildPredictionGrid(self, df, verbose=True, include_response=False,
+                             builders=None, domain=None):
         """
         Build the design matrices for new (prediction) locations/times, one
         per formula, reusing each formula's fitted `DesignMatricesBuilder`
@@ -2302,11 +2442,13 @@ class LRStateSpaceModel(StateSpaceModel):
         response on its dataframe (see `DesignMatricesBuilder.build_predict`)
         -- that dataframe must then contain the response column.
         """
-        dfs_in = self._asPredictionDataFrames(df)
+        builders = self.builders if builders is None else builders
+        domain = self.domain if domain is None else domain
+        dfs_in = self._asPredictionDataFrames(df, builders)
 
         dfs = [
             b.build_predict(d, verbose=verbose, domain=dom, include_response=include_response)
-            for b, d, dom in zip(self.builders, dfs_in, self.domain)
+            for b, d, dom in zip(builders, dfs_in, domain)
         ]
 
         T = [gr.T for gr in dfs]
@@ -2394,8 +2536,9 @@ class LRStateSpaceModel(StateSpaceModel):
             Decimal places used to format the other numeric fields
             (log-likelihood, `s2e`, `f`, `ks`, `A`, `x0`, `Sigma0`, timings).
         relat_decimals : int, default 5
-            Decimal places used to format the relative log-likelihood
-            change `stats["relatL"]`.
+            Decimal places used to format the per-observation
+            log-likelihood change `stats["relatL"]` (the quantity compared
+            with `tol_relat`).
 
         Returns
         -------
@@ -2506,7 +2649,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 ),
                 (
                     "Dep. Variables:",
-                    lambda: [self.y_name if hasattr(self, "y_name") else "N/A"],
+                    lambda: [", ".join(self.y_name) if hasattr(self, "y_name") else "N/A"],
                 ),
                 ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ]
@@ -2655,15 +2798,13 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         statsmodels.iolib.summary.Summary
             Printable summary object (`str(...)`/`print(...)`).
         """
-        self.model = SimpleNamespace()
-
         # Generate the summary tables
         gen_top_left, gen_top_right = self.generate_summary(print_short=print_short)
 
         # Add the header to the summary
         smry = Summary()
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="LR State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,
