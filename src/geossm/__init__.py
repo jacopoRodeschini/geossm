@@ -16,17 +16,7 @@ Example:
     >>> from geossm.datasets import load_dataset
 """
 
-# Version handling
-try:
-    from importlib.metadata import version, PackageNotFoundError
-
-    try:
-        __version__ = version("geossm")
-    except PackageNotFoundError:
-        __version__ = "unknown"
-except ImportError:
-    # Python < 3.8
-    __version__ = "2.1.0"
+from ._version import __version__
 
 # Core utilities
 from .data_preparation import DesignMatrices, DesignMatricesBuilder

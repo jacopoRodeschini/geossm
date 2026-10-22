@@ -1,3 +1,6 @@
+# Workflow 
+.github/
+
 # Audit
 docs/design_audit/
 
@@ -5,9 +8,6 @@ docs/design_audit/
 __pycache__/
 *.py[cod]
 *$py.class
-
-# workflows
-.github/
 
 # C extensions
 *.so
