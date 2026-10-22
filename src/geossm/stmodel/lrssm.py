@@ -1241,12 +1241,16 @@ class LRStateSpaceModel(StateSpaceModel):
         # not depend on the global x64 flag (F03).
         invQ = [jnp.asarray(fcov.precision(marginal=True), dtype=self.dtype)
                 for fcov in self.cov_function]
+
+        
         Q = block_diag(
             *[
                 jnp.linalg.solve(mt, jnp.eye(mt.shape[0], dtype=self.dtype))
                 for mt in invQ
             ]
         )
+
+        invQ = block_diag(*invQ)
 
         super().set(
             H=H,
@@ -1257,7 +1261,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Sigma0=params.Sigma0.value,
             beta=params.beta.value,
         )
-        return H
+        return H, R, F, Q, invQ
 
     @_on_device
     def fit(
@@ -1440,7 +1444,8 @@ class LRStateSpaceModel(StateSpaceModel):
             tStart_iter = time.time()
 
             # ---- build parametrised matrices and set them for the E step
-            H = self._set_system_matrices(est_params, basis, pdim, qdim)
+            # use self. to access the matrices 
+            H, _, _, _, invQ = self._set_system_matrices(est_params, basis, pdim, qdim)
 
             # ---- E step
             # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
@@ -1463,6 +1468,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 S11,
                 S10,
                 S00,
+                invQ, 
                 Phi,
                 ks_value_and_grad,
             )
@@ -1564,7 +1570,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # covariance functions' rescale) are left at the returned parameters.
         if not restored:
             self._log("Final E-step at the estimated parameters...")
-            H = self._set_system_matrices(est_params, basis, pdim, qdim)
+            H, _, _, _, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
             final = self._E_step(y_obs)
             logL_final = final[6]
             if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
@@ -1702,6 +1708,7 @@ class LRStateSpaceModel(StateSpaceModel):
         S11,
         S10,
         S00,
+        invQ, 
         Phi,
         ks_value_and_grad,
     ):
@@ -1728,8 +1735,10 @@ class LRStateSpaceModel(StateSpaceModel):
         for q in range(nlat):
             s = slice(block_q[q], block_q[q + 1])
 
-            num = jnp.trace(S10[s, s])
-            den = jnp.trace(S00[s, s])
+            # Added the fix for the f update (Eq 3a) 
+            # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
+            num = jnp.trace(invQ[s, s] @ S10[s, s])
+            den = jnp.trace(invQ[s, s] @ S00[s, s])
 
             # print(q, num, den)
             est_f = est_f.at[q].set(num / den)
