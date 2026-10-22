@@ -13,6 +13,7 @@ DesignMatricesBuilder class handles the preparation of the DesignMatrices object
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import ast
+import warnings
 import numpy as np
 import shapely
 from scipy.spatial.distance import cdist
@@ -288,7 +289,15 @@ def check_regular_timestamps(timestamps):
         return False, None, None
 
     # 3) Try calendar-aware frequency first (works for month/year)
-    inferred = pd.infer_freq(ts_unique) if ts_unique.size >= 3 else None
+    inferred = None
+    if ts_unique.size >= 3:
+        with warnings.catch_warnings():
+            # pandas >= 3.1 warns that infer_freq will return a BaseOffset
+            # instead of a string; both are handled below.
+            warnings.filterwarnings("ignore", message="A future version of pandas will return a BaseOffset")
+            inferred = pd.infer_freq(ts_unique)
+        if inferred is not None and not isinstance(inferred, str):
+            inferred = inferred.freqstr
     if inferred is not None:
         # Normalize aliases like '2MS', 'M', 'YS', etc.
         n = ""
@@ -373,9 +382,10 @@ class DesignMatrices:
 
     Parameters
     ----------
-    X : numpy.ndarray
+    X : numpy.ndarray or jax.Array
         Covariate design array of shape ``[N, P, T]`` (sites x covariates
-        x timesteps), built from the right-hand side of `formula`.
+        x timesteps), built from the right-hand side of `formula`. Stored
+        as a JAX array (converted in `__post_init__`).
     X_design_info : patsy.design_info.DesignInfo
         Patsy metadata describing how `X`'s columns were built from
         `formula` (term names, factor info, etc.). Reused by
@@ -414,9 +424,10 @@ class DesignMatrices:
         in the unit given by `unit` (see `check_regular_timestamps`).
     unit : str
         Unit of `delta` (e.g. ``"day"``, ``"hour"``, ``"month"``).
-    y : numpy.ndarray, optional
+    y : numpy.ndarray or jax.Array, optional
         Response array of shape ``[N, T]``, built from the left-hand side
-        of `formula`. ``None`` if `formula` has no response (covariates
+        of `formula`, stored as a JAX array (converted in
+        `__post_init__`). ``None`` if `formula` has no response (covariates
         only). Missing observations are ``NaN`` rather than dropped, so
         the site x time grid stays complete.
     y_design_info : patsy.design_info.DesignInfo, optional
@@ -432,9 +443,9 @@ class DesignMatrices:
         Name of the column in the source GeoDataFrame that held the
         timestamps.
     dtype : numpy.dtype, default numpy.float32
-        Numeric precision used for `X`, `y` and `points` (NumPy arrays;
-        `astype` converts to JAX arrays, and for a 64-bit dtype requires
-        JAX's x64 mode to be enabled).
+        Numeric precision used for `X`, `y` (JAX arrays) and `points`
+        (NumPy array); `astype` converts them, and for a 64-bit dtype requires
+        JAX's x64 mode to be enabled.
 
     Attributes
     ----------

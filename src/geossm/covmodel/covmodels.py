@@ -4,10 +4,8 @@
 @author: jacopo
 """
 
-import matplotlib.tri as mtri  # For Triangulation object
 import mfem.ser as mfem
 import numpy as np
-import matplotlib.pyplot as plt
 import scipy.sparse as sp
 import scipy as sc
 import gstools as gs
@@ -569,6 +567,10 @@ class FEMSolver:
         -------
         matplotlib.axes.Axes
         """
+        # imported here, not at module level: matplotlib is only needed for
+        # plotting and costs ~0.35 s on `import geossm` (F29)
+        import matplotlib.pyplot as plt
+        import matplotlib.tri as mtri
 
         # Convert the vertex array to a numpy array
         vertex = self.vertex

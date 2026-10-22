@@ -13,7 +13,6 @@ import numpy as np
 import pytest
 
 from geossm.ssm import StateSpaceModel, StateSpaceResults
-from tests._known_bugs import known_bug
 from tests.test_lrssm import _build_model, _options
 from tests._synthetic import make_panel_gdf, make_square_mesh
 
@@ -78,18 +77,24 @@ class TestStateSpaceResults:
             with pytest.raises(ValueError, match="read-only"):
                 getattr(res, name)[0, 0] = 1.0
 
-    @known_bug("F43", "filter/smoother do not cast y to the model dtype; a float64 y fails in a float32 "
-               "model under x64", raises=TypeError)
     def test_float64_data_in_float32_model(self, problem):
+        # F43: the kernel received y as passed (scan carry dtype error under x64).
         res = _ssm(problem, jnp.float32).filter(np.asarray(problem.y, dtype=np.float64))
         assert res.y_hat.dtype == np.float32
 
-    @known_bug("F47", "update() passes every public attribute to __init__ (TypeError)", raises=TypeError)
-    def test_update_returns_a_new_object(self, problem):
-        res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    def test_update_returns_a_new_object(self, problem_missing, missing_mask):
+        # F47: update() rebuilt the object from all public attributes (TypeError).
+        res = _ssm(problem_missing, jnp.float64).smoother(np.asarray(problem_missing.y))
         new = res.update(llf=0.0)
         assert isinstance(new, StateSpaceResults) and new is not res
         assert new.llf == 0.0 and res.llf != 0.0
+        y_full = np.nan_to_num(res.y_obs)
+        new = res.update(y_obs=y_full)
+        assert (new.nobs, new.missing) == (y_full.size, 0)
+        assert (res.nobs, res.missing) == (int((~missing_mask).sum()), int(missing_mask.sum()))
+        assert np.all(np.isfinite(new.residuals)) and np.isnan(res.residuals).any()
+        with pytest.raises(AttributeError):
+            res.update(not_an_attribute=1)
 
     def test_predict_and_sim_return_documented_types(self, problem):
         m = _ssm(problem, jnp.float64)
@@ -138,8 +143,8 @@ class TestLRResultsAfterFit:
         (S,) = res.Sigma_y_hat_list
         assert S.shape == (bp[1] - bp[0], bp[1] - bp[0], res.y_hat.shape[1])
 
-    @known_bug("F44", "coverage_probability counts missing observations as not covered")
     def test_coverage_is_over_observed_values(self, lr_fit):
+        # F44: missing observations were counted as outside their interval.
         _, res = lr_fit
         lo, hi = res.conf_int_y(alpha=0.05, prediction=True)
         obs = ~np.isnan(res.y_obs)
@@ -149,8 +154,8 @@ class TestLRResultsAfterFit:
         np.testing.assert_allclose(res.coverage_probability(0.05, which="space"),
                                    [inside[i][obs[i]].mean() for i in range(obs.shape[0])])
 
-    @known_bug("F48", "the error message for an invalid `which` names 'smoothed'/'filtered'")
     def test_coverage_rejects_invalid_which(self, lr_fit):
+        # F48: the message named 'smoothed'/'filtered'.
         _, res = lr_fit
         with pytest.raises(ValueError, match="global"):
             res.coverage_probability(0.05, which="bad")
@@ -166,25 +171,25 @@ class TestLRPredictLifecycle:
         assert res.y_pred.shape[0] == 10 < p_all
         assert np.asarray(res.block_p_pred)[-1] == 10
 
-    @known_bug("F45", "y_pred/Sigma_y_pred are JAX arrays, and y_pred is float64 in a float32 fit under x64")
     @pytest.mark.usefixtures("x64")
     def test_predictions_are_numpy_in_the_model_dtype(self, gdf, mesh):
+        # F45: JAX arrays, and y_pred float64 in a float32 fit under x64.
         _, res = _fresh_fit(gdf, mesh, dtype=jnp.float32)
         res.predict(gdf.drop(columns="y"), verbose=False)
         for name in ("y_pred", "Sigma_y_pred"):
             value = getattr(res, name)
             assert type(value) is np.ndarray and value.dtype == np.float32, name
 
-    @known_bug("F46", "predict() keeps the back-transformed lists of the previous prediction")
     def test_new_prediction_invalidates_back_transformed_predictions(self, gdf, mesh):
+        # F46: the lists of the previous prediction were kept; to_geo() failed.
         _, res = _fresh_fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
         res.predict(newdata, verbose=False)
         res.back_transform(lambda v: v)
         res.predict(newdata[newdata["site"] < 10], verbose=False)
-        back = res.y_pred_back_list
-        assert back is None or np.shape(back[0]) == res.y_pred.shape
-        res.to_geo()
+        assert res.y_pred_back_list is None and res.Sigma_y_pred_back_list is None
+        assert res.y_hat_back_list is not None  # in-sample: still valid
+        assert not any("back" in c for c in res.to_geo()["pred"].columns)
 
     def test_to_geo_columns_and_lengths(self, gdf, mesh):
         model, res = _fresh_fit(gdf, mesh)
@@ -206,3 +211,40 @@ def test_lr_sim_returns_states_with_initial_state(gdf, mesh):
     p, q, T = model.shape
     assert np.shape(y_sim) == (p, T) and np.shape(x_sim) == (q, T + 1)
     assert isinstance(info, dict) and isinstance(tdelta, float)
+
+
+def test_lr_update_recomputes_parameter_summaries(lr_fit):
+    # F47: update() on LRStateSpaceResults; the derived parameter fields and
+    # inference caches follow the replaced params.
+    _, res = lr_fit
+    params = res.params.copy()
+    params.f.fixed = True
+    new = res.update(params=params)
+    assert new.n_params == res.n_params - 1 and new.theta_hat.size == res.theta_hat.size - 1
+    assert new.param_fixed[new.param_names.index("f")] and not res.param_fixed[res.param_names.index("f")]
+
+
+@pytest.mark.usefixtures("x64")
+def test_summary_and_repr_name_the_response(problem, lr_fit):
+    # F48: the base summary read `y_name` (absent on a plain StateSpaceModel)
+    # and `repr` read `yname` (the default "y" on an LRStateSpaceModel).
+    res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    model, lr = lr_fit
+    for obj, name in ((res, "y"), (lr, ", ".join(model.y_name))):
+        (line,) = [ln for ln in str(obj.summary()).splitlines() if ln.startswith("Dep. Variable")]
+        assert line.split()[2] == name
+        assert f"Dep. Variable:   {name}" in repr(obj)
+
+
+def test_back_transform_without_prediction_covariance_warns(gdf, mesh):
+    _, res = _fresh_fit(gdf, mesh)
+    res.predict(gdf.drop(columns="y"), verbose=False, std=False)
+    with pytest.warns(RuntimeWarning, match="predictions have no covariance"):
+        res.back_transform(lambda v: v)
+    assert res.y_pred_back_list is None and res.y_hat_back_list is not None
+
+
+def test_to_geo_columns_are_in_the_model_dtype(lr_fit):
+    _, res = lr_fit
+    hat = res.to_geo()["hat"]
+    assert hat["y_hat_y"].dtype == hat["std_hat_y"].dtype == np.dtype(res.dtype)

@@ -13,6 +13,7 @@ a printable summary.
 
 from __future__ import annotations
 from typing import Optional, Any, Tuple, Dict
+import copy
 import warnings
 
 import numpy as np
@@ -303,12 +304,7 @@ class StateSpaceResults:
         # lazily inside generate_summary()) so they're already available
         # to __repr__ and to any direct caller, without requiring
         # summary()/generate_summary() to have run first. ----
-        if self.y_obs is not None:
-            self.nspace, self.ntime = self.y_obs.shape
-            self.missing = int(np.sum(np.isnan(self.y_obs)))
-            self.nobs = self.y_obs.size - self.missing  # observed values only
-        else:
-            self.nobs = self.nspace = self.ntime = self.missing = None
+        self._set_observation_counts()
 
     @property
     def backend(self):
@@ -353,12 +349,13 @@ class StateSpaceResults:
                 setattr(self, attr, np.asarray(value, dtype=self.dtype))
 
     def update(self, **kwargs) -> "StateSpaceResults":
-        """Return a new `StateSpaceResults` with some fields replaced.
+        """Return a new results object with some fields replaced.
 
-        Copies every current public (non-underscore-prefixed) attribute
-        except ``today``, overrides the ones given in ``kwargs``, and
-        constructs a new instance from the result. Does not mutate
-        ``self``.
+        A shallow copy of ``self`` (same class; the stored arrays are
+        shared, they are read-only) with the attributes in ``kwargs``
+        replaced. Values derived from the replaced fields are recomputed
+        or cleared in the copy (observation counts, residuals, coverage;
+        see `_after_update`). Does not mutate ``self``.
 
         Parameters
         ----------
@@ -376,26 +373,36 @@ class StateSpaceResults:
         AttributeError
             If a key in ``kwargs`` is not an existing public attribute.
         """
-
-        # Collect all current attributes (excluding private ones if desired)
-        current_data = {
-            k: v
-            for k, v in self.__dict__.items()
-            if k not in ["today"] and not k.startswith("_")
-        }
-
-        # Validate keys
+        public = {k for k in self.__dict__ if not k.startswith("_")}
         for key in kwargs:
-            if key not in current_data:
+            if key not in public:
                 raise AttributeError(
                     f"{key} is not a valid attribute of {self.__class__.__name__}"
                 )
 
-        # Update values
-        current_data.update(kwargs)
+        new = copy.copy(self)
+        new.__dict__.update(kwargs)
+        new.to_numpy()
+        new._after_update(set(kwargs))
+        return new
 
-        # Create new instance
-        return self.__class__(**current_data)
+    def _after_update(self, keys):
+        """Recompute or clear what depends on the attributes in `keys`
+        (called by `update` on the copy)."""
+        self._residuals = None
+        self.__dict__.pop("_coverage_probability_cache", None)
+        if "y_obs" in keys:
+            self._set_observation_counts()
+
+    def _set_observation_counts(self):
+        """`nspace`, `ntime`, `missing` and `nobs` (observed values only)
+        from `y_obs`."""
+        if self.y_obs is not None:
+            self.nspace, self.ntime = self.y_obs.shape
+            self.missing = int(np.sum(np.isnan(self.y_obs)))
+            self.nobs = self.y_obs.size - self.missing  # observed values only
+        else:
+            self.nobs = self.nspace = self.ntime = self.missing = None
 
     def _to_numpy(self, arr):
         """Best-effort conversion of a (possibly JAX) array to NumPy, passing ``None`` through."""
@@ -564,7 +571,9 @@ class StateSpaceResults:
         parameters these results were computed with (recorded when they
         were created, so a later fit of the model does not change them) -
         turning a confidence interval for the mean response into a
-        prediction interval for a new observation.
+        prediction interval for a new observation. The intervals are
+        plug-in: the estimated parameters are treated as known, so their
+        estimation uncertainty is not included.
 
         Parameters
         ----------
@@ -633,23 +642,36 @@ class StateSpaceResults:
 
         Computes the fraction of observed values ``y_obs`` that fall
         within the ``1 - alpha`` prediction interval from
-        ``conf_int_y(alpha, prediction=True)``; for a well-calibrated
-        model this should be close to ``1 - alpha``.
+        ``conf_int_y(alpha, prediction=True)``. Missing values are left
+        out (they are neither inside nor outside an interval).
+
+        The intervals are in-sample and plug-in: ``y_hat`` is the smoothed
+        (or filtered) fit, which uses the observations themselves, and the
+        parameters are treated as known. The coverage is therefore not an out-of-sample
+        calibration check: it typically exceeds ``1 - alpha`` for a
+        correctly specified model.
 
         Parameters
         ----------
         alpha : float, default 0.05
             Significance level used for the prediction interval.
         which : {'global', 'space', 'time'}, default 'global'
-            Aggregation axis: ``'global'`` averages over all entries;
-            ``'space'`` averages over time (shape ``(p,)``); ``'time'``
-            averages over space (shape ``(T,)``).
+            Aggregation axis: ``'global'`` averages over all observed
+            values; ``'space'`` averages over time (shape ``(p,)``);
+            ``'time'`` averages over space (shape ``(T,)``). A row or
+            column without observations gives ``NaN``.
 
         Returns
         -------
         float or numpy.ndarray
             Empirical coverage probability in ``[0, 1]``, aggregated as
             requested.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is not one of ``'global'``, ``'space'``,
+            ``'time'``.
         """
         return self._coverage_probability(alpha, which)
 
@@ -678,20 +700,21 @@ class StateSpaceResults:
         return result
 
     def _compute_coverage_probability(self, alpha: float, which: str):
+        axes = {"global": None, "space": 1, "time": 0}
+        if which not in axes:
+            raise ValueError("which must be one of {'global','space','time'}")
         y_true = self.y_obs
 
         lower, upper = self.conf_int_y(alpha, prediction=True)
 
-        inside = (y_true >= lower) & (y_true <= upper)
-
-        if which == "global":
-            return np.nanmean(inside)
-        elif which == "space":
-            return np.nanmean(inside, axis=1)
-        elif which == "time":
-            return np.nanmean(inside, axis=0)
-        else:
-            raise ValueError("which must be 'smoothed' or 'filtered'")
+        # Over the observed values only: a missing value is neither inside nor
+        # outside its interval (F44)
+        observed = ~np.isnan(y_true)
+        inside = np.where(observed, (y_true >= lower) & (y_true <= upper), np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # rows/columns without observations: NaN
+            coverage = np.nanmean(inside, axis=axes[which])
+        return float(coverage) if which == "global" else coverage
 
     @staticmethod
     def _format_runtime_summary(parts) -> Tuple[str, str]:
@@ -727,6 +750,19 @@ class StateSpaceResults:
         dict of str to float
             Keys ``jb``, ``jb_pvalue``, ``omni``, ``omni_pvalue``, ``dw``,
             ``skew``, ``kurtosis``.
+
+        Notes
+        -----
+        The residuals are in-sample: ``y_obs - y_hat``, with ``y_hat`` the
+        fitted values of these results (for a smoother or a fitted
+        `LRStateSpaceModel`, the smoothed fit, which uses the observations
+        themselves), pooled over sites and times. Under a correctly
+        specified model they are neither independent nor standardized, so
+        the usual reference distributions of these statistics (and the
+        reference values shown by `summary`) are only indicative.
+        Durbin-Watson is computed on the residuals concatenated site by
+        site with missing values dropped, so consecutive values may belong
+        to different sites or be separated by gaps.
         """
 
         err = getattr(self, "residuals", None)
@@ -798,7 +834,7 @@ class StateSpaceResults:
                         f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
                     ],
                 ),
-                ("Dep. Variables:", lambda: [_format_names(getattr(self, "_model_y_name", None)) or "N/A"]),
+                ("Dep. Variables:", lambda: [self._dep_variable_name()]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
                 ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
@@ -841,11 +877,13 @@ class StateSpaceResults:
 
         return gen_top_left, gen_top_right
 
-    #: Footnote explaining the "(x*)" reference values shown next to the
-    #: residual diagnostics in `generate_summary()`.
+    #: Footnote lines explaining the residual diagnostics and the "(x*)"
+    #: reference values shown in `generate_summary()` (F49).
     _DIAGNOSTICS_NOTE = (
-        "(x*) reference value expected for normal, uncorrelated residuals "
-        "(or, for Coverage Prob., the nominal 1 - alpha)."
+        "Diagnostics of the in-sample residuals y_obs - y_hat (y_hat: smoothed or filtered fit), pooled",
+        "over sites and times; Durbin-Watson on the residuals concatenated site by site, NaNs dropped.",
+        "(x*) reference value for independent normal residuals (Coverage Prob.: the nominal 1 - alpha).",
+        "In-sample residuals are not independent even under a correct model; in-sample intervals over-cover.",
     )
 
     def summary(self) -> Summary:
@@ -872,7 +910,7 @@ class StateSpaceResults:
             yname=None,
             xname=None,
         )
-        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
+        smry.add_extra_txt(list(self._DIAGNOSTICS_NOTE))
 
         return smry
 
@@ -893,7 +931,7 @@ class StateSpaceResults:
         p, T = y_hat.shape if y_hat is not None else ("N/A", "N/A")
         llf = getattr(self, "llf", None)
         gen_top_left = [
-            ("Dep. Variable:", [getattr(self, "yname", None) or "N/A"]),
+            ("Dep. Variable:", [self._dep_variable_name()]),
             ("Shape (p, T):", [f"({p}, {T})"]),
         ]
         gen_top_right = [
@@ -902,6 +940,13 @@ class StateSpaceResults:
             ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
         ]
         return gen_top_left, gen_top_right
+
+    def _dep_variable_name(self):
+        """Response name(s) shown by `summary` and `repr`: the model's
+        `y_name` (one per response variable, `LRStateSpaceModel`) or, for
+        a plain `StateSpaceModel`, its `yname`."""
+        return (_format_names(getattr(self, "_model_y_name", None))
+                or getattr(self, "yname", None) or "N/A")
 
     def __str__(self):
         return str(self.summary())

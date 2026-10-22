@@ -461,6 +461,19 @@ class LRStateSpaceResults(StateSpaceResults):
         if self.llf is None:
             self.llf = self.llf_path[-1]
     
+    def _after_update(self, keys):
+        """`update` hook: also clear the inference caches and reprocess
+        `params`/`nstats` when they are replaced."""
+        super()._after_update(keys)
+        self._n_params = self._aic = self._bic = None
+        self._hessian = self._cov_params = self._free_meta = self._frozen_params = None
+        self._bse_params = None
+        if "params" in keys and self.params is not None:
+            self._process_params()
+        if "nstats" in keys and self.nstats is not None and "llf" not in keys:
+            self.llf = None  # taken from the new nstats
+            self._process_nstats()
+
     def _snapshot(self, name):
         """Fit-time value `name` of the model state (see `FittedState`);
         falls back to the model's current attribute for results built
@@ -1003,7 +1016,7 @@ class LRStateSpaceResults(StateSpaceResults):
                 if sigma is not None:
                     var = np.diagonal(np.asarray(sigma), axis1=0, axis2=1)  # (T, n)
                     std = _safe_sqrt_variance(var, context="_build_geo_dataframe")
-                    data[f"std_{col_prefix}_{name}"] = std.ravel()
+                    data[f"std_{col_prefix}_{name}"] = std.ravel().astype(y.dtype)
 
         add_columns(y_names, y_list, Sigma_list, prefix)
         if y_back_list is not None:
@@ -1039,7 +1052,12 @@ class LRStateSpaceResults(StateSpaceResults):
         points/timestamps.
 
         Columns: `point_id`, `timestamp`, then `y_<hat|pred>_<var>`/
-        `std_<hat|pred>_<var>` for every response variable.
+        `std_<hat|pred>_<var>` for every response variable, in the dtype of
+        the fit. `std_*` is the standard deviation of the latent mean
+        (`sqrt(diag(H P H'))`, plug-in parameters), without the
+        measurement error: for a prediction interval of a new observation,
+        add `s2e` to its square (as `conf_int_y(prediction=True)` does
+        in-sample).
 
         results = results.predict(grid, verbose=True)
         geo = results.to_geo()
@@ -1393,6 +1411,19 @@ class LRStateSpaceResults(StateSpaceResults):
         variance, quadrature is the natural drop-in replacement since it
         reuses the same `mu`/`Sigma` this method already computes.
 
+        What is estimated: `mu` and `Sigma` are the plug-in mean and the
+        state-driven covariance of the latent signal (`Sigma_y_hat`/
+        `Sigma_y_pred`, `H P H'`, without the measurement error `s2e` and
+        with the parameters treated as known). `y_*_back_list` therefore
+        approximates the original-scale mean of the signal, `E[h(signal)]`,
+        not of a new noisy observation (which would add `s2e` to the
+        variance in the second-order term), and `Sigma_*_back_list` its
+        covariance. `residuals_back_list` is `h(y_obs) - E[h(signal)]`.
+
+        A fitted or predicted mean without its covariance (`std=False`)
+        cannot be back-transformed this way: it is left as `None`, with a
+        warning.
+
         Parameters
         ----------
         g_invs : Callable[[float], float] or list/tuple of callables
@@ -1400,6 +1431,11 @@ class LRStateSpaceResults(StateSpaceResults):
             (e.g. `jnp.exp` for a `np.log(y)` response), as a scalar ->
             scalar JAX-traceable function, or a list/tuple of such functions
             matching the number of response variables.
+
+        Returns
+        -------
+        LRStateSpaceResults
+            `self`, with the `*_back_list` attributes set.
         """
 
         # check the len of g_invs and if it matches the number of response variables
@@ -1423,6 +1459,9 @@ class LRStateSpaceResults(StateSpaceResults):
 
             self.y_hat_back_list = y_hat_back_list
             self.Sigma_y_hat_back_list = Sigma_hat_back_list
+        elif self.y_hat_list is not None:
+            warnings.warn("back_transform(): the fitted values have no covariance (Sigma_y_hat), "
+                          "so they are not back-transformed.", RuntimeWarning, stacklevel=2)
 
         if self.y_obs_list is not None:
             self.y_obs_back_list = [
@@ -1444,6 +1483,10 @@ class LRStateSpaceResults(StateSpaceResults):
             
             self.y_pred_back_list = y_pred_back_list
             self.Sigma_y_pred_back_list = Sigma_pred_back_list
+        elif self.y_pred_list is not None:
+            warnings.warn("back_transform(): the predictions have no covariance (predict(std=False)), "
+                          "so they are not back-transformed; run predict(df, std=True).",
+                          RuntimeWarning, stacklevel=2)
 
         return self
 
@@ -1609,7 +1652,7 @@ class LRStateSpaceResults(StateSpaceResults):
             yname=None,
             xname=None,
         )
-        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
+        smry.add_extra_txt(list(self._DIAGNOSTICS_NOTE))
 
         # Parameter names for every table below, padded to a common width so
         # the name column lines up across the (independently-sized) tables

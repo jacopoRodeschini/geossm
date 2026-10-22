@@ -1508,7 +1508,7 @@ class StateSpaceModel:
         tStart = time.time()
 
         x_t, P_t, K, x_t_1, P_t_1, logL = _filter_kernelJAX(
-            y_t,
+            self.y_t,  # in the model dtype (set() casts it), not as passed (F43)
             self.H,
             self.R,
             self.F,

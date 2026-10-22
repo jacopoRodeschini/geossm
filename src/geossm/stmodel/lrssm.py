@@ -846,11 +846,12 @@ class LRStateSpaceModel(StateSpaceModel):
 
         Returns
         -------
-        y_sim : ndarray
+        y_sim : jax.numpy.ndarray
             Simulated observations, stacked across all response variables
             (shape `(p, T)`, `p = sum(pdim)`).
-        x_sim : ndarray
-            Simulated latent state trajectory (shape `(q, T)`).
+        x_sim : jax.numpy.ndarray
+            Simulated latent state trajectory `[x_0, ..., x_T]` (shape
+            `(q, T+1)`, as in `StateSpaceModel.sim`).
         info : dict
             Metadata about the simulation: `formulas`, `y_name`,
             `xbeta_names`, `Xbeta`, `params`, `points`, `T`, `stats`
@@ -1059,7 +1060,9 @@ class LRStateSpaceModel(StateSpaceModel):
             `fit()`/`setup()` calls on the model, and neither the model nor
             its covariance functions are modified). Updated and returned in
             place: the `*_pred` attributes of a previous `predict()` on the
-            same results are replaced.
+            same results are replaced, and its back-transformed predictions
+            (`y_pred_back_list`/`Sigma_y_pred_back_list`) are cleared
+            (rerun `back_transform` for the new prediction).
         verbose : bool, default True
             Verbosity for the observation-grid/design-matrix construction
             logging.
@@ -1072,7 +1075,8 @@ class LRStateSpaceModel(StateSpaceModel):
         -------
         LRStateSpaceResults
             The same `modelresults` object, with `points_pred`,
-            `y_pred`/`Sigma_y_pred` (and their per-variable views
+            `y_pred`/`Sigma_y_pred` (NumPy arrays in the dtype of the fit,
+            and their per-variable views
             `y_pred_list`/`Sigma_y_pred_list`; `Sigma_y_pred` is `None`
             if `std=False`), `tdelta_pred`,
             `timestamps_pred`, and `crs_pred` populated (one entry per
@@ -1148,9 +1152,11 @@ class LRStateSpaceModel(StateSpaceModel):
         H = self._buildH_dense(A, basis)  # dense
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
-        # Predict the response variable (stacked across all variables)
+        # Predict the response variable (stacked across all variables), in
+        # the dtype of the fit (the design matrix is not cast, F45)
+        dtype = np.dtype(self.dtype if state is None else state.dtype)
         y_pred_full, Sigma_y_pred_full, tdelta = self._predict(
-            H, x_T, P_T, Xbeta_predict, beta, std=std
+            H, x_T, P_T, jnp.asarray(Xbeta_predict, dtype=dtype), beta, std=std
         )
 
         # block_p for the *prediction* grid, snapshotted separately from
@@ -1160,9 +1166,14 @@ class LRStateSpaceModel(StateSpaceModel):
         # y_pred_list/Sigma_y_pred_list (see LRStateSpaceResults).
         modelresults.points_pred = points
         modelresults.block_p_pred = block_p
-        modelresults.y_pred = y_pred_full
-        modelresults.Sigma_y_pred = Sigma_y_pred_full
+        # NumPy arrays in the fit's dtype, like the other result arrays (F45)
+        modelresults.y_pred = np.asarray(y_pred_full, dtype=dtype)
+        modelresults.Sigma_y_pred = (None if Sigma_y_pred_full is None
+                                     else np.asarray(Sigma_y_pred_full, dtype=dtype))
         modelresults.tdelta_pred = tdelta
+        # The original-scale predictions belong to the previous prediction (F46)
+        modelresults.y_pred_back_list = None
+        modelresults.Sigma_y_pred_back_list = None
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)
         modelresults.timestamps_pred = [grid.timestamps for grid in gridList]

@@ -738,6 +738,8 @@ class TestResultsMethods:
         cov = res.coverage_probability(alpha=0.05)
         assert 0.0 <= cov <= 1.0
 
+    # The shared fit may carry a predict(std=False) from an earlier test.
+    @pytest.mark.filterwarnings("ignore:back_transform\\(\\). the predictions have no covariance:RuntimeWarning")
     def test_back_transform_identity(self, fitted):
         _, res = fitted
         res.back_transform(lambda v: v)
