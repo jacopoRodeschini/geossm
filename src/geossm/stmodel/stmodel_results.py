@@ -2,7 +2,7 @@ from statsmodels.iolib.summary import Summary
 from typing import Any, Optional
 import numpy as np
 from geossm.stmodel.param import Param, ModelParams, FitOptions
-from geossm.ssm import StateSpaceResults, _safe_sqrt_variance
+from geossm.ssm.statespace_results import StateSpaceResults, _safe_sqrt_variance
 from geossm.ssm.statespace import _highest_matmul_precision
 from types import SimpleNamespace
 from scipy import stats

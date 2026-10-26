@@ -37,31 +37,12 @@ from datetime import date
 from statsmodels.iolib.summary import Summary
 from .statespace_results import StateSpaceResults
 from geossm.utils import _select_device, _to_backend, _on_device, format_info_table, _summary_table_source
+from geossm.utils import _check_x64_for_dtype
 
 
 def _itype_for(dtype):
     """Integer dtype matching the precision of a given float dtype (32<->32, 64<->64)."""
     return jnp.int64 if jnp.dtype(dtype).itemsize == 8 else jnp.int32
-
-
-# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
-_X64_REQUIRED_MSG = (
-    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
-    "program start, before any JAX array is created: "
-    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
-    "geossm does not switch it on itself because it is a process-wide setting."
-)
-
-
-def _check_x64_for_dtype(dtype):
-    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
-
-    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
-    enabled. Enabling it is a process-wide setting, so it is left to the user
-    rather than switched on here (finding F03).
-    """
-    if jnp.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        raise ValueError(_X64_REQUIRED_MSG.format(dtype=jnp.dtype(dtype).name))
 
 
 def _highest_matmul_precision(f):

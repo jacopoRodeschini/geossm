@@ -9,6 +9,8 @@ import platform
 import psutil
 from functools import wraps
 from types import SimpleNamespace
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
 
 
 # %% [Utils] Precision
@@ -31,6 +33,67 @@ def _check_x64_for_dtype(dtype):
     """
     if np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
         raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
+
+
+# %% [Utils] Spatial domain
+
+def _validate_domain(domain):
+    """
+    Validate and normalize the ``domain`` argument shared by
+    :class:`FEMSolver` and :class:`spdeAppoxCov`.
+
+    ``domain`` describes the region(s) of scientific interest, one polygon
+    per region (e.g. one polygon per landmass for a multi-polygon country
+    such as Italy: Sicily, Sardinia, mainland). It accepts a single shapely
+    ``Polygon``, a single ``MultiPolygon``, or a list/tuple mixing either --
+    any ``MultiPolygon`` is expanded into its constituent polygons, so the
+    return value is always a flat tuple of ``Polygon`` objects.
+
+    ``domain`` is used only to classify *mesh* vertices as inner/outer (see
+    ``FEMSolver.isinner``) -- a vertex is inner if it is covered by *any*
+    single polygon in ``domain``, not by their convex hull.
+
+    ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
+    :math:`\\Omega` is implicitly defined by the mesh handed to
+    ``FEMSolver``/``spdeAppoxCov.setup()``. A reasonable default choice is
+    the convex hull of the union of the ``domain`` polygons (extended by an
+    offset to limit boundary effects), computed by ``_domain_hull(domain)``
+    and exposed as the ``domain_hull`` property on both classes. Neither
+    class enforces that the mesh matches this choice -- use
+    ``FEMSolver.covers_domain()`` to check.
+    """
+    if isinstance(domain, (Polygon, MultiPolygon)):
+        domain = [domain]
+    elif not isinstance(domain, (list, tuple)):
+        raise TypeError(
+            "domain must be a shapely Polygon/MultiPolygon, or a list/tuple of them"
+        )
+
+    polygons = []
+    for poly in domain:
+        if isinstance(poly, MultiPolygon):
+            polygons.extend(poly.geoms)
+        elif isinstance(poly, Polygon):
+            polygons.append(poly)
+        else:
+            raise ValueError(
+                "Each domain element must be a shapely Polygon or MultiPolygon, "
+                f"got {type(poly).__name__}"
+            )
+
+    if len(polygons) == 0:
+        raise ValueError("domain must contain at least one Polygon")
+
+    return tuple(polygons)
+
+
+def _domain_hull(domain):
+    """
+    Convex hull of the union of the ``domain`` polygons -- a reasonable
+    default choice of FEM computational domain :math:`\\Omega`, e.g. to pass
+    as ``boundary`` to ``buildMesh2d``. See ``_validate_domain``.
+    """
+    return unary_union(domain).convex_hull
 
 
 # %% [Utils] Select the device for JAX computations

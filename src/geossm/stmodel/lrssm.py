@@ -15,12 +15,8 @@ import numpy as np
 import jax.numpy as jnp
 
 # inmport the state space model
-from geossm.ssm import StateSpaceModel
-from geossm.ssm import _filter_kernelJAX
-from geossm.ssm import _itype_for, _check_x64_for_dtype
-from geossm.ssm.statespace import _highest_matmul_precision
-from geossm.covmodel import spdeAppoxCov
-from geossm.covmodel.covmodels import _validate_domain, _domain_hull
+from geossm.ssm.statespace import StateSpaceModel, _filter_kernelJAX, _itype_for, _highest_matmul_precision
+from geossm.covmodel.covmodels import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
 from jax import jit, lax
@@ -34,14 +30,14 @@ from jax.scipy.linalg import block_diag
 import jax
 from scipy.optimize import minimize
 
-from geossm import DesignMatricesBuilder
-from geossm import block_diag_3D
+from geossm.data_preparation import DesignMatricesBuilder
 from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table, _summary_table_source
+from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull
 
 
 from shapely.geometry import MultiPoint
 from dataclasses import replace
-from geossm.stmodel import Param, FitOptions, ModelParams
+from geossm.stmodel.param import Param, FitOptions, ModelParams
 
 from .stmodel_results import LRStateSpaceResults, FittedState, _read_only_copy
 
