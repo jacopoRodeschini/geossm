@@ -1,10 +1,11 @@
 %% geossm — class diagram of the code AS IMPLEMENTED at test/adding_test @ 091a5db (Section B, 2026-10-22).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
-%% (proposals: architecture_decisions.md in this folder).
+%% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
 %% not owned); --> association (holds a reference); ..> dependency (uses / creates / calls).
 %% Members: + public interface (documented contract), - implementation detail (private by convention).
 %% Multiplicities: "1", "0..1", "1..*" (one per formula / response variable), "0..*".
+
 classDiagram
     direction LR
 
@@ -89,7 +90,6 @@ classDiagram
         -_buildBasis_list() / _buildH_dense() / _buildRF_dense()
         -_spde_mesh_arrays() tuple
         -_getPredictionDesignMatrix(df, builders, domain) tuple
-        -_minf() unused
     }
     class stmodel_kernels {
         <<module functions: stmodel.lrssm>>

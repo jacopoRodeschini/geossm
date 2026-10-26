@@ -494,6 +494,19 @@ class TestStandardErrors:
             assert np.all(np.isnan(res.conf_int()))
 
 
+@pytest.mark.usefixtures("x64")
+@pytest.mark.parametrize("ks", [0.3, 1.0, 3.0])
+def test_scipy_and_jax_marginal_precisions_agree(gdf, mesh, ks):
+    # Q^-1 is built with SciPy for the E-step (spdeAppoxCov.precision) and
+    # with JAX for the ks M-step and the Hessian (_spde_marginal_precision).
+    model = _build_model(gdf, mesh, dtype=jnp.float64)
+    (cov,) = model.cov_function
+    cov.rescale = ks
+    P_scipy = np.asarray(cov.precision(marginal=True))
+    P_jax = np.asarray(_spde_marginal_precision(jnp.array([ks]), *model._spde_mesh_arrays()))
+    np.testing.assert_allclose(P_jax, P_scipy, rtol=0, atol=1e-12 * np.abs(P_scipy).max())
+
+
 def _state_G(model, f, ks, T, S11, S10, S00, ldim):
     """State part of the expected complete-data log-likelihood (no constants):
     -1/2 [-T log|Q^-1| + tr(Q^-1 Omega(f))], Q^-1 the SPDE precision at ks."""

@@ -31,7 +31,6 @@ from datetime import datetime, timezone
 import time
 import warnings
 from jax.scipy.linalg import block_diag
-from scipy.linalg import block_diag as scyp_block_diag
 import jax
 from scipy.optimize import minimize
 
@@ -388,7 +387,7 @@ def _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner):
 def _ks_objective(params, T, Omega, mass_list, stiff_list, perm_list, n_inner):
     """M-step objective for `ks = exp(params)`: the `ks`-dependent part of the
     expected complete-data negative log-likelihood, -T log|Q^-1| + tr(Q^-1 Omega),
-    scaled by 1e-4 (as in `_minf`)."""
+    scaled by 1e-4 to keep its magnitude moderate for the optimiser."""
     ks = jnp.exp(params)  # unconstrained optimisation, ks > 0 by construction
     invQ = _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner)
     logdet_invQ = jnp.linalg.slogdet(invQ)[1]
@@ -1828,19 +1827,6 @@ class LRStateSpaceModel(StateSpaceModel):
             jnp.array([fcov.rescale for fcov in est_covList], dtype=self.dtype)
         )
 
-        # 'Nelder-Mead' (previous approach): derivative-free, ~O(n) simplex
-        # evaluations per iteration, each one rebuilding the FEM precision
-        # matrix from scratch in plain NumPy/SciPy-sparse via `_minf`.
-        # opt = minimize(
-        #     self._minf,
-        #     par0,
-        #     args=(est_covList, T, Omega),
-        #     method="Nelder-Mead",
-        #     tol=1e-3,
-        #     jac=False,
-        #     options={"maxiter": 50},
-        # )
-
         # 'L-BFGS-B' with exact JAX gradients from `ks_value_and_grad`
         # (`_build_ks_value_and_grad`; compiled once per process and mesh
         # size, reused for every fit, EM iteration and evaluation within
@@ -1880,34 +1866,6 @@ class LRStateSpaceModel(StateSpaceModel):
         update_params = self._createParams(beta, s2e, est_f, x0, Sigma0, est_ks, est_A)
 
         return update_params, opt.success, tdelta
-
-    # %[Utils] Argmin problem, JAX  (M-step, rescale)
-    def _minf(self, params, est_covList, T, Omega):
-        """Plain NumPy/SciPy-sparse (derivative-free) version of the M-step's
-        `ks` objective; superseded by the JAX value-and-gradient objective
-        built in `_build_ks_value_and_grad`, kept here for reference."""
-        ks = np.exp(params)  # Stability, add small eps to avoid zeros
-
-        # Compute the precision and the logdetQ (sparse matrix)
-        # invQ = [fcov.precision(rescale=ki) ]
-
-        # Compute the maginal precision matrix
-        invQ = [
-            fcov.precision(rescale=ki, marginal=True)
-            for fcov, ki in zip(est_covList, ks)
-        ]
-
-        # invQ = sp.block_diag(invQ) # dense matrix, not sparse
-        invQ = scyp_block_diag(*invQ)
-
-        # Compute the log determinant of the precision matrix (dense matrix, not sparse)
-        logdet_invQ = np.linalg.slogdet(invQ)[1]
-
-        # Compute the optimization function (negative log-likelihood)
-        fun = -T * logdet_invQ + np.trace(invQ @ Omega)
-
-        # Rescale the optimisation function to avoid numerical issues (e.g., overflow) during optimization
-        return fun / 1e4
 
     def _spde_mesh_arrays(self, cov_function=None, dtype=None, itype=None):
         """

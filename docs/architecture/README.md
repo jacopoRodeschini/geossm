@@ -8,11 +8,11 @@ the user documentation.
 |---|---|
 | [class_diagram.mmd](class_diagram.mmd) | UML class diagram of the code **as implemented**: public interface (`+`) vs implementation details (`-`), inheritance, composition, aggregation, dependencies, multiplicities |
 | [pipeline.mmd](pipeline.mmd) | LRSSM pipeline as implemented: construction → spatial discretisation → EM → results, with open risks |
-| [architecture_decisions.md](architecture_decisions.md) | Principal design decisions, the approved refactoring plan (P1–P9) with its status, and the decisions taken |
+| [Architecture_decisions.md](Architecture_decisions.md) | Principal design decisions, the approved refactoring plan (P1–P9) with its status, and the decisions taken |
 
 Rules:
 
-* The diagrams show only what exists in the code. Planned classes appear only in `architecture_decisions.md`,
+* The diagrams show only what exists in the code. Planned classes appear only in `Architecture_decisions.md`,
   marked as proposals.
 * Every change that alters the class structure updates the as-implemented diagrams in the same commit.
 

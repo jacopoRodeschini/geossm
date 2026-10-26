@@ -26,35 +26,10 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
-from geossm.utils import _summary_table_source
+from geossm.utils import _summary_table_source, _check_x64_for_dtype
 
 
-try:
-    import jax
-    import jax.numpy as jnp
-    JAX_AVAILABLE = True
-except ImportError:
-    JAX_AVAILABLE = False
-
-
-# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
-_X64_REQUIRED_MSG = (
-    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
-    "program start, before any JAX array is created: "
-    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
-    "geossm does not switch it on itself because it is a process-wide setting."
-)
-
-
-def _check_x64_for_dtype(dtype):
-    """Raise if a 64-bit dtype is requested for JAX arrays while x64 is off.
-
-    Mirrors geossm.ssm.statespace._check_x64_for_dtype; duplicated here
-    (rather than imported) to avoid a circular import with geossm.ssm during
-    package initialization.
-    """
-    if JAX_AVAILABLE and np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
+import jax.numpy as jnp
 
 
 class _NAPassthrough(NAAction):
@@ -501,14 +476,6 @@ class DesignMatrices:
         Coerces `dtype`, casts `X`/`y`/`points` to it, validates array
         shapes, and derives `N`, `b`, `T` and `terms`.
         """
-        # Validate backend
-        # if self.backend == "jax" and not JAX_AVAILABLE:
-        #     raise ImportError(
-        #         "JAX is not installed. Install it with `pip install jax` "
-        #         "or use backend='numpy'."
-        #     )
-        # if self.backend not in ("numpy", "jax"):
-        #     raise ValueError(f"backend must be 'numpy' or 'jax', got '{self.backend}'")
 
         # Validate dtype
         try:

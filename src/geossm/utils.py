@@ -11,6 +11,28 @@ from functools import wraps
 from types import SimpleNamespace
 
 
+# %% [Utils] Precision
+
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
+
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
+
+    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
+    enabled. Enabling it is a process-wide setting, so it is left to the user
+    rather than switched on here (finding F03).
+    """
+    if np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
+
+
 # %% [Utils] Select the device for JAX computations
 
 def _select_device(backend):
