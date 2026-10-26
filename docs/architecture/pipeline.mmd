@@ -1,0 +1,69 @@
+%% geossm — LRSSM pipeline AS IMPLEMENTED at test/adding_test @ 091a5db (Section B update, 2026-10-22).
+%% Boxes = steps as implemented; [JIT] = jax.jit-compiled; [host] = NumPy/SciPy/MFEM on CPU.
+%% Red = open risk (finding Fxx of the audit notes); grey dashed = coupling discussed in Section B.
+flowchart TD
+    subgraph INPUT["User input"]
+        GDF["GeoDataFrame (long format: site x time rows,<br/>geometry + CRS + time column)"]
+        FORM["formulas: list[str] (one per response)"]
+        DOM["domain: list[Polygon] (one per formula)"]
+        CFG["JAX configuration by the user:<br/>x64 for float64 (F03), platform, allocator (F04)"]
+    end
+
+    subgraph BUILD["LRStateSpaceModel.__init__  [host]"]
+        CHKD["_checkDomain (shapely validity)"]
+        DMB["DesignMatricesBuilder (per formula): validate, cast,<br/>time window, domain filter"]
+        BLD["build(): balanced panel, patsy, X (N,b,T), y (N,T)"]
+        STACK["stack: y_train (p,T); Xbeta (p,b,T) = block_diag_3D(X_i)"]
+        SUPER["StateSpaceModel.__init__  (inherited matrices = EM channel, F26)"]
+    end
+
+    subgraph MESH["Spatial discretisation (user-owned objects)  [host]"]
+        MSH["buildMesh2d / pygmsh -> meshio.Mesh (planar coordinates, F07)"]
+        SPDE["spdeAppoxCov.setup(mesh, domain) -> FEMSolver:<br/>lumped mass C, stiffness G, inner/outer nodes"]
+        SETUP["model.setup(cov_fun=[...]) -> qdim, block_q, nlat"]
+    end
+
+    subgraph FIT["LRStateSpaceModel.fit(params0, options)"]
+        INIT["initial values [JIT]: OLS beta, s2e, A, f=0.8, x0, Sigma0; ks from mesh box"]
+        BASIS["basis at observation sites via cov.fem_solver._compute_basis [host] (B12)"]
+        KSOBJ["ks value-and-grad: module-level jit, compiled once per mesh size (F20)"]
+        subgraph EM["EM loop (stopping rule F18; best iterate kept)"]
+            MAT["_set_system_matrices: H = A (x) basis; R, F; Q = inv(SciPy marginal precision)<br/>returns invQ; writes cov.rescale (kept by design)"]
+            ESTEP["E-step: smoother(y) on the inherited matrices<br/>(given x0/Sigma0 kept, F01)"]
+            KF["filter [JIT, lax.scan], Woodbury, no jitter (F15), n_t log 2pi (F02)"]
+            RTS["smoother + sufficient statistics [JIT]"]
+            MSTEP["M-step (ECM order, F40): f = tr(Q^-1 S10)/tr(Q^-1 S00) | beta, s2e, A [JIT]<br/>| ks | Omega(new f), L-BFGS-B + JIT grad | x0, Sigma0 = smoothed t=0"]
+            CONV["convergence check on llf"]
+        end
+        FINAL["final E-step at the returned parameters (F08)"]
+        SNAP["FittedState snapshot (frozen): cov objects, builders, points, dtype (F09)"]
+        RES["LRStateSpaceResults(model=self, params, nstats, fitted_state, ...)"]
+    end
+
+    subgraph POST["Post-fit"]
+        HESS["compute_cov_params: jax.hessian of model._observed_logL(fitted_state) [JIT]<br/>negative-definite check (F21)"]
+        PREDICT["results.predict(df) -> model.predict(df, results):<br/>FittedState builders + basis -> mean/cov; stored on results (F45, F46)"]
+        BACK["back_transform (delta method, latent mean, F50)"]
+        GEO["to_geo / to_poly"]
+    end
+
+    GDF --> CHKD --> DMB --> BLD --> STACK --> SUPER
+    FORM --> DMB
+    DOM --> CHKD
+    CFG -.-> SUPER
+    SUPER --> SETUP
+    STACK -->|points| MSH
+    MSH --> SPDE --> SETUP
+    SETUP --> INIT --> BASIS --> KSOBJ --> MAT
+    MAT --> ESTEP --> KF --> RTS --> MSTEP --> CONV
+    CONV -->|continue| MAT
+    CONV -->|stop| FINAL --> SNAP --> RES
+    RES --> HESS
+    RES --> PREDICT --> BACK --> GEO
+    HESS -.->|calls model private method| SUPER
+    PREDICT -.->|calls back into the model| SUPER
+
+    classDef risk fill:#fde2e1,stroke:#c0392b,color:#000;
+    classDef couple stroke-dasharray: 4 3,stroke:#7f8c8d;
+    class SUPER,MSH risk;
+    class BASIS,HESS,PREDICT couple;

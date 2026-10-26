@@ -1,0 +1,263 @@
+%% geossm — class diagram of the code AS IMPLEMENTED at test/adding_test @ 091a5db (Section B, 2026-10-22).
+%% Only existing classes and module-level function groups are shown; nothing here is a proposal
+%% (proposals: architecture_decisions.md in this folder).
+%% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
+%% not owned); --> association (holds a reference); ..> dependency (uses / creates / calls).
+%% Members: + public interface (documented contract), - implementation detail (private by convention).
+%% Multiplicities: "1", "0..1", "1..*" (one per formula / response variable), "0..*".
+classDiagram
+    direction LR
+
+    %% ================= ssm =================
+    class StateSpaceModel {
+        +dtype : numpy.dtype
+        +itype : numpy.dtype
+        +H, R, F, Q, Xbeta, beta : property, setter
+        +x0, Sigma0, y_t : property
+        +p, q, T, b, shape, backend : property
+        +set(H, R, F, Q, x0, Sigma0, y_t, Xbeta, beta) None
+        +filter(y_t, ...) StateSpaceResults
+        +smoother(y_t, ..., light) StateSpaceResults
+        +estimate(y_t, ...) StateSpaceResults
+        +predict(H, x_T, P_T, Xbeta, beta, std) tuple
+        +sim(seed, ..., stats) tuple
+        +computeExpectedValues(x_T, P_T, P_T_1) tuple
+        +summary() Summary
+        -_H, _R, _F, _Q, _x0, _Sigma0, _Xbeta, _beta, _y_t : Array
+        -_update_parameters() / _check_parameters()
+        -_run_filter_kernel(y_t, ...) tuple
+    }
+    class StateSpaceResults {
+        +model : StateSpaceModel
+        +y_obs, y_hat, Sigma_y_hat : ndarray, read-only
+        +x_filtered, P_filtered, x_pred, P_pred, K : ndarray or None
+        +x_smoothed, P_smoothed, P_pred_smoothed : ndarray or None
+        +S11, S10, S00 : ndarray
+        +llf : float
+        +nobs, missing : int
+        +residuals : property
+        +mse(which) / rmse(which)
+        +conf_int_state(which, alpha) tuple
+        +conf_int_y(alpha, prediction) tuple
+        +coverage_probability(alpha, which)
+        +diagnostics() dict
+        +update(**kw) StateSpaceResults
+        +as_dict() dict
+        +summary() Summary
+        -_R, _model_shape, _model_y_name : fit-time snapshot
+        -_after_update(keys)
+    }
+    class ssm_kernels {
+        <<module functions: ssm.statespace>>
+        _filter_kernelJAX() jit, lax.scan
+        _smoother_kernelJAX() jit, lax.scan
+        _compute_expected_values_kernelJAX() jit
+        _compute_predict_mean_kernel_JAX() jit
+        _compute_predict_sigma_kernel_JAX() jit
+        _sim_kernelJAX()
+        _highest_matmul_precision() decorator
+    }
+    class KeyStream {
+        -_key : PRNGKey
+        +next(num) PRNGKey
+    }
+
+    %% ================= stmodel =================
+    class LRStateSpaceModel {
+        +df : GeoDataFrame, copy
+        +formulas : list~str~
+        +domain : list~Polygon~
+        +verbose : bool
+        +builders : list~DesignMatricesBuilder~
+        +gridList : list~DesignMatrices~
+        +points, pdim, block_p, nvar, y_name, xbeta_names
+        +y_train : p x T, y_train_list, Xbeta_list
+        +qdim, block_q, nlat : set by setup
+        +cov_function, domain_hull, shape : property
+        +setup(cov_fun) self
+        +fit(params0, options) LRStateSpaceResults
+        +predict(df, modelresults, verbose, std) LRStateSpaceResults
+        +sim(formulas, seed, params, verbose, stats) tuple
+        +getDesignMatrix(df) tuple
+        +BuildDesignMatrix(df, formulas) tuple
+        +summary() Summary
+        -_cov_matern : list~spdeAppoxCov~
+        -_get_fitted_state() FittedState
+        -_set_system_matrices(params, basis, pdim, qdim) tuple
+        -_E_step(y) / _M_step(..., invQ, f_fixed)
+        -_observed_logL(y_obs, Xbeta, x0, Sigma0, fitted_state) callable
+        -_buildBasis_list() / _buildH_dense() / _buildRF_dense()
+        -_spde_mesh_arrays() tuple
+        -_getPredictionDesignMatrix(df, builders, domain) tuple
+        -_minf() unused
+    }
+    class stmodel_kernels {
+        <<module functions: stmodel.lrssm>>
+        _compute_inital_values_jax_kernel() jit
+        _compute_beta_jax_kernel() jit
+        _compute_s2e_jax_kernel() jit
+        _compute_A2_jax_kernel() jit
+        _spde_marginal_precision(ks, ...)
+        _ks_objective(params, T, Omega, ...)
+        _ks_value_and_grad() jit, value_and_grad
+    }
+    class LRStateSpaceResults {
+        +params : ModelParams
+        +nstats : list~dict~
+        +options : FitOptions
+        +convergence : bool
+        +termination : str
+        +iterations : int
+        +llf_path : list~float~, entry 0 is nan
+        +block_p, points_hat, timestamps_hat, crs_hat
+        +y_pred, Sigma_y_pred : ndarray, set by predict
+        +points_pred, block_p_pred, timestamps_pred, crs_pred
+        +y_hat_back_list, y_pred_back_list, ... : set by back_transform
+        +y_hat_list, y_obs_list, residuals_list, y_pred_list : property
+        +n_params, df_resid, aic, bic : property
+        +theta_hat, bse, bse_vector, tvalues, pvalues : property
+        +compute_cov_params() Array
+        +conf_int(alpha) ndarray
+        +predict(df, verbose, std) self
+        +back_transform(g_invs) self
+        +to_geo() dict
+        +to_poly(polys, back_transform, std) GeoDataFrame
+        +summary(alpha) Summary
+        -_fitted_state : FittedState
+        -_hessian, _cov_params, _n_params, ... : lazy caches
+        -_compute_hessian() / _inference_params()
+        -_delta_method() / _areal_weights()
+    }
+    class FittedState {
+        <<frozen dataclass, internal>>
+        +cov_function : tuple~spdeAppoxCov~
+        +points : tuple~ndarray~, read-only
+        +pdim : ndarray, read-only
+        +nvar, nlat : int
+        +y_name, xbeta_names : tuple
+        +builders : tuple~DesignMatricesBuilder~
+        +domain : tuple~Polygon~
+        +dtype, itype : numpy.dtype
+    }
+    class ModelParams {
+        <<dataclass, JAX pytree>>
+        +beta, s2e, f, A, ks, x0, Sigma0 : Param
+        +as_dict() / free_params() / copy()
+    }
+    class Param {
+        <<dataclass, JAX pytree>>
+        +name : str
+        +value : Array or None
+        +fixed : bool
+        +bse : Array or None
+        +set(v) / freeze() / unfreeze() Param
+    }
+    class _StaticArray {
+        <<internal: hashable pytree aux data>>
+    }
+    class FitOptions {
+        <<dataclass, mutable>>
+        +max_iter = 20
+        +tol_relat = 1e-3
+        +verbose = True
+        +force_iter = False
+        +std = True
+    }
+
+    %% ================= data_preparation =================
+    class DesignMatricesBuilder {
+        +formula : str
+        +crs, box, delta, unit, time_col_name, domain, dtype
+        +design_matrices : DesignMatrices, set by build
+        +mask : ndarray, set by build_predict
+        +build() DesignMatrices
+        +build_predict(df, verbose, domain, include_response) DesignMatrices
+        -formula_info : _FormulaInfo
+    }
+    class DesignMatrices {
+        <<dataclass>>
+        +X : jax Array N x b x T
+        +y : jax Array N x T or None
+        +points : ndarray N x 2
+        +y_name : str
+        +x_names, timestamps, crs, delta, unit
+        +N, b, T
+        +astype(dtype) self
+        +summary() Summary
+    }
+    class _FormulaInfo {
+        <<dataclass, internal>>
+    }
+    class _NAPassthrough {
+        <<internal: patsy NAAction>>
+    }
+
+    %% ================= covmodel =================
+    class Matern {
+        <<external: gstools.covmodel>>
+    }
+    class spdeAppoxCov {
+        +rescale : float, written by fit and precision
+        +nu, var : inherited, not used by precision (F05)
+        +fem_solver : FEMSolver, property
+        +meshIO, domain, domain_hull, sigma2k, emp_range : property
+        +setup(mesh_obj, domain, stats) self
+        +precision(rescale, marginal) sparse or ndarray
+        +distance(points)
+        +covers_domain()
+        +summary() Summary
+        -_fem_solver : FEMSolver
+        -_schur_marginal_precision()
+    }
+    class FEMSolver {
+        +mass, stiff : scipy.sparse
+        +inner : bool ndarray
+        +n_inner_points, box, vertex, ... : 30 properties
+        +getBasis(points)
+        +isinner(points) / covers_domain()
+        +plot_mesh(...)
+        +compute_stats() / summary()
+        -_mesh : mfem.Mesh
+        -_compute_basis(points)
+    }
+
+    %% ================= relationships =================
+    StateSpaceModel <|-- LRStateSpaceModel : inherits, not substitutable (F26, Section C)
+    StateSpaceResults <|-- LRStateSpaceResults
+    Matern <|-- spdeAppoxCov
+
+    StateSpaceModel ..> ssm_kernels : calls
+    StateSpaceModel ..> StateSpaceResults : creates
+    StateSpaceModel ..> KeyStream : sim
+    StateSpaceResults --> "0..1" StateSpaceModel : model, summary labels read live
+
+    LRStateSpaceModel "1" *-- "1..*" DesignMatricesBuilder : builders
+    LRStateSpaceModel "1" *-- "1..*" DesignMatrices : gridList
+    LRStateSpaceModel "1" o-- "0..*" spdeAppoxCov : _cov_matern, user-owned
+    LRStateSpaceModel ..> FEMSolver : reads mass, stiff, inner, box, _compute_basis
+    LRStateSpaceModel ..> stmodel_kernels : EM M-step, ks optimisation
+    LRStateSpaceModel ..> ssm_kernels : _filter_kernelJAX in _observed_logL
+    LRStateSpaceModel ..> FittedState : creates in fit
+    LRStateSpaceModel ..> LRStateSpaceResults : creates in fit, writes in predict
+    LRStateSpaceModel ..> StateSpaceModel : sim builds a separate instance
+    LRStateSpaceModel ..> ModelParams : creates, consumes
+    LRStateSpaceModel ..> FitOptions : consumes
+
+    LRStateSpaceResults --> "1" LRStateSpaceModel : model, calls _observed_logL, _log, predict
+    LRStateSpaceResults "1" *-- "1" FittedState : _fitted_state
+    LRStateSpaceResults "1" *-- "1" ModelParams : params
+    LRStateSpaceResults --> "0..1" FitOptions : options
+    FittedState o-- "1..*" spdeAppoxCov : cov_function, by reference
+    FittedState o-- "1..*" DesignMatricesBuilder : builders, by reference
+    ModelParams "1" *-- "7" Param
+    Param ..> _StaticArray : fixed values as aux data
+
+    DesignMatricesBuilder ..> DesignMatrices : creates
+    DesignMatricesBuilder --> "0..1" DesignMatrices : design_matrices
+    DesignMatricesBuilder *-- "1" _FormulaInfo
+    DesignMatricesBuilder ..> _NAPassthrough : patsy NA action
+
+    spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
+
+    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; fit-time snapshot via FittedState; predict and back_transform store into and return self"
+    note for StateSpaceModel "filter/smoother mutate the matrices via set(); LRStateSpaceModel uses them as the E-step channel"
