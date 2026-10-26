@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED at test/adding_test @ 091a5db (Section B, 2026-10-22).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P3, 2026-10-26).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -200,7 +200,11 @@ classDiagram
         +rescale : float, written by fit and precision
         +nu, var : inherited, not used by precision (F05)
         +fem_solver : FEMSolver, property
+        +n_latent : int, property
+        +box : property
         +meshIO, domain, domain_hull, sigma2k, emp_range : property
+        +latent_basis(points) csr_matrix
+        +fem_arrays() tuple
         +setup(mesh_obj, domain, stats) self
         +precision(rescale, marginal) sparse or ndarray
         +distance(points)
@@ -234,7 +238,7 @@ classDiagram
     LRStateSpaceModel "1" *-- "1..*" DesignMatricesBuilder : builders
     LRStateSpaceModel "1" *-- "1..*" DesignMatrices : gridList
     LRStateSpaceModel "1" o-- "0..*" spdeAppoxCov : _cov_matern, user-owned
-    LRStateSpaceModel ..> FEMSolver : reads mass, stiff, inner, box, _compute_basis
+    LRStateSpaceModel ..> spdeAppoxCov : n_latent, box, latent_basis, fem_arrays
     LRStateSpaceModel ..> stmodel_kernels : EM M-step, ks optimisation
     LRStateSpaceModel ..> ssm_kernels : _filter_kernelJAX in _observed_logL
     LRStateSpaceModel ..> FittedState : creates in fit

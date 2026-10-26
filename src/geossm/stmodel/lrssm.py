@@ -20,7 +20,6 @@ from geossm.covmodel.covmodels import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
 from jax import jit, lax
-import scipy.sparse as sp
 from functools import partial
 
 from datetime import datetime, timezone
@@ -624,7 +623,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Latent dimension (rank), one block per latent factor -- needed by
         # sim()/fit() regardless of how _cov_matern was built.
-        self.qdim = jnp.array([cov.fem_solver.n_inner_points for cov in self._cov_matern], dtype=self.itype)
+        self.qdim = jnp.array([cov.n_latent for cov in self._cov_matern], dtype=self.itype)
         self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
         self._log(f"Set the latent dimension (q) to {self.block_q[-1]}")
 
@@ -782,7 +781,7 @@ class LRStateSpaceModel(StateSpaceModel):
             `p` : total number of observed sites stacked across all response
             variables (from `y_train`/`Xbeta`, whichever is set).
             `q` : total latent dimension (rank), i.e. the sum of
-            `cov.fem_solver.n_inner_points` over every latent factor set in
+            `cov.n_latent` over every latent factor set in
             `setup`. `T` : number of time steps. Any entry is `None` if the
             corresponding data (`y_train`/`Xbeta`, `_cov_matern`) has not
             been set yet.
@@ -798,7 +797,7 @@ class LRStateSpaceModel(StateSpaceModel):
             p, b, T = self.Xbeta.shape
         
         if self._cov_matern is not None and len(self._cov_matern) > 0:
-            q = sum([cov.fem_solver.n_inner_points for cov in self._cov_matern])
+            q = sum([cov.n_latent for cov in self._cov_matern])
 
         return p, q, T
 
@@ -1376,7 +1375,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # Get latent dimension (i.e. the rank)
         qdim = jnp.array(
-            [cov.fem_solver.n_inner_points for cov in self.cov_function],
+            [cov.n_latent for cov in self.cov_function],
             dtype=self.itype,
         )
         block_q = jnp.hstack((0, jnp.cumsum(qdim)))
@@ -1873,12 +1872,11 @@ class LRStateSpaceModel(StateSpaceModel):
         cov_function = self.cov_function if cov_function is None else cov_function
         dtype = self.dtype if dtype is None else dtype
         itype = self.itype if itype is None else itype
-        mass_list = [jnp.array(cov.fem_solver.mass.toarray(), dtype=dtype) for cov in cov_function]
-        stiff_list = [jnp.array(cov.fem_solver.stiff.toarray(), dtype=dtype) for cov in cov_function]
-        perm_list = []
-        n_inner = []
+        mass_list, stiff_list, perm_list, n_inner = [], [], [], []
         for cov in cov_function:
-            inner_mask = np.asarray(cov.fem_solver.inner, dtype=bool)
+            mass, stiff, inner_mask = cov.fem_arrays()
+            mass_list.append(jnp.array(mass.toarray(), dtype=dtype))
+            stiff_list.append(jnp.array(stiff.toarray(), dtype=dtype))
             perm_list.append(jnp.asarray(np.concatenate([np.where(inner_mask)[0], np.where(~inner_mask)[0]]),
                                          dtype=itype))
             n_inner.append(int(inner_mask.sum()))
@@ -1919,7 +1917,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Block sizes as NumPy arrays: they must stay concrete (jnp.repeat
         # sizes) when the closure is traced under jit (F21).
         pdim = np.asarray(state.pdim)
-        qdim = np.asarray([cov.fem_solver.n_inner_points for cov in state.cov_function])
+        qdim = np.asarray([cov.n_latent for cov in state.cov_function])
 
         observed_logL = partial(
             self._compute_observed_logL,
@@ -1988,7 +1986,7 @@ class LRStateSpaceModel(StateSpaceModel):
         )
 
         # Compute the initial values of the range parameters (i.e. the rescale parameter of the Matern covariance function) using the distance between the points of the latent domain (i.e. the inner points of the mesh)
-        box = [cv.fem_solver.box for cv in self.cov_function]
+        box = [cv.box for cv in self.cov_function]
         # The box is NumPy float64: cast the extents to the model dtype first
         # (as JAX did implicitly with x64 off), so that the result does not
         # depend on the global x64 flag (F03)
@@ -2128,7 +2126,7 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         Evaluate each latent factor's FEM basis functions at each response
         variable's observation sites, row-normalised so each site's basis
-        row sums to 1 (see `_normalize_rows_sparse`). Returns a nested list
+        row sums to 1 (see `spdeAppoxCov.latent_basis`). Returns a nested list
         `basis[p][q]` (dense array, shape `(n_p, q_inner)`), one entry per
         (response variable, latent factor) pair, used by `_buildH_dense` to
         build the measurement matrix `H = A ⊗ basis` (loading-weighted).
@@ -2136,30 +2134,11 @@ class LRStateSpaceModel(StateSpaceModel):
         nvar = len(points)
         nlat = len(hmesh)
 
-        basis = []  # list of the rows x columns matrices
-        notfindInx = []
+        dtype = self.dtype if dtype is None else dtype
+        basis = []  # basis[p][q], shape (n_p, q_inner)
         for p in range(nvar):
-            hrow = []
-            notfindInxRow = []
-            for q in range(nlat):
-                # This function works iif the cov class is already defined
-                # Compute basis between vertex and gird_obs point [m x q]
-                countij, notfindInxij, hij = hmesh[q].fem_solver._compute_basis(
-                    points[p]
-                )
-
-                hij = self._normalize_rows_sparse(hij[:, hmesh[q].fem_solver.inner])
-                notfindInxRow.append(notfindInxij)
-
-                # conver into coo format
-                hij = jnp.asarray(hij.toarray(), dtype=self.dtype if dtype is None else dtype)
-
-                # Append the sub matrices
-                hrow.append(hij)
-
-            notfindInx.append(notfindInxij)  # append not find index
-            basis.append(hrow)  # [n_i x qsize ]
-
+            basis.append([jnp.asarray(hmesh[q].latent_basis(points[p]).toarray(), dtype=dtype)
+                          for q in range(nlat)])
         return basis
 
     def _buildRF_dense(self, s2error, flatent, pdim, qdim, dtype=None):
@@ -2208,31 +2187,6 @@ class LRStateSpaceModel(StateSpaceModel):
             Phi.append(hrow)
 
         return jnp.block(Phi)
-
-    def _normalize_rows_sparse(self, sparse_mat):
-        """
-        Given a SciPy sparse matrix sparse_mat (CSR, CSC, etc.), return a new sparse matrix
-        where each row sums to 1. Rows that originally sum to 0 will remain all zeros.
-        """
-        if not sp.isspmatrix(sparse_mat):
-            raise ValueError("Input must be a SciPy sparse matrix.")
-
-        # 1. Compute the sum of each row. The result is a (n_rows, 1) matrix, so we flatten to 1D.
-        row_sums = np.array(sparse_mat.sum(axis=1)).ravel()  # shape = (n_rows,)
-
-        # 2. Build an array of inverse sums, with zeros where row_sums == 0
-        inv_sums = np.zeros_like(row_sums, dtype=np.float64)
-        nonzero_mask = row_sums != 0
-        inv_sums[nonzero_mask] = 1.0 / row_sums[nonzero_mask]
-
-        # 3. Create a sparse diagonal matrix D so that D[i, i] = 1 / row_sums[i]
-        #    Rows with row_sums == 0 get D[i,i] = 0, so that D @ row_i = 0 row.
-        D = sp.diags(inv_sums)
-
-        # 4. Multiply D @ sparse_mat; each row_i of the result is row_i of sparse_mat divided by row_sums[i].
-        normalized = D.dot(sparse_mat)
-
-        return normalized
 
     # fix H row functions
     def _setDomain(self, polygon):

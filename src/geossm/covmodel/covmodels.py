@@ -106,6 +106,16 @@ def meshio_to_mfem_mesh(meshio_mesh):
     return mfem_mesh
 
 
+def _normalize_rows(H):
+    """Scale each row of the sparse matrix `H` to sum to 1 (rows summing to 0
+    stay zero)."""
+    row_sums = np.asarray(H.sum(axis=1)).ravel()
+    inv = np.zeros_like(row_sums, dtype=np.float64)
+    nonzero = row_sums != 0
+    inv[nonzero] = 1.0 / row_sums[nonzero]
+    return sp.diags(inv).dot(H)
+
+
 # % FEM solver class
 class FEMSolver:
     r"""Low-level finite-element engine behind `spdeAppoxCov`.
@@ -1219,6 +1229,54 @@ class spdeAppoxCov(Matern):
         if self._fem_solver is None:
             raise RuntimeError("FEM solver not initialized. Call setup() first.")
         return self._fem_solver
+
+    # Interface used by the spatio-temporal model (LRStateSpaceModel): the
+    # latent field of this covariance object lives on the inner mesh nodes.
+
+    @property
+    def n_latent(self):
+        """int: Number of latent nodes (inner mesh vertices), i.e. the size of
+        this covariance function's block of the latent state."""
+        return int(self.fem_solver.n_inner_points)
+
+    @property
+    def box(self):
+        """Mesh bounding box ``[minx, miny, maxx, maxy]`` (see
+        `FEMSolver.box`)."""
+        return self.fem_solver.box
+
+    def latent_basis(self, points):
+        """FEM basis functions at `points`, restricted to the latent (inner)
+        nodes and normalised so that each row sums to 1.
+
+        Parameters
+        ----------
+        points : (n, 2) array_like
+            Sites in the mesh coordinates.
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix, shape (n, n_latent)
+            Row `i` maps the latent field to site `i`. A row is all zeros
+            if the site lies in no mesh element, or only in elements whose
+            nodes are all outer (see `FEMSolver.getBasis`).
+        """
+        fem = self.fem_solver
+        _, _, H = fem.getBasis(points)
+        return _normalize_rows(H[:, fem.inner])
+
+    def fem_arrays(self):
+        """Finite-element inputs of the SPDE precision.
+
+        Returns
+        -------
+        mass, stiff : scipy.sparse matrix, shape (n_nodes, n_nodes)
+            Lumped mass matrix C and stiffness matrix G over all mesh nodes.
+        inner : ndarray of bool, shape (n_nodes,)
+            True for the latent (inner) nodes.
+        """
+        fem = self.fem_solver
+        return fem.mass, fem.stiff, np.asarray(fem.inner, dtype=bool)
 
     def __str__(self):
         # Get the string representation from the parent class

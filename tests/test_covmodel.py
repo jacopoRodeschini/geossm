@@ -114,3 +114,48 @@ class TestSpdePrecision:
         restored = pickle.loads(pickle.dumps(cov))
         np.testing.assert_array_equal(restored.fem_solver.inner, cov.fem_solver.inner)
         np.testing.assert_allclose(restored.precision(marginal=True), cov.precision(marginal=True))
+
+
+class TestLatentInterface:
+    """Interface between spdeAppoxCov and the spatio-temporal model (Section B,
+    P3): what the model used to read from `cov.fem_solver` directly."""
+
+    def test_latent_basis_matches_the_fem_basis_on_inner_nodes(self, cov):
+        rng = np.random.default_rng(0)
+        pts = np.vstack([rng.uniform(0, 10, size=(30, 2)), [[50.0, 50.0]]])  # last site: outside the mesh
+        B = cov.latent_basis(pts)
+        _, _, H = cov.fem_solver.getBasis(pts)
+        H_inner = H[:, cov.fem_solver.inner].toarray()
+        # previous model code: multiply each row by the inverse of its sum
+        sums = H_inner.sum(axis=1)
+        inv = np.divide(1.0, sums, out=np.zeros_like(sums), where=sums != 0)
+        expected = inv[:, None] * H_inner
+        assert sp.issparse(B) and B.shape == (len(pts), cov.n_latent)
+        np.testing.assert_array_equal(B.toarray(), expected)
+        # Rows sum to 1 where the site has inner support, else 0: outside the
+        # mesh (last site), or in an element whose nodes are all outer, as for
+        # sites just inside the domain boundary (F51).
+        has_inner = H_inner.sum(axis=1) > 0
+        np.testing.assert_allclose(B.toarray().sum(axis=1), has_inner.astype(float))
+        assert not has_inner[-1] and has_inner[:-1].sum() >= 25
+
+    def test_fem_arrays_and_sizes(self, cov):
+        mass, stiff, inner = cov.fem_arrays()
+        fem = cov.fem_solver
+        assert mass is fem.mass and stiff is fem.stiff
+        assert inner.dtype == bool and np.array_equal(inner, fem.inner)
+        assert cov.n_latent == int(inner.sum()) and isinstance(cov.n_latent, int)
+        assert cov.box == fem.box
+
+    def test_interface_requires_setup(self):
+        cov = spdeAppoxCov(latlon=False, verbose=False)
+        for get in (lambda: cov.n_latent, lambda: cov.box, cov.fem_arrays, lambda: cov.latent_basis([[0.0, 0.0]])):
+            with pytest.raises(RuntimeError, match="setup"):
+                get()
+
+
+def test_model_uses_only_the_latent_interface():
+    # LRStateSpaceModel no longer reaches into FEMSolver (Section B, P3).
+    import inspect
+    from geossm.stmodel import lrssm
+    assert "fem_solver" not in inspect.getsource(lrssm)
