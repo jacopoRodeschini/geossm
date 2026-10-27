@@ -45,6 +45,7 @@ classDiagram
         +as_dict() dict
         +summary() Summary
         -_R, _model_shape, _model_y_name, _model_label : snapshot, no model reference
+        -_DELEGATED_FIELDS : names a subclass keeps elsewhere
         -_after_update(keys)
     }
     class ssm_kernels {
@@ -120,6 +121,7 @@ classDiagram
         +to_geo() dict
         +to_poly(polys, back_transform, std) GeoDataFrame
         +fitted_state : FittedState, read-only property
+        +x_smoothed, P_smoothed, P_pred_smoothed, S11, S10, S00 : property, views of fitted_state
         +summary(alpha) Summary
         -_fitted_state : FittedState
         -_hessian, _cov_params, _n_params, ... : lazy caches
@@ -136,9 +138,11 @@ classDiagram
         +builders : tuple~DesignMatricesBuilder~
         +domain : tuple~Polygon~
         +dtype, itype : numpy.dtype
+        +x_smoothed, P_smoothed : ndarray, read-only
+        +P_pred_smoothed : ndarray or None
+        +S11, S10, S00 : ndarray, read-only
         +verbose : bool
         +params : ModelParams
-        +x_smoothed, P_smoothed : ndarray, read-only
         +timestamps_hat : tuple~ndarray~
     }
     class fitted_functions {
@@ -256,7 +260,7 @@ classDiagram
     LRStateSpaceModel ..> spdeAppoxCov : n_latent, box, latent_basis, fem_arrays
     LRStateSpaceModel ..> stmodel_kernels : EM M-step, ks optimisation
     LRStateSpaceModel ..> ssm_kernels : _filter_kernelJAX in _observed_logL
-    LRStateSpaceModel ..> FittedState : creates in fit
+    LRStateSpaceModel ..> FittedState : creates in fit, with the smoothed state and sufficient statistics
     LRStateSpaceModel ..> LRStateSpaceResults : creates in fit
     LRStateSpaceModel ..> fitted_functions : basis, H, R, F, likelihood
     LRStateSpaceModel ..> design_functions : training and prediction design
@@ -284,5 +288,5 @@ classDiagram
 
     spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
 
-    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference, everything after fit computed from fitted_state; predict and back_transform store into and return self"
+    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference; the latent state is held by fitted_state and exposed as properties; predict and back_transform store into and return self"
     note for StateSpaceModel "filter/smoother mutate the matrices via set(); LRStateSpaceModel uses them as the E-step channel"

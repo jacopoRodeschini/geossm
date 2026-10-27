@@ -29,21 +29,38 @@ def _read_only_copy(a):
     return a
 
 
+def _read_only_array(a, dtype):
+    """`a` as a read-only NumPy array of `dtype` (`None` passes through);
+    an array already in that form is returned as is, not copied."""
+    if a is None:
+        return None
+    a = np.asarray(a, dtype=dtype)
+    if a.flags.writeable:
+        a = a.copy()
+        a.setflags(write=False)
+    return a
+
+
 @dataclass(frozen=True)
 class FittedState:
     """
-    State of an `LRStateSpaceModel` at the end of a `fit()`: its configuration
-    and the estimates. Everything computed after fitting -- the Hessian,
-    predictions at new locations, names in summaries -- is a function of it,
-    so a later `fit()`/`setup()`/`set()` on the model does not change those
-    results (findings F09, F27). Available as `LRStateSpaceResults.fitted_state`.
+    State of an `LRStateSpaceModel` at the end of a `fit()`: its configuration,
+    the estimated parameters, and the estimated latent state (smoothed means
+    and covariances, sufficient statistics). Everything computed after
+    fitting -- the Hessian, predictions at new locations, names in summaries
+    -- is a function of it, so a later `fit()`/`setup()`/`set()` on the model
+    does not change those results (findings F09, F27). Available as
+    `LRStateSpaceResults.fitted_state`; the results expose the state arrays
+    (`x_smoothed`, `P_smoothed`, `S11`, ...) from it.
 
-    Built by `LRStateSpaceModel._get_fitted_state()` (configuration) and
-    completed with the estimates by `LRStateSpaceResults`. Fields cannot be
-    reassigned; sequences are tuples and arrays are read-only (the estimate
-    arrays are the results' own arrays, not copies). The covariance
-    functions, formula builders and domains are kept by reference: they are
-    configuration and must not be modified (e.g. re-`setup()`) after fitting.
+    Built by `LRStateSpaceModel._get_fitted_state()` (configuration and
+    latent state) and completed with `params` and the training timestamps by
+    `LRStateSpaceResults`. Fields cannot be reassigned; sequences are tuples
+    and the arrays are read-only NumPy arrays in `dtype` (converted on
+    construction; an array already in that form is shared, not copied). The
+    covariance functions, formula builders and domains are kept by
+    reference: they are configuration and must not be modified (e.g.
+    re-`setup()`) after fitting.
 
     Attributes
     ----------
@@ -66,18 +83,22 @@ class FittedState:
         Measurement-equation domain of each response variable.
     dtype, itype : numpy.dtype
         Float and integer dtype of the model.
+    x_smoothed, P_smoothed : numpy.ndarray or None
+        Smoothed state means ``(q, T+1)`` and covariances ``(q, q, T+1)``;
+        index 0 is the initial state.
     verbose : bool
         Verbosity of the model at the end of the fit (progress messages of
         `predict`).
     params : ModelParams or None
         Estimated parameters (the results' `params`).
-    x_smoothed, P_smoothed : numpy.ndarray or None
-        Smoothed states ``(q, T+1)`` and their covariances ``(q, q, T+1)``;
-        index 0 is the initial state.
+    P_pred_smoothed : numpy.ndarray or None
+        Smoothed lag-one state covariances (`None` when not computed).
+    S11, S10, S00 : numpy.ndarray or None
+        EM sufficient statistics ``(q, q)`` at the returned parameters.
     timestamps_hat : tuple of numpy.ndarray or None
         Training timestamps of each response variable.
 
-    The last four are `None` in a configuration-only snapshot (used
+    The estimate fields are `None` in a configuration-only snapshot (used
     internally by the model).
     """
 
@@ -92,16 +113,23 @@ class FittedState:
     domain: tuple
     dtype: np.dtype
     itype: np.dtype
-    x_smoothed: np.ndarray
-    P_smoothed: np.ndarray
+    x_smoothed: Optional[np.ndarray]
+    P_smoothed: Optional[np.ndarray]
     verbose: bool = False
     params: Optional[Any] = None
-    P_pred_smoothed : Optional[np.ndarray] = None,
+    P_pred_smoothed: Optional[np.ndarray] = None
     # sufficient statistics
     S11: Optional[np.ndarray] = None
     S10: Optional[np.ndarray] = None
     S00: Optional[np.ndarray] = None
     timestamps_hat: Optional[tuple] = None
+
+    #: Latent-state arrays held here and exposed by `LRStateSpaceResults`.
+    STATE_FIELDS = ("x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00")
+
+    def __post_init__(self):
+        for name in self.STATE_FIELDS:
+            object.__setattr__(self, name, _read_only_array(getattr(self, name), self.dtype))
 
 
 

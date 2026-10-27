@@ -116,6 +116,15 @@ def _equalize_row_widths(text: str) -> str:
 # %% Results class for LR State Space Model
 
 
+def _state_property(name, doc):
+    """Read-only view of the `FittedState` field `name` (see
+    `LRStateSpaceResults.fitted_state`)."""
+    def get(self):
+        state = getattr(self, "_fitted_state", None)
+        return None if state is None else getattr(state, name)
+    return property(get, doc=doc)
+
+
 class LRStateSpaceResults(StateSpaceResults):
     """
     Results of fitting a :class:`geossm.stmodel.LRStateSpaceModel`.
@@ -233,9 +242,15 @@ class LRStateSpaceResults(StateSpaceResults):
             response variable, snapshotted for `to_geo()`.
         **kwargs
             Forwarded to `StateSpaceResults.__init__` (e.g. `y_hat`,
-            `Sigma_y_hat`, `x_smoothed`, `P_smoothed`, `S11`/`S10`/`S00`,
-            `llf`, ...).
+            `Sigma_y_hat`, `llf`, ...). The latent state (`x_smoothed`,
+            `P_smoothed`, `P_pred_smoothed`, `S11`/`S10`/`S00`) is normally in
+            `fitted_state`; arrays passed here replace its fields.
         """
+        # The latent state is held by the fitted state, not here (see
+        # `_DELEGATED_FIELDS`); arrays passed directly are added to it below.
+        delegated = {k: kwargs.pop(k) for k in list(kwargs)
+                     if k in self._DELEGATED_FIELDS and kwargs[k] is not None}
+
         # Initialize base class
         super().__init__(model=model, **kwargs)
 
@@ -270,6 +285,8 @@ class LRStateSpaceResults(StateSpaceResults):
         self.timestamps_hat = timestamps_hat
         self.crs_hat = crs_hat
         self._complete_fitted_state()
+        if delegated and self._fitted_state is not None:
+            self._fitted_state = replace(self._fitted_state, **delegated)
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -422,7 +439,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bse_params = None
         if "params" in keys and self.params is not None:
             self._process_params()
-        if keys & {"params", "x_smoothed", "P_smoothed", "timestamps_hat"}:
+        if keys & {"params", "timestamps_hat"}:
             self._complete_fitted_state()
         if "nstats" in keys and self.nstats is not None and "llf" not in keys:
             self.llf = None  # taken from the new nstats
@@ -433,30 +450,47 @@ class LRStateSpaceResults(StateSpaceResults):
         return getattr(self._fitted_state, name)
 
     def _complete_fitted_state(self):
-        """Add the estimates of these results (`params`, smoothed states,
-        training timestamps; the same read-only arrays, not copies) to the
-        configuration snapshot of the model."""
+        """Add `params` (the same object) and the training timestamps
+        (read-only copies) of these results to the fitted state built by
+        the model, which already holds the latent state."""
         state = getattr(self, "_fitted_state", None)
         if state is None:
             return
         self._fitted_state = replace(
             state,
             params=self.params,
-            x_smoothed=self.x_smoothed,
-            P_smoothed=self.P_smoothed,
             timestamps_hat=(None if self.timestamps_hat is None
                             else tuple(_read_only_copy(t) for t in self.timestamps_hat)),
         )
+
+    def _update_delegated(self, values):
+        """`update` of latent-state fields: replaced in the fitted state
+        (converted to read-only arrays in the results' dtype)."""
+        self._fitted_state = replace(self._fitted_state, **values)
 
     @property
     def fitted_state(self):
         """FittedState: State of the model at the end of the fit -- the
         configuration (covariance functions, formula builders, sites, block
         sizes, names, dtypes) and the estimates (`params`, smoothed states
-        `x_smoothed` and covariances `P_smoothed`, training timestamps).
-        Read-only. The Hessian, predictions and summaries of these results
-        are computed from it."""
+        `x_smoothed` and covariances `P_smoothed`, lag-one covariances,
+        sufficient statistics `S11`/`S10`/`S00`, training timestamps).
+        Read-only. The latent-state attributes of these results are views of
+        it, and the Hessian, predictions and summaries are computed from it."""
         return self._fitted_state
+
+    # The latent state lives in the fitted state; these read-only properties
+    # keep the results' attribute API (`results.x_smoothed`, ...).
+    _DELEGATED_FIELDS = frozenset(FittedState.STATE_FIELDS)
+    x_smoothed = _state_property(
+        "x_smoothed", "ndarray, shape (q, T+1): Smoothed state means (index 0: initial state); see `fitted_state`.")
+    P_smoothed = _state_property(
+        "P_smoothed", "ndarray, shape (q, q, T+1): Smoothed state covariances; see `fitted_state`.")
+    P_pred_smoothed = _state_property(
+        "P_pred_smoothed", "ndarray or None: Smoothed lag-one state covariances; see `fitted_state`.")
+    S11 = _state_property("S11", "ndarray, shape (q, q): EM sufficient statistic S11; see `fitted_state`.")
+    S10 = _state_property("S10", "ndarray, shape (q, q): EM sufficient statistic S10; see `fitted_state`.")
+    S00 = _state_property("S00", "ndarray, shape (q, q): EM sufficient statistic S00; see `fitted_state`.")
 
     @property
     def _y_names(self):

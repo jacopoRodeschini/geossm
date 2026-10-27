@@ -119,6 +119,10 @@ class StateSpaceResults:
         value/sufficient-statistics computation, and their sum.
     """
 
+    #: Array attributes a subclass keeps elsewhere and exposes as properties
+    #: (`LRStateSpaceResults`: the latent state, held by its `FittedState`).
+    _DELEGATED_FIELDS = frozenset()
+
     def __init__(
         self,
         model: Optional[Any],
@@ -277,14 +281,13 @@ class StateSpaceResults:
         self.x_pred = x_pred
         self.P_pred = P_pred
         self.K = K
-        self.x_smoothed = x_smoothed
-        self.P_smoothed = P_smoothed
-        self.P_pred_smoothed = P_pred_smoothed
-
-        # ---- sufficient stats ----
-        self.S11 = S11
-        self.S10 = S10
-        self.S00 = S00
+        # ---- smoothed states and sufficient stats (kept elsewhere by a
+        # subclass for the names in `_DELEGATED_FIELDS`) ----
+        for name, value in (("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
+                            ("P_pred_smoothed", P_pred_smoothed),
+                            ("S11", S11), ("S10", S10), ("S00", S00)):
+            if name not in self._DELEGATED_FIELDS:
+                setattr(self, name, value)
 
         # ---- metadata ----
         self.today = date.today()
@@ -353,6 +356,8 @@ class StateSpaceResults:
             "S10",
             "S00",
         ]:
+            if attr in self._DELEGATED_FIELDS:
+                continue
             value = getattr(self, attr, None)
             if value is not None:
                 setattr(self, attr, np.asarray(value, dtype=self.dtype))
@@ -382,7 +387,7 @@ class StateSpaceResults:
         AttributeError
             If a key in ``kwargs`` is not an existing public attribute.
         """
-        public = {k for k in self.__dict__ if not k.startswith("_")}
+        public = {k for k in self.__dict__ if not k.startswith("_")} | self._DELEGATED_FIELDS
         for key in kwargs:
             if key not in public:
                 raise AttributeError(
@@ -390,10 +395,18 @@ class StateSpaceResults:
                 )
 
         new = copy.copy(self)
-        new.__dict__.update(kwargs)
+        new.__dict__.update({k: v for k, v in kwargs.items() if k not in self._DELEGATED_FIELDS})
+        delegated = {k: v for k, v in kwargs.items() if k in self._DELEGATED_FIELDS}
+        if delegated:
+            new._update_delegated(delegated)
         new.to_numpy()
         new._after_update(set(kwargs))
         return new
+
+    def _update_delegated(self, values):
+        """Replace attributes listed in `_DELEGATED_FIELDS` (called by
+        `update` on the copy); implemented by subclasses that delegate."""
+        raise NotImplementedError
 
     def _after_update(self, keys):
         """Recompute or clear what depends on the attributes in `keys`

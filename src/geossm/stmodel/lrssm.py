@@ -1037,18 +1037,16 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_hat_full, Sigma_y_hat_full, tdelta
 
-    def _get_fitted_state(self, x_smoothed,
-            P_smoothed,
-            P_pred_smoothed,
-            S11,
-            S10,
-            S00,
-            ):
+    def _get_fitted_state(self, x_smoothed=None, P_smoothed=None, P_pred_smoothed=None,
+                          S11=None, S10=None, S00=None):
         """
-        The model configuration that fitted results need later (a frozen
-        `FittedState`, F09): covariance functions, observation points,
-        block sizes, names, formula builders, domains, dtypes and verbosity.
-        The estimates are added by `LRStateSpaceResults`.
+        The state that fitted results need later (a frozen `FittedState`,
+        F09): the model configuration (covariance functions, observation
+        points, block sizes, names, formula builders, domains, dtypes,
+        verbosity) and, from `fit`, the estimated latent state (smoothed
+        means and covariances, sufficient statistics). Without them it is a
+        configuration-only snapshot (used by `_observed_logL`). `params` and
+        the training timestamps are added by `LRStateSpaceResults`.
         """
         return FittedState(
             cov_function=tuple(self.cov_function),
@@ -1477,7 +1475,8 @@ class LRStateSpaceModel(StateSpaceModel):
             convergence=converged,
             termination=termination,
             llf=logL_cur,
-            fitted_state=self._get_fitted_state(x_T, P_T, None, S11, S10, S00),
+            fitted_state=self._get_fitted_state(x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=None,
+                                                S11=S11, S10=S10, S00=S00),
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)

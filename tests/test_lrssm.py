@@ -719,6 +719,32 @@ class TestFittedState:
         new = res.update(params=res.params.copy())
         assert new.fitted_state.params is new.params and res.fitted_state.params is res.params
 
+    def test_state_attributes_are_views_of_the_fitted_state(self, gdf, mesh):
+        # The latent state is held only by the fitted state; the results'
+        # attributes read it (same arrays), read-only, in the model dtype.
+        model, _, res = self._fit(gdf, mesh, max_iter=2)
+        q, T = model.shape[1], model.shape[2]
+        shapes = {"x_smoothed": (q, T + 1), "P_smoothed": (q, q, T + 1), "S11": (q, q), "S10": (q, q), "S00": (q, q)}
+        for name in FittedState.STATE_FIELDS:
+            assert name not in vars(res), name
+            assert getattr(res, name) is getattr(res.fitted_state, name), name
+            with pytest.raises(AttributeError):
+                setattr(res, name, None)
+        for name, shape in shapes.items():
+            value = getattr(res, name)
+            assert type(value) is np.ndarray and value.shape == shape, name
+            assert value.dtype == np.dtype(model.dtype) and not value.flags.writeable, name
+        assert res.P_pred_smoothed is None
+
+    def test_update_of_the_state_goes_to_the_fitted_state(self, gdf, mesh):
+        _, _, res = self._fit(gdf, mesh, max_iter=2)
+        x_new = np.zeros_like(res.x_smoothed, dtype=np.float64)
+        new = res.update(x_smoothed=x_new)
+        assert new.x_smoothed is new.fitted_state.x_smoothed
+        assert new.x_smoothed.dtype == res.x_smoothed.dtype and not new.x_smoothed.flags.writeable
+        np.testing.assert_array_equal(new.x_smoothed, 0.0)
+        assert np.any(res.x_smoothed != 0.0) and new.P_smoothed is res.P_smoothed
+
     @pytest.mark.filterwarnings("ignore:The Hessian of the log-likelihood is not negative definite")
     def test_results_do_not_reference_the_model(self, gdf, mesh):
         # P1: results keep no reference to the model; the Hessian, predict,

@@ -258,3 +258,5 @@ def test_results_do_not_reference_the_model(problem, lr_fit):
     assert not hasattr(res, "model") and not hasattr(lr, "model")
     (line,) = [ln for ln in str(res.summary()).splitlines() if ln.startswith("Model name:")]
     assert "StateSpaceModel" in line
+    # Plain StateSpaceModel results have no FittedState: they store the state.
+    assert {"x_smoothed", "P_smoothed", "S11", "S10", "S00"} <= set(vars(res))
