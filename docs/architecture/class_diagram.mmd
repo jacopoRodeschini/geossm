@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P7, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P6, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -92,7 +92,7 @@ classDiagram
         -_predict(H, x_T, P_T, Xbeta, beta, std) tuple
     }
     class stmodel_kernels {
-        <<module functions: stmodel.lrssm>>
+        <<module functions: stmodel._em>>
         _compute_inital_values_jax_kernel() jit
         _compute_beta_jax_kernel() jit
         _compute_s2e_jax_kernel() jit
