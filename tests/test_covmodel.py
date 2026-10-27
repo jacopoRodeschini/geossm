@@ -100,6 +100,16 @@ class TestSpdePrecision:
         b = cov.precision(rescale=1.5).toarray()
         assert not np.allclose(a, b)
 
+    def test_precision_with_rescale_does_not_change_the_object(self, cov):
+        # Section D: precision(rescale=x) used to set cov.rescale = x on an
+        # object shared with fitted results.
+        r0 = cov.rescale
+        Q = cov.precision(rescale=2.0 * r0, marginal=True)
+        assert cov.rescale == r0
+        cov.rescale = 2.0 * r0
+        np.testing.assert_array_equal(Q, cov.precision(marginal=True))
+        cov.rescale = r0
+
     @pytest.mark.parametrize("kw", [{"nu": 2.5}, {"nu": 0.5}, {"var": 2.0}], ids=["nu2.5", "nu0.5", "var2"])
     def test_unsupported_nu_and_var_are_rejected(self, kw):
         # F05 / Section C: precision() is the nu = 1, unit-variance SPDE; other
@@ -117,8 +127,8 @@ class TestSpdePrecision:
         r = np.deg2rad(h) * cov.geo_scale if latlon else h
         np.testing.assert_allclose(cov.covariance(r), 2.0 * h * kv(1, 2.0 * h), rtol=1e-6)
 
-    @known_bug("F06", "unpickling re-runs setup() without the domain (all vertices inner)")
     def test_pickle_roundtrip_preserves_model(self, cov):
+        # F06: unpickling re-ran setup() without the domain (all vertices inner).
         restored = pickle.loads(pickle.dumps(cov))
         np.testing.assert_array_equal(restored.fem_solver.inner, cov.fem_solver.inner)
         np.testing.assert_allclose(restored.precision(marginal=True), cov.precision(marginal=True))

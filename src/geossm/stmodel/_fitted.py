@@ -51,8 +51,8 @@ class FittedState:
     fitting -- the Hessian, predictions at new locations, names in summaries
     -- is a function of it, so a later `fit()`/`setup()`/`set()` on the model
     does not change those results (findings F09, F27). Available as
-    `LRStateSpaceResults.fitted_state`; the results expose the state arrays
-    (`x_smoothed`, `P_smoothed`, `S11`, ...) from it.
+    `LRStateSpaceResults.fitted_state`; the results expose its arrays
+    (`y_hat`, `x_smoothed`, `P_smoothed`, `S11`, ...) as read-only properties.
 
     Built by `LRStateSpaceModel._get_fitted_state()` (configuration and
     latent state) and completed with `params` and the training timestamps by
@@ -98,6 +98,20 @@ class FittedState:
         EM sufficient statistics ``(q, q)`` at the returned parameters.
     timestamps_hat : tuple of numpy.ndarray or None
         Training timestamps of each response variable.
+    cov_sizes : tuple of (int, int) or None
+        Latent and total mesh nodes of each covariance function at fit time,
+        to detect a covariance object re-`setup()` after the fit (see
+        `check_cov_functions`).
+    y_obs, Xbeta : numpy.ndarray or None
+        Training observations ``(p, T)`` (with ``NaN`` for missing values) and
+        design matrix ``(p, b, T)``.
+    y_hat, Sigma_y_hat : numpy.ndarray or None
+        In-sample fitted mean ``(p, T)`` and state-driven covariance
+        ``(p, p, T)`` (`None` when `fit` ran with ``std=False``).
+
+    A `FittedState` can be pickled, but without the formula builders (patsy
+    does not support pickling): an unpickled state supports inference and
+    summaries, not prediction at new locations.
 
     The estimate fields are `None` in a configuration-only snapshot (used
     internally by the model).
@@ -124,14 +138,53 @@ class FittedState:
     S10: Optional[np.ndarray] = None
     S00: Optional[np.ndarray] = None
     timestamps_hat: Optional[tuple] = None
+    cov_sizes: Optional[tuple] = None
+    # training data and fitted values
+    y_obs: Optional[np.ndarray] = None
+    Xbeta: Optional[np.ndarray] = None
+    y_hat: Optional[np.ndarray] = None
+    Sigma_y_hat: Optional[np.ndarray] = None
 
-    #: Latent-state arrays held here and exposed by `LRStateSpaceResults`.
-    STATE_FIELDS = ("x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00")
+    #: Arrays of the fit held here and exposed by `LRStateSpaceResults`.
+    ARRAY_FIELDS = ("x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00",
+                    "y_obs", "Xbeta", "y_hat", "Sigma_y_hat")
 
     def __post_init__(self):
-        for name in self.STATE_FIELDS:
+        for name in self.ARRAY_FIELDS:
             object.__setattr__(self, name, _read_only_array(getattr(self, name), self.dtype))
 
+    def __getstate__(self):
+        # The formula builders hold patsy design infos, which patsy refuses to
+        # pickle: a pickled fitted state has none, so it cannot predict at new
+        # locations (F52); everything else is kept.
+        state = dict(self.__dict__)
+        state["builders"] = None
+        return state
+
+    def __setstate__(self, state):
+        for name, value in state.items():
+            object.__setattr__(self, name, value)
+
+
+
+def cov_sizes(cov_function):
+    """(latent nodes, mesh nodes) of each covariance function."""
+    return tuple((int(cov.n_latent), int(cov.fem_arrays()[0].shape[0])) for cov in cov_function)
+
+
+def check_cov_functions(state):
+    """Raise if a covariance function of the fit has been re-`setup()` with a
+    different mesh since the fit (the fitted state refers to it by
+    reference)."""
+    if state.cov_sizes is None:
+        return
+    now = cov_sizes(state.cov_function)
+    if now != state.cov_sizes:
+        raise ValueError(
+            f"A covariance function of this fit was set up again after fit() (latent and mesh nodes "
+            f"{state.cov_sizes} -> {now}): the fitted state no longer matches it. Refit the model, or use "
+            f"a separate covariance object for each mesh."
+        )
 
 
 # %% Spatial system matrices
@@ -250,6 +303,7 @@ def observed_loglik(state, y_obs, Xbeta, x0, Sigma0):
     differentiated by `LRStateSpaceResults._compute_hessian` with
     `jax.hessian`.
     """
+    check_cov_functions(state)
     basis = latent_basis(state.cov_function, state.points, state.dtype)
     # Block sizes as NumPy arrays: they must stay concrete (jnp.repeat sizes)
     # when the closure is traced under jit (F21).
@@ -282,6 +336,12 @@ def predict_from_fit(state, df, verbose=True, cov="full", log=None):
     """
     if cov not in ("full", "diag", None):
         raise ValueError("cov must be 'full', 'diag' or None")
+    check_cov_functions(state)
+    if state.builders is None:
+        raise ValueError(
+            "These results have no formula builders (they were restored from a pickle, which cannot "
+            "store patsy design infos): predict at new locations before saving, or refit the model."
+        )
     log = log or (lambda msg: None)
     log("Predicting response variable...")
 

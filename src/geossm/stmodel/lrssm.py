@@ -36,7 +36,7 @@ from geossm.stmodel.param import Param, FitOptions, ModelParams
 
 from .stmodel_results import LRStateSpaceResults
 from geossm.stmodel._fitted import (FittedState, _read_only_copy, _spde_marginal_precision, mesh_arrays,
-                                    latent_basis, build_H, build_RF, observed_loglik)
+                                    latent_basis, build_H, build_RF, observed_loglik, cov_sizes)
 from geossm.stmodel._design import prediction_design, split_design, stack_design
 from geossm.stmodel._em import (_compute_inital_values_jax_kernel, _compute_beta_jax_kernel,
                                _compute_s2e_jax_kernel, _compute_A2_jax_kernel, _ks_value_and_grad)
@@ -249,6 +249,8 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log(f"{len(self._domain)} valid domain(s) set.")
 
         self._cov_matern = None
+        # Latent dimensions: set by setup() (None before, Section D)
+        self.qdim = self.block_q = self.nlat = None
 
         # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
@@ -738,6 +740,7 @@ class LRStateSpaceModel(StateSpaceModel):
             dtype=np.dtype(self.dtype),
             itype=np.dtype(self.itype),
             verbose=bool(self.verbose),
+            cov_sizes=cov_sizes(self.cov_function),
             x_smoothed=x_smoothed,
             P_smoothed=P_smoothed,
             P_pred_smoothed=P_pred_smoothed,

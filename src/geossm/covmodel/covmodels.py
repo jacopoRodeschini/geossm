@@ -105,6 +105,12 @@ def meshio_to_mfem_mesh(meshio_mesh):
     return mfem_mesh
 
 
+def _sigma2k(k):
+    """Marginal variance of the nu = 1 SPDE field for kappa `k` (see
+    `spdeAppoxCov.sigma2k`)."""
+    return sc.special.gamma(1) / (sc.special.gamma(2) * 4 * np.pi * (k**2))
+
+
 def _normalize_rows(H):
     """Scale each row of the sparse matrix `H` to sum to 1 (rows summing to 0
     stay zero)."""
@@ -1327,10 +1333,9 @@ class spdeAppoxCov(Matern):
 
         """
 
-        # update the geo parameter
-        # self._update_geo_parameter(rescale)
-        if rescale is not None:
-            self.rescale = rescale  # Rescale factor (k)
+        # kappa for this computation only: `self.rescale` is not changed (it
+        # is shared with fitted results, Section D)
+        k = self.rescale if rescale is None else rescale
 
         effective_dofs = self.fem_solver.effective_dofs
 
@@ -1343,11 +1348,10 @@ class spdeAppoxCov(Matern):
         )
 
         # Compute the K matrix
-        k = self.rescale
         K = (k**2) * self.fem_solver.mass + self.fem_solver.stiff
 
         # Compute the precision matrix of the process with unit marginal variance
-        Q = self.sigma2k * (K @ Cinv @ K)
+        Q = _sigma2k(k) * (K @ Cinv @ K)
 
         return Q
 
@@ -1359,8 +1363,8 @@ class spdeAppoxCov(Matern):
         Parameters
         ----------
         rescale : float, optional
-            If given, updates `self.rescale` (the SPDE kappa) before
-            computing the precision matrix.
+            SPDE kappa to compute the precision matrix with (default:
+            `self.rescale`). `self.rescale` is not changed.
         marginal : bool, optional
             If True, return the precision matrix marginalised (via the
             Schur complement, see `_schur_marginal_precision`) onto the
@@ -1456,9 +1460,7 @@ class spdeAppoxCov(Matern):
         (:math:`\\kappa`) alone. Used by `_compute_precision_spde` as the
         scalar multiplier of the precision matrix.
         """
-        return sc.special.gamma(1) / (
-            sc.special.gamma(2) * 4 * np.pi * (self.rescale**2)
-        )
+        return _sigma2k(self.rescale)
 
     @property
     def domain(self):
@@ -1579,17 +1581,23 @@ class spdeAppoxCov(Matern):
         for attr in excluded_attrs:
             if attr in state:
                 del state[attr]
+        # The FEM solver is rebuilt on unpickling: keep the domain it was
+        # built with, which defines the inner (latent) nodes (F06)
+        fem = self.__dict__.get("_fem_solver")
+        state["_pickled_domain"] = None if fem is None else fem.domain
         return state
 
     def __setstate__(self, state):
+        domain = state.pop("_pickled_domain", None)
         # Restore the object's state
         self.__dict__.update(state)
         # Reinitialize the attributes that were excluded from pickling
         self._mesh = None
+        self._fem_solver = None
 
         # Rebuild the mesh and finite element solver if meshIO is available
         if self._meshIO is not None:
-            self.setup(self._meshIO)
+            self.setup(self._meshIO, domain=None if domain is None else list(domain))
 
     
 

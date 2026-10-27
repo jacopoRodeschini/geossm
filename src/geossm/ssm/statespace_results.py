@@ -249,15 +249,12 @@ class StateSpaceResults:
             self.params_names = getattr(model, "params_names", None)
             self.params_dim = getattr(model, "params_dim", None)
             self.yname = getattr(model, "yname", None)
-            self.y_obs = getattr(model, "y_t", None)  # observed data (from model)
-            self.Xbeta = getattr(model, "Xbeta", None)
+            # observed data and regressors default to the model's
+            y_obs = getattr(model, "y_t", None) if y_obs is None else y_obs
+            Xbeta = getattr(model, "Xbeta", None) if Xbeta is None else Xbeta
 
-        if y_obs is not None:
-            self.y_obs = y_obs
         if yname is not None:
             self.yname = yname
-        if Xbeta is not None:
-            self.Xbeta = Xbeta
         if params is not None:
             self.params = params
         if params_names is not None:
@@ -273,17 +270,17 @@ class StateSpaceResults:
         self.time_total = self.time_filter + self.time_smoother + self.time_expectation
 
         # ---- arrays ----
-        self.y_hat = y_hat
-        self.Sigma_y_hat = Sigma_y_hat
         self.tdelta_hat = tdelta_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
         self.x_pred = x_pred
         self.P_pred = P_pred
         self.K = K
-        # ---- smoothed states and sufficient stats (kept elsewhere by a
-        # subclass for the names in `_DELEGATED_FIELDS`) ----
-        for name, value in (("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
+        # ---- data, fitted values, smoothed states and sufficient stats (kept
+        # elsewhere by a subclass for the names in `_DELEGATED_FIELDS`) ----
+        for name, value in (("y_obs", y_obs), ("Xbeta", Xbeta), ("y_hat", y_hat),
+                            ("Sigma_y_hat", Sigma_y_hat),
+                            ("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
                             ("P_pred_smoothed", P_pred_smoothed),
                             ("S11", S11), ("S10", S10), ("S00", S00)):
             if name not in self._DELEGATED_FIELDS:
@@ -980,6 +977,22 @@ class StateSpaceResults:
         return f"{self.__class__.__name__}\n" + format_info_table(
             gen_top_left + gen_top_right, indent=2
         )
+
+    def __getstate__(self):
+        # The JAX device is not picklable: store its platform (F52)
+        state = self.__dict__.copy()
+        state["_backend"] = getattr(self._backend, "platform", "auto")
+        return state
+
+    def __setstate__(self, state):
+        state = dict(state)
+        platform = state.pop("_backend", "auto")
+        self.__dict__.update(state)
+        # Fall back to 'auto' if the platform (e.g. 'gpu') is not available here
+        try:
+            self._backend = _select_device(platform)
+        except ValueError:
+            self._backend = _select_device("auto")
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict snapshot of the main results.

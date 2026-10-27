@@ -233,26 +233,30 @@ class LRStateSpaceResults(StateSpaceResults):
             `predict` and the summary.
         block_p : array-like, optional
             Cumulative index boundaries splitting the stacked training
-            arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
-            the base class) into one block per response variable
-            (`block_p[i]:block_p[i+1]` selects variable `i`); snapshotted
-            here rather than read live off `model.block_p`, which is
-            mutable. Drives the `y_hat_list`/`Sigma_y_hat_list`/
-            `y_obs_list`/`residuals_list` properties (see
-            `geossm.utils.split_by_block`).
+            arrays into one block per response variable; used only without
+            a `fitted_state` (otherwise `block_p` is derived from
+            `fitted_state.pdim`).
         points_hat, timestamps_hat, crs_hat : list / list / CRS, optional
             Training grid (sites, timestamps) and CRS, one entry per
-            response variable, snapshotted for `to_geo()`.
+            response variable. The timestamps are recorded in the fitted
+            state; `points_hat`/`timestamps_hat` are then read-only views of
+            it (used as given only without a `fitted_state`).
         **kwargs
             Forwarded to `StateSpaceResults.__init__` (e.g. `y_hat`,
             `Sigma_y_hat`, `llf`, ...). The latent state (`x_smoothed`,
             `P_smoothed`, `P_pred_smoothed`, `S11`/`S10`/`S00`) is normally in
             `fitted_state`; arrays passed here replace its fields.
         """
-        # The latent state is held by the fitted state, not here (see
-        # `_DELEGATED_FIELDS`); arrays passed directly are added to it below.
+        # The arrays of the fit are held by the fitted state, not here (see
+        # `_DELEGATED_FIELDS`): those passed (and the model's training data,
+        # by default) are added to it below.
+        if model is not None:
+            for name, attr in (("y_obs", "y_t"), ("Xbeta", "Xbeta")):
+                if kwargs.get(name) is None:
+                    kwargs[name] = getattr(model, attr, None)
         delegated = {k: kwargs.pop(k) for k in list(kwargs)
                      if k in self._DELEGATED_FIELDS and kwargs[k] is not None}
+        kwargs.setdefault("y_hat", None)  # required by the base class; held by the fitted state
 
         # Initialize base class
         super().__init__(model=model, **kwargs)
@@ -280,16 +284,17 @@ class LRStateSpaceResults(StateSpaceResults):
         # go stale for this results object the next time `fit()`/`setup()`
         # runs on this model instance. Drives the `y_hat_list`/
         # `Sigma_y_hat_list`/`y_obs_list`/`residuals_list` properties below.
-        self.block_p = block_p
+        self._block_p = block_p  # fallback without a fitted state; see `block_p`
 
         # Training grid (one entry per response variable), snapshotted for
         # the same reason as block_p above -- used by `.to_geo()`.
-        self.points_hat = points_hat
-        self.timestamps_hat = timestamps_hat
+        self._points_hat = points_hat
+        self._timestamps_hat = timestamps_hat
         self.crs_hat = crs_hat
         self._complete_fitted_state()
         if delegated and self._fitted_state is not None:
             self._fitted_state = replace(self._fitted_state, **delegated)
+        self._set_observation_counts()  # y_obs is now available from the fitted state
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -425,7 +430,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bse_params = None
         if "params" in keys and self.params is not None:
             self._process_params()
-        if keys & {"params", "timestamps_hat"}:
+        if "params" in keys:
             self._complete_fitted_state()
         if "nstats" in keys and self.nstats is not None and "llf" not in keys:
             self.llf = None  # taken from the new nstats
@@ -445,8 +450,8 @@ class LRStateSpaceResults(StateSpaceResults):
         self._fitted_state = replace(
             state,
             params=self.params,
-            timestamps_hat=(None if self.timestamps_hat is None
-                            else tuple(_read_only_copy(t) for t in self.timestamps_hat)),
+            timestamps_hat=(state.timestamps_hat if self._timestamps_hat is None
+                            else tuple(_read_only_copy(t) for t in self._timestamps_hat)),
         )
 
     def _update_delegated(self, values):
@@ -465,9 +470,44 @@ class LRStateSpaceResults(StateSpaceResults):
         it, and the Hessian, predictions and summaries are computed from it."""
         return self._fitted_state
 
-    # The latent state lives in the fitted state; these read-only properties
-    # keep the results' attribute API (`results.x_smoothed`, ...).
-    _DELEGATED_FIELDS = frozenset(FittedState.STATE_FIELDS)
+    # The training grid lives in the fitted state (one source, read-only).
+
+    @property
+    def points_hat(self):
+        """list of ndarray: Training sites of each response variable
+        (read-only, from `fitted_state.points`)."""
+        state = self._fitted_state
+        return self._points_hat if state is None else list(state.points)
+
+    @property
+    def timestamps_hat(self):
+        """list of ndarray: Training timestamps of each response variable
+        (read-only, from `fitted_state.timestamps_hat`)."""
+        state = self._fitted_state
+        if state is None or state.timestamps_hat is None:
+            return self._timestamps_hat
+        return list(state.timestamps_hat)
+
+    @property
+    def block_p(self):
+        """ndarray: Row boundaries of each response variable in the stacked
+        training arrays (`block_p[i]:block_p[i+1]` selects variable `i`),
+        derived from `fitted_state.pdim`; read-only NumPy array."""
+        state = self._fitted_state
+        if state is None:
+            return self._block_p
+        bp = np.concatenate([[0], np.cumsum(np.asarray(state.pdim))])
+        bp.setflags(write=False)
+        return bp
+
+    # The arrays of the fit live in the fitted state; these read-only
+    # properties keep the results' attribute API (`results.y_hat`, ...).
+    _DELEGATED_FIELDS = frozenset(FittedState.ARRAY_FIELDS)
+    y_obs = _state_property("y_obs", "ndarray, shape (p, T): Training observations (NaN where missing); see `fitted_state`.")
+    Xbeta = _state_property("Xbeta", "ndarray, shape (p, b, T): Training design matrix; see `fitted_state`.")
+    y_hat = _state_property("y_hat", "ndarray, shape (p, T): In-sample fitted mean; see `fitted_state`.")
+    Sigma_y_hat = _state_property(
+        "Sigma_y_hat", "ndarray, shape (p, p, T), or None: In-sample state-driven covariance; see `fitted_state`.")
     x_smoothed = _state_property(
         "x_smoothed", "ndarray, shape (q, T+1): Smoothed state means (index 0: initial state); see `fitted_state`.")
     P_smoothed = _state_property(

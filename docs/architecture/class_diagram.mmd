@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (updated with Section C, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (updated with Section D, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -108,7 +108,8 @@ classDiagram
         +termination : str
         +iterations : int
         +llf_path : list~float~, entry 0 is nan
-        +block_p, points_hat, timestamps_hat, crs_hat
+        +block_p, points_hat, timestamps_hat : property, views of fitted_state
+        +crs_hat
         +y_hat_back_list, y_obs_back_list, ... : set by back_transform
         +y_hat_list, y_obs_list, residuals_list : property
         +n_params, df_resid, aic, bic : property
@@ -120,6 +121,7 @@ classDiagram
         +back_transform(g_invs) self
         +to_geo() GeoDataFrame
         +fitted_state : FittedState, read-only property
+        +y_obs, Xbeta, y_hat, Sigma_y_hat : property, views of fitted_state
         +x_smoothed, P_smoothed, P_pred_smoothed, S11, S10, S00 : property, views of fitted_state
         +summary(alpha) Summary
         -_fitted_state : FittedState
@@ -161,6 +163,9 @@ classDiagram
         +verbose : bool
         +params : ModelParams
         +timestamps_hat : tuple~ndarray~
+        +cov_sizes : tuple, checked before use
+        +y_obs, Xbeta, y_hat, Sigma_y_hat : ndarray, read-only
+        +ARRAY_FIELDS : the arrays exposed by the results
     }
     class fitted_functions {
         <<module functions: stmodel._fitted>>
@@ -243,7 +248,7 @@ classDiagram
         +latent_basis(points) csr_matrix
         +fem_arrays() tuple
         +setup(mesh_obj, domain, stats) self
-        +precision(rescale, marginal) sparse or ndarray
+        +precision(rescale, marginal) sparse or ndarray, no side effect
         +distance(points)
         +covers_domain()
         +summary() Summary

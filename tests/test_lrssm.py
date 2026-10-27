@@ -771,7 +771,7 @@ class TestFittedState:
         model, _, res = self._fit(gdf, mesh, max_iter=2)
         q, T = model.shape[1], model.shape[2]
         shapes = {"x_smoothed": (q, T + 1), "P_smoothed": (q, q, T + 1), "S11": (q, q), "S10": (q, q), "S00": (q, q)}
-        for name in FittedState.STATE_FIELDS:
+        for name in FittedState.ARRAY_FIELDS:
             assert name not in vars(res), name
             assert getattr(res, name) is getattr(res.fitted_state, name), name
             with pytest.raises(AttributeError):
@@ -810,6 +810,59 @@ class TestFittedState:
         pred.back_transform(lambda v: v)
         assert len(res.to_geo()) == len(res.y_hat.ravel()) and len(pred.to_geo()) == pred.y_pred.size
         assert "LRStateSpaceModel" in str(res.summary())
+
+
+class TestStateOwnership:
+    """Section D: one source for the training grid (the fitted state),
+    detection of shared covariance objects set up again, predictable
+    attributes before setup()."""
+
+    def test_training_grid_comes_from_the_fitted_state(self, fitted):
+        model, res = fitted
+        state = res.fitted_state
+        for name in ("points_hat", "timestamps_hat", "block_p"):
+            assert name not in vars(res), name
+        assert res.points_hat[0] is state.points[0] and res.timestamps_hat[0] is state.timestamps_hat[0]
+        assert not res.points_hat[0].flags.writeable and not res.block_p.flags.writeable
+        assert type(res.block_p) is np.ndarray
+        np.testing.assert_array_equal(res.block_p, np.asarray(model.block_p))
+
+    def test_covariance_set_up_again_is_detected(self, gdf, mesh):
+        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN])
+        model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu").setup([cov])
+        res = model.fit(options=_options(max_iter=1))
+        cov.setup(make_square_mesh(mesh_size=1.0), domain=[DOMAIN])  # another mesh, same object
+        with pytest.raises(ValueError, match="set up again after fit"):
+            res.predict(gdf.drop(columns="y"), verbose=False)
+        with pytest.raises(ValueError, match="set up again after fit"):
+            res.compute_cov_params()
+
+    @pytest.mark.filterwarnings("ignore:The Hessian of the log-likelihood is not negative definite")
+    def test_results_can_be_pickled_without_prediction(self, gdf, mesh):
+        # F52: results were not picklable (JAX device; patsy design infos in
+        # the formula builders). They pickle without the builders: inference
+        # and summaries work, prediction at new locations raises clearly.
+        import pickle
+        model = _build_model(gdf, mesh)
+        res = model.fit(options=_options(max_iter=1))
+        newdata = gdf.drop(columns="y")
+        pred = res.get_prediction(newdata, verbose=False)
+        loaded = pickle.loads(pickle.dumps(res))
+        assert loaded.llf == res.llf and loaded.nobs == res.nobs
+        for name in ("y_hat", "y_obs", "x_smoothed", "P_smoothed", "S11"):
+            np.testing.assert_array_equal(getattr(loaded, name), getattr(res, name), err_msg=name)
+        assert loaded.fitted_state.builders is None and str(loaded.summary())
+        np.testing.assert_allclose(np.asarray(loaded._compute_hessian()[0]), np.asarray(res._compute_hessian()[0]),
+                                   rtol=1e-5)
+        with pytest.raises(ValueError, match="restored from a pickle"):
+            loaded.predict(newdata, verbose=False)
+        pred2 = pickle.loads(pickle.dumps(pred))
+        np.testing.assert_array_equal(pred2.y_pred, pred.y_pred)
+        assert len(pred2.to_geo()) == pred.y_pred.size
+
+    def test_latent_dimensions_are_none_before_setup(self, gdf):
+        model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
+        assert (model.qdim, model.block_q, model.nlat) == (None, None, None)
 
 
 class TestInheritedStateSpaceModel:
