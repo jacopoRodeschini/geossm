@@ -18,6 +18,7 @@ from scipy import optimize, stats
 from shapely.geometry import Polygon
 
 from geossm.covmodel import spdeAppoxCov
+from geossm.ssm import StateSpaceResults
 from geossm.stmodel import (FitOptions, LRPredictionResults, LRStateSpaceModel, LRStateSpaceResults,
                             ModelParams, Param)
 from geossm.stmodel.lrssm import _ks_value_and_grad, _spde_marginal_precision
@@ -809,6 +810,28 @@ class TestFittedState:
         pred.back_transform(lambda v: v)
         assert len(res.to_geo()) == len(res.y_hat.ravel()) and len(pred.to_geo()) == pred.y_pred.size
         assert "LRStateSpaceModel" in str(res.summary())
+
+
+class TestInheritedStateSpaceModel:
+    """`LRStateSpaceModel` reuses `StateSpaceModel` (Section C): the inherited
+    filter/smoother run on the system matrices left by `fit`."""
+
+    def test_inherited_filter_reproduces_the_fit(self, gdf, mesh):
+        model = _build_model(gdf, mesh)
+        res = model.fit(options=_options(max_iter=2))
+        out = model.filter(np.asarray(model.y_train))
+        assert isinstance(out, StateSpaceResults) and not isinstance(out, LRStateSpaceResults)
+        assert out.llf == pytest.approx(res.llf, rel=1e-6)
+        smoothed = model.smoother(np.asarray(model.y_train))
+        np.testing.assert_allclose(smoothed.x_smoothed, res.x_smoothed, rtol=1e-5, atol=1e-5)
+
+    def test_inherited_set_does_not_change_fitted_results(self, gdf, mesh):
+        model = _build_model(gdf, mesh)
+        res = model.fit(options=_options(max_iter=1))
+        llf, x = res.llf, res.x_smoothed.copy()
+        model.set(H=np.zeros_like(np.asarray(model.H)))
+        assert res.llf == llf
+        np.testing.assert_array_equal(res.x_smoothed, x)
 
 
 class TestSimulate:

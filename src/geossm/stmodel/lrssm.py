@@ -119,6 +119,26 @@ class LRStateSpaceModel(StateSpaceModel):
 
     See the `examples/example_LRSSM_*.py` scripts and the README Quick
     Start section for complete, runnable versions of this workflow.
+
+    Relationship to `StateSpaceModel`
+    ---------------------------------
+    The subclass reuses the parent's machinery (system matrices, Kalman
+    filter/smoother, prediction kernels, dtype and device handling); it is
+    not a drop-in replacement for it. Intentional deviations:
+
+    - `predict(df, modelresults, ...)` predicts at new locations from fitted
+      results and returns `(y_pred, var_pred)`; the parent's
+      `predict(H, x_T, P_T, ...)` maps given states.
+    - `sim(formulas, seed, params, ...)` simulates from model parameters;
+      the parent's `sim(seed, R, F, ...)` takes system matrices.
+    - The constructor builds the design matrices from data and formulas.
+
+    The inherited `filter`, `smoother` and `estimate` run on the model's
+    current system matrices: after `fit`, those of the returned parameters
+    (e.g. `model.filter(model.y_train)` reproduces the fitted
+    log-likelihood); before `fit` there are none. The inherited `set`
+    changes those matrices; fitted results are not affected (they are
+    snapshots), and the next `fit` rebuilds them.
     """
 
     def __init__(self, df, formulas:list, domain:list,
@@ -411,7 +431,9 @@ class LRStateSpaceModel(StateSpaceModel):
     @_on_device
     def sim(self, formulas:list = None , seed=1234, params: ModelParams = None, verbose=None, stats=False):
         """
-        Simulate data from the low-rank state-space model.
+        Simulate data from the low-rank state-space model (overrides
+        `StateSpaceModel.sim` with a different signature, see the class
+        notes).
 
         Builds the model matrices `H`, `R`, `F`, `Q` from `params` (or from
         default initial values if a field is left unset, see `_parseParams`)
@@ -626,7 +648,9 @@ class LRStateSpaceModel(StateSpaceModel):
     def predict(self, df, modelresults: LRStateSpaceResults, variance=True, verbose=True):
         """
         Predicted mean and point-wise variance of the response variable(s)
-        at new locations/times, from an already-fitted model: a shortcut for
+        at new locations/times, from an already-fitted model (overrides
+        `StateSpaceModel.predict` with a different signature, see the class
+        notes): a shortcut for
         `modelresults.predict(df, variance, verbose)` (see
         `LRStateSpaceResults.predict`; `LRStateSpaceResults.get_prediction`
         returns an object with the full covariance, back-transformation and

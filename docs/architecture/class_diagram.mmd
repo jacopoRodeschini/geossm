@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P8, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (updated with Section C, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -235,7 +235,7 @@ classDiagram
     }
     class spdeAppoxCov {
         +rescale : float, written by fit and precision
-        +nu, var : inherited, not used by precision (F05)
+        +nu, var : inherited, must be 1 (validated, F05)
         +fem_solver : FEMSolver, property
         +n_latent : int, property
         +box : property
@@ -268,7 +268,7 @@ classDiagram
     }
 
     %% ================= relationships =================
-    StateSpaceModel <|-- LRStateSpaceModel : inherits, not substitutable (F26, Section C)
+    StateSpaceModel <|-- LRStateSpaceModel : implementation reuse, predict and sim deviate (documented, F26)
     StateSpaceResults <|-- LRStateSpaceResults
     Matern <|-- spdeAppoxCov
 

@@ -117,7 +117,7 @@ print(mesh_io)
 
 # %% Create the covariance function
 
-cov_fun = matern_spde(latlon=False, nu=1, var=2, rescale=4)
+cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)  # nu = 1, unit variance (SPDE)
 cov_fun = cov_fun.setup(mesh_io, domain=circle)
 
 # PLot the mesh behind the cov. function

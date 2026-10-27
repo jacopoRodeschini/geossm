@@ -100,14 +100,22 @@ class TestSpdePrecision:
         b = cov.precision(rescale=1.5).toarray()
         assert not np.allclose(a, b)
 
-    @known_bug("F05", "precision() hard-codes nu=1; nu only changes the reported range")
-    def test_nu_is_honoured_or_rejected(self, mesh):
-        try:
-            c1 = spdeAppoxCov(latlon=False, nu=1, verbose=False).setup(mesh, domain=[INNER], stats=False)
-            c2 = spdeAppoxCov(latlon=False, nu=2.5, verbose=False).setup(mesh, domain=[INNER], stats=False)
-        except ValueError:
-            return  # rejecting unsupported smoothness is an acceptable fix
-        assert not np.allclose(c1.precision().toarray(), c2.precision().toarray())
+    @pytest.mark.parametrize("kw", [{"nu": 2.5}, {"nu": 0.5}, {"var": 2.0}], ids=["nu2.5", "nu0.5", "var2"])
+    def test_unsupported_nu_and_var_are_rejected(self, kw):
+        # F05 / Section C: precision() is the nu = 1, unit-variance SPDE; other
+        # values used to be silently ignored.
+        with pytest.raises(ValueError, match="nu and var must be 1"):
+            spdeAppoxCov(latlon=False, verbose=False, **kw)
+
+    @pytest.mark.parametrize("latlon", [False, True], ids=["planar", "latlon"])
+    def test_inherited_matern_describes_the_spde_field(self, latlon):
+        # The inherited gstools Matern methods describe the nu = 1 field whose
+        # SPDE precision() approximates, with kappa = rescale (Section C, C3).
+        from scipy.special import kv
+        cov = spdeAppoxCov(latlon=latlon, rescale=2.0, verbose=False)
+        h = np.array([0.1, 0.5, 1.0, 2.0])
+        r = np.deg2rad(h) * cov.geo_scale if latlon else h
+        np.testing.assert_allclose(cov.covariance(r), 2.0 * h * kv(1, 2.0 * h), rtol=1e-6)
 
     @known_bug("F06", "unpickling re-runs setup() without the domain (all vertices inner)")
     def test_pickle_roundtrip_preserves_model(self, cov):

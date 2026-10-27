@@ -270,3 +270,22 @@ def test_results_do_not_reference_the_model(problem, lr_fit):
     assert "StateSpaceModel" in line
     # Plain StateSpaceModel results have no FittedState: they store the state.
     assert {"x_smoothed", "P_smoothed", "S11", "S10", "S00"} <= set(vars(res))
+
+
+@pytest.mark.usefixtures("x64")
+def test_lr_results_satisfy_the_base_results_contract(problem, lr_fit):
+    # Section C (C3, C18): what the base class documents holds for LR results.
+    base = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    _, lr = lr_fit
+    for res in (base, lr):
+        p, T = res.y_hat.shape
+        assert res.residuals.shape == (p, T) and isinstance(res.mse(), float) and isinstance(res.rmse(), float)
+        assert res.mse("space").shape == (p,) and res.mse("time").shape == (T,)
+        lo, hi = res.conf_int_state()
+        assert lo.shape == hi.shape == res.x_smoothed.shape
+        assert set(res.diagnostics()) == {"jb", "jb_pvalue", "omni", "omni_pvalue", "dw", "skew", "kurtosis"}
+        assert {"y_obs", "y_hat", "x_smoothed", "P_smoothed", "llf", "S11", "S10", "S00"} <= set(res.as_dict())
+        assert isinstance(res.update(llf=0.0), type(res))
+        assert isinstance(str(res.summary()), str)
+    lo, hi = lr.conf_int_y(prediction=True)
+    assert lo.shape == hi.shape == lr.y_hat.shape and 0.0 <= lr.coverage_probability() <= 1.0

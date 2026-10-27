@@ -1079,7 +1079,11 @@ class spdeAppoxCov(Matern):
     `variogram`, `covariance`, `correlation`, `spectrum`, `spectral_density`,
     and the `*_yadrenko` variants -- describe the *nominal*, stationary,
     infinite-domain Matérn process that this SPDE approximates, using
-    `rescale` as :math:`\kappa`. They are exact only in the far interior of
+    `rescale` as :math:`\kappa`. `precision()` is the :math:`\nu = 1`
+    (:math:`\alpha = 2` in two dimensions), unit-variance SPDE, so only
+    ``nu=1`` and ``var=1`` are accepted: with them the inherited methods
+    describe the same field (changing `nu` or `var` afterwards, e.g. with the
+    inherited `fit_variogram`, is not supported). They are exact only in the far interior of
     the mesh, away from the boundary; they do **not** reflect the finite
     mesh's boundary effects, nor the Schur-complement marginalisation used
     by `precision(marginal=True)`. Use them for diagnostics/plotting
@@ -1099,10 +1103,32 @@ class spdeAppoxCov(Matern):
         """
         Parameters
         ----------
-        latlon, geo_scale, nu, var, rescale : see `gstools.covmodel.Matern`.
+        latlon, geo_scale, rescale : see `gstools.covmodel.Matern`
+            (`rescale` is :math:`\\kappa`).
+        nu : float, default 1
+            Matérn smoothness; must be 1 (the SPDE implemented by
+            `precision()`).
+        var : float, default 1.0
+            Marginal variance; must be 1 (`precision()` is the unit-variance
+            SPDE; the scale of the latent field is carried by the loadings
+            `A` of `LRStateSpaceModel`).
         verbose : bool, optional
             Whether to log progress messages.
+
+        Raises
+        ------
+        ValueError
+            If `nu` or `var` is not 1: `precision()` would silently ignore
+            them (F05).
         """
+        # precision() is the nu = 1, unit-variance SPDE: reject the Matern
+        # parameters it does not use instead of ignoring them (F05)
+        if nu != 1 or var != 1:
+            raise ValueError(
+                f"spdeAppoxCov implements the nu = 1, unit-variance SPDE: nu and var must be 1, "
+                f"got nu={nu}, var={var}. The scale of the latent field is estimated by the "
+                f"loadings A of LRStateSpaceModel."
+            )
 
         self.verbose = verbose
 
