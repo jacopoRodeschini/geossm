@@ -4,9 +4,11 @@ One EM fit is shared by the module (about 10 s including JIT compilation).
 """
 
 import dataclasses
+import gc
 import inspect
 import types
 import warnings
+import weakref
 
 import jax
 import jax.numpy as jnp
@@ -702,6 +704,39 @@ class TestFittedState:
         res._hessian = None
         np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
 
+    def test_fitted_state_holds_the_estimates(self, gdf, mesh):
+        # P1: the public, read-only fitted_state also holds the estimates
+        # (the results' own arrays, not copies).
+        _, _, res = self._fit(gdf, mesh, max_iter=2)
+        state = res.fitted_state
+        assert state is res._fitted_state
+        with pytest.raises(AttributeError):
+            res.fitted_state = None
+        assert state.params is res.params
+        assert state.x_smoothed is res.x_smoothed and state.P_smoothed is res.P_smoothed
+        assert not state.x_smoothed.flags.writeable and not state.timestamps_hat[0].flags.writeable
+        np.testing.assert_array_equal(state.timestamps_hat[0], res.timestamps_hat[0])
+        new = res.update(params=res.params.copy())
+        assert new.fitted_state.params is new.params and res.fitted_state.params is res.params
+
+    @pytest.mark.filterwarnings("ignore:The Hessian of the log-likelihood is not negative definite")
+    def test_results_do_not_reference_the_model(self, gdf, mesh):
+        # P1: results keep no reference to the model; the Hessian, predict,
+        # back_transform, to_geo and the summary work after it is collected.
+        model, _, res = self._fit(gdf, mesh, max_iter=2)
+        assert not hasattr(res, "model")
+        y_pred = model.predict(gdf.drop(columns="y"), res, verbose=False).y_pred.copy()
+        ref = weakref.ref(model)
+        del model
+        gc.collect()
+        assert ref() is None
+        res.compute_cov_params()
+        assert res._hessian is not None
+        np.testing.assert_array_equal(res.predict(gdf.drop(columns="y"), verbose=False).y_pred, y_pred)
+        res.back_transform(lambda v: v)
+        assert set(res.to_geo()) == {"hat", "pred"}
+        assert "LRStateSpaceModel" in str(res.summary())
+
 
 class TestSimulate:
     @pytest.mark.usefixtures("x64")
@@ -791,7 +826,7 @@ def test_to_poly_std_with_two_responses():
     res.block_p_pred = np.array([0, n, 2 * n])
     res.points_pred, res.timestamps_pred = [pts, pts], [ts, ts]
     res.crs_pred, res.y_pred_back_list = "EPSG:3857", None
-    res.model = types.SimpleNamespace(y_name=["a", "b"])
+    res._fitted_state = types.SimpleNamespace(y_name=("a", "b"))
     out = res.to_poly([Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], std=True)
     np.testing.assert_allclose(out["a"], 1.0)
     np.testing.assert_allclose(out["b"], 2.0)

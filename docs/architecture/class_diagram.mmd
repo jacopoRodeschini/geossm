@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P3, 2026-10-26).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P1, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -29,7 +29,6 @@ classDiagram
         -_run_filter_kernel(y_t, ...) tuple
     }
     class StateSpaceResults {
-        +model : StateSpaceModel
         +y_obs, y_hat, Sigma_y_hat : ndarray, read-only
         +x_filtered, P_filtered, x_pred, P_pred, K : ndarray or None
         +x_smoothed, P_smoothed, P_pred_smoothed : ndarray or None
@@ -45,7 +44,7 @@ classDiagram
         +update(**kw) StateSpaceResults
         +as_dict() dict
         +summary() Summary
-        -_R, _model_shape, _model_y_name : fit-time snapshot
+        -_R, _model_shape, _model_y_name, _model_label : snapshot, no model reference
         -_after_update(keys)
     }
     class ssm_kernels {
@@ -77,7 +76,7 @@ classDiagram
         +cov_function, domain_hull, shape : property
         +setup(cov_fun) self
         +fit(params0, options) LRStateSpaceResults
-        +predict(df, modelresults, verbose, std) LRStateSpaceResults
+        +predict(df, modelresults, verbose, std) LRStateSpaceResults, delegates to results
         +sim(formulas, seed, params, verbose, stats) tuple
         +getDesignMatrix(df) tuple
         +BuildDesignMatrix(df, formulas) tuple
@@ -87,9 +86,8 @@ classDiagram
         -_set_system_matrices(params, basis, pdim, qdim) tuple
         -_E_step(y) / _M_step(..., invQ, f_fixed)
         -_observed_logL(y_obs, Xbeta, x0, Sigma0, fitted_state) callable
-        -_buildBasis_list() / _buildH_dense() / _buildRF_dense()
         -_spde_mesh_arrays() tuple
-        -_getPredictionDesignMatrix(df, builders, domain) tuple
+        -_predict(H, x_T, P_T, Xbeta, beta, std) tuple
     }
     class stmodel_kernels {
         <<module functions: stmodel.lrssm>>
@@ -97,7 +95,6 @@ classDiagram
         _compute_beta_jax_kernel() jit
         _compute_s2e_jax_kernel() jit
         _compute_A2_jax_kernel() jit
-        _spde_marginal_precision(ks, ...)
         _ks_objective(params, T, Omega, ...)
         _ks_value_and_grad() jit, value_and_grad
     }
@@ -122,6 +119,7 @@ classDiagram
         +back_transform(g_invs) self
         +to_geo() dict
         +to_poly(polys, back_transform, std) GeoDataFrame
+        +fitted_state : FittedState, read-only property
         +summary(alpha) Summary
         -_fitted_state : FittedState
         -_hessian, _cov_params, _n_params, ... : lazy caches
@@ -129,7 +127,7 @@ classDiagram
         -_delta_method() / _areal_weights()
     }
     class FittedState {
-        <<frozen dataclass, internal>>
+        <<frozen dataclass>>
         +cov_function : tuple~spdeAppoxCov~
         +points : tuple~ndarray~, read-only
         +pdim : ndarray, read-only
@@ -138,6 +136,24 @@ classDiagram
         +builders : tuple~DesignMatricesBuilder~
         +domain : tuple~Polygon~
         +dtype, itype : numpy.dtype
+        +verbose : bool
+        +params : ModelParams
+        +x_smoothed, P_smoothed : ndarray, read-only
+        +timestamps_hat : tuple~ndarray~
+    }
+    class fitted_functions {
+        <<module functions: stmodel._fitted>>
+        observed_loglik(state, y_obs, Xbeta, x0, Sigma0) callable
+        predict_from_fit(state, df, verbose, std, log) dict
+        latent_basis(cov_function, points, dtype) list
+        build_H(A, basis) / build_RF(s2e, f, pdim, qdim, dtype)
+        mesh_arrays(cov_function, dtype, itype) tuple
+        _spde_marginal_precision(ks, ...)
+    }
+    class design_functions {
+        <<module functions: stmodel._design>>
+        prediction_design(df, builders, domain, verbose, include_response, log)
+        prediction_grid() / split_design() / stack_design()
     }
     class ModelParams {
         <<dataclass, JAX pytree>>
@@ -233,7 +249,6 @@ classDiagram
     StateSpaceModel ..> ssm_kernels : calls
     StateSpaceModel ..> StateSpaceResults : creates
     StateSpaceModel ..> KeyStream : sim
-    StateSpaceResults --> "0..1" StateSpaceModel : model, summary labels read live
 
     LRStateSpaceModel "1" *-- "1..*" DesignMatricesBuilder : builders
     LRStateSpaceModel "1" *-- "1..*" DesignMatrices : gridList
@@ -242,17 +257,23 @@ classDiagram
     LRStateSpaceModel ..> stmodel_kernels : EM M-step, ks optimisation
     LRStateSpaceModel ..> ssm_kernels : _filter_kernelJAX in _observed_logL
     LRStateSpaceModel ..> FittedState : creates in fit
-    LRStateSpaceModel ..> LRStateSpaceResults : creates in fit, writes in predict
+    LRStateSpaceModel ..> LRStateSpaceResults : creates in fit
+    LRStateSpaceModel ..> fitted_functions : basis, H, R, F, likelihood
+    LRStateSpaceModel ..> design_functions : training and prediction design
     LRStateSpaceModel ..> StateSpaceModel : sim builds a separate instance
     LRStateSpaceModel ..> ModelParams : creates, consumes
     LRStateSpaceModel ..> FitOptions : consumes
 
-    LRStateSpaceResults --> "1" LRStateSpaceModel : model, calls _observed_logL, _log, predict
+    LRStateSpaceResults ..> fitted_functions : Hessian, predict
+    fitted_functions ..> design_functions
+    fitted_functions ..> spdeAppoxCov : latent_basis, fem_arrays, n_latent
+    fitted_functions ..> ssm_kernels : filter, prediction kernels
     LRStateSpaceResults "1" *-- "1" FittedState : _fitted_state
     LRStateSpaceResults "1" *-- "1" ModelParams : params
     LRStateSpaceResults --> "0..1" FitOptions : options
     FittedState o-- "1..*" spdeAppoxCov : cov_function, by reference
     FittedState o-- "1..*" DesignMatricesBuilder : builders, by reference
+    FittedState o-- "1" ModelParams : params, shared with the results
     ModelParams "1" *-- "7" Param
     Param ..> _StaticArray : fixed values as aux data
 
@@ -263,5 +284,5 @@ classDiagram
 
     spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
 
-    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; fit-time snapshot via FittedState; predict and back_transform store into and return self"
+    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference, everything after fit computed from fitted_state; predict and back_transform store into and return self"
     note for StateSpaceModel "filter/smoother mutate the matrices via set(); LRStateSpaceModel uses them as the E-step channel"

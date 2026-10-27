@@ -248,3 +248,13 @@ def test_to_geo_columns_are_in_the_model_dtype(lr_fit):
     _, res = lr_fit
     hat = res.to_geo()["hat"]
     assert hat["y_hat_y"].dtype == hat["std_hat_y"].dtype == np.dtype(res.dtype)
+
+
+@pytest.mark.usefixtures("x64")
+def test_results_do_not_reference_the_model(problem, lr_fit):
+    # Section B, P1: neither result class stores the model.
+    res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    _, lr = lr_fit
+    assert not hasattr(res, "model") and not hasattr(lr, "model")
+    (line,) = [ln for ln in str(res.summary()).splitlines() if ln.startswith("Model name:")]
+    assert "StateSpaceModel" in line

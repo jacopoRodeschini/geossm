@@ -96,6 +96,15 @@ def _domain_hull(domain):
     return unary_union(domain).convex_hull
 
 
+# %% [Utils] Messages
+
+def _print_info(msg):
+    """Print `msg` prefixed with a UTC timestamp (the format of the models'
+    `print_info`)."""
+    dt = datetime.datetime.now(datetime.timezone.utc)
+    print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+
+
 # %% [Utils] Select the device for JAX computations
 
 def _select_device(backend):

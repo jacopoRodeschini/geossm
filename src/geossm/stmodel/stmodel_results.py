@@ -12,68 +12,13 @@ import jax
 import jax.numpy as jnp
 from dataclasses import dataclass, replace, fields
 from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
+from geossm.utils import _print_info
+from geossm.stmodel._fitted import FittedState, _read_only_copy, observed_loglik, predict_from_fit
 
 
 ArrayLike = Optional[Any]
 
 # %% [Utils] Define pack/unpack helpers to flatten params to a 1D array
-
-def _read_only_copy(a):
-    a = np.array(a, copy=True)
-    a.setflags(write=False)
-    return a
-
-
-@dataclass(frozen=True)
-class FittedState:
-    """
-    Configuration of an `LRStateSpaceModel` at the end of a `fit()`: what
-    `LRStateSpaceResults` needs, besides the estimates it holds itself, to
-    recompute quantities later (the Hessian, predictions at new locations,
-    names in summaries), so that a later `fit()`/`setup()`/`set()` on the
-    model does not change those results (findings F09, F27).
-
-    Built by `LRStateSpaceModel._get_fitted_state()`. Fields cannot be
-    reassigned; sequences are tuples and arrays are read-only copies. The
-    covariance functions, formula builders and domains are kept by
-    reference: they are configuration and must not be modified (e.g.
-    re-`setup()`) after fitting.
-
-    Attributes
-    ----------
-    cov_function : tuple of spdeAppoxCov
-        Latent covariance functions of the fit (FEM mesh and basis).
-    points : tuple of numpy.ndarray
-        Observation sites of each response variable, shape ``(n_i, 2)``.
-    pdim : numpy.ndarray
-        Number of sites of each response variable.
-    nvar, nlat : int
-        Number of response variables and of latent factors.
-    y_name : tuple of str
-        Response-variable names, one per response variable.
-    xbeta_names : tuple of tuple of str
-        Covariate names of each response variable.
-    builders : tuple of DesignMatricesBuilder
-        Fitted formula builders, used to build the design matrix at new
-        locations with the training transforms (e.g. `standardize()`).
-    domain : tuple
-        Measurement-equation domain of each response variable.
-    dtype, itype : numpy.dtype
-        Float and integer dtype of the model.
-    """
-
-    cov_function: tuple
-    points: tuple
-    pdim: np.ndarray
-    nvar: int
-    nlat: int
-    y_name: tuple
-    xbeta_names: tuple
-    builders: tuple
-    domain: tuple
-    dtype: np.dtype
-    itype: np.dtype
-
 
 # Scale of the confidence intervals of bounded parameters (see
 # `_stats_from_arrays`): log for the positive ones, atanh for f.
@@ -183,11 +128,10 @@ class LRStateSpaceResults(StateSpaceResults):
     `conf_int_y`, ...). It also adds:
 
     - Parameter inference: `compute_cov_params` (observed-information
-      Hessian, via `jax.hessian` on the model's log-likelihood), `bse`,
+      Hessian, via `jax.hessian` of the observed log-likelihood), `bse`,
       `tvalues`, `pvalues`, `conf_int`, `aic`/`bic`.
-    - Out-of-sample prediction: `predict` (thin wrapper around
-      `LRStateSpaceModel.predict`, storing `y_pred`/`Sigma_y_pred` on this
-      object).
+    - Out-of-sample prediction: `predict` (storing `y_pred`/`Sigma_y_pred`
+      on this object).
     - Back-transformation of predictions/fitted values to the response's
       original scale via the delta method (`back_transform`), when the
       model formula applies a transform to the response (e.g. `np.log`).
@@ -195,12 +139,13 @@ class LRStateSpaceResults(StateSpaceResults):
       support from the prediction points to polygons (`to_poly`).
     - A `statsmodels`-style textual report (`summary`).
 
-    A results object is a snapshot of the fit that produced it: the
-    parameters, states, observation-noise variances, names and the
-    covariance functions of that fit are recorded when it is created, so a
-    later `fit()` or `setup()` on the model does not change it (the new fit
-    returns its own results). The covariance objects are kept by
-    reference and should not be re-`setup()` afterwards.
+    A results object is a snapshot of the fit that produced it and does not
+    reference the model: the configuration and the estimates of that fit are
+    recorded in `fitted_state` (a `FittedState`) when it is created, and the
+    Hessian, predictions and summaries are computed from it, so a later
+    `fit()` or `setup()` on the model does not change it (the new fit
+    returns its own results). The covariance objects and formula builders
+    are kept by reference and should not be re-`setup()` afterwards.
 
     Per-variable ("_list") views: `y_hat_list`/`Sigma_y_hat_list`
     (in-sample fitted), `y_obs_list` (training observations),
@@ -242,7 +187,9 @@ class LRStateSpaceResults(StateSpaceResults):
         Parameters
         ----------
         model : LRStateSpaceModel, optional
-            The model instance that produced these results.
+            The model instance that produced these results; read once, for
+            the defaults of the base class (see `StateSpaceResults`), and
+            not stored.
         params : ModelParams, optional
             Estimated parameters (`beta`, `s2e`, `f`, `A`, `ks`, `x0`,
             `Sigma0`); processed into `param_names`/`param_values`/
@@ -267,6 +214,11 @@ class LRStateSpaceResults(StateSpaceResults):
             log-likelihood) or ``"max_iter"``. On ``"decrease"``,
             ``"invalid"`` and a converged decrease, the highest-likelihood
             iterate seen is returned.
+        fitted_state : FittedState, optional
+            Configuration snapshot of the model (`_get_fitted_state()`),
+            completed here with the estimates (`params`, `x_smoothed`,
+            `P_smoothed`, `timestamps_hat`); required by the Hessian,
+            `predict` and the summary.
         block_p : array-like, optional
             Cumulative index boundaries splitting the stacked training
             arrays (`y_hat`, `Sigma_y_hat`, `y_obs`, `residuals`, all from
@@ -298,16 +250,15 @@ class LRStateSpaceResults(StateSpaceResults):
         self.options = options
         self.convergence = convergence
         self.termination = termination
-        # Fit-time snapshot of the model state (covariance functions,
-        # points, block sizes, names) used by the methods below, so that
-        # later fit()/setup() calls on the model do not change these
-        # results (F09); see `FittedState`.
+        # Fit-time state (configuration from the model, completed with the
+        # estimates below): everything computed after fitting depends on it,
+        # not on the model (F09, P1); see `FittedState`.
         self._fitted_state = fitted_state
 
         # Cumulative per-response-variable index boundaries for the
         # stacked training arrays (`y_hat`, `Sigma_y_hat`, `y_obs`,
-        # `residuals`); snapshotted here (not read live off
-        # `self.model.block_p`) since that attribute is mutable and would
+        # `residuals`); snapshotted here (not read live off the model's
+        # `block_p`) since that attribute is mutable and would
         # go stale for this results object the next time `fit()`/`setup()`
         # runs on this model instance. Drives the `y_hat_list`/
         # `Sigma_y_hat_list`/`y_obs_list`/`residuals_list` properties below.
@@ -318,6 +269,7 @@ class LRStateSpaceResults(StateSpaceResults):
         self.points_hat = points_hat
         self.timestamps_hat = timestamps_hat
         self.crs_hat = crs_hat
+        self._complete_fitted_state()
 
         # ---- Derived quantities (initialized empty) ----
         self.param_names = None
@@ -470,16 +422,41 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bse_params = None
         if "params" in keys and self.params is not None:
             self._process_params()
+        if keys & {"params", "x_smoothed", "P_smoothed", "timestamps_hat"}:
+            self._complete_fitted_state()
         if "nstats" in keys and self.nstats is not None and "llf" not in keys:
             self.llf = None  # taken from the new nstats
             self._process_nstats()
 
     def _snapshot(self, name):
-        """Fit-time value `name` of the model state (see `FittedState`);
-        falls back to the model's current attribute for results built
-        without one."""
+        """Fit-time value `name` of the model state (see `FittedState`)."""
+        return getattr(self._fitted_state, name)
+
+    def _complete_fitted_state(self):
+        """Add the estimates of these results (`params`, smoothed states,
+        training timestamps; the same read-only arrays, not copies) to the
+        configuration snapshot of the model."""
         state = getattr(self, "_fitted_state", None)
-        return getattr(state, name) if state is not None else getattr(self.model, name)
+        if state is None:
+            return
+        self._fitted_state = replace(
+            state,
+            params=self.params,
+            x_smoothed=self.x_smoothed,
+            P_smoothed=self.P_smoothed,
+            timestamps_hat=(None if self.timestamps_hat is None
+                            else tuple(_read_only_copy(t) for t in self.timestamps_hat)),
+        )
+
+    @property
+    def fitted_state(self):
+        """FittedState: State of the model at the end of the fit -- the
+        configuration (covariance functions, formula builders, sites, block
+        sizes, names, dtypes) and the estimates (`params`, smoothed states
+        `x_smoothed` and covariances `P_smoothed`, training timestamps).
+        Read-only. The Hessian, predictions and summaries of these results
+        are computed from it."""
+        return self._fitted_state
 
     @property
     def _y_names(self):
@@ -531,8 +508,7 @@ class LRStateSpaceResults(StateSpaceResults):
         Sigma0 = params.Sigma0.value
 
         # Get the scalar positive log-likelihood function
-        logL = self.model._observed_logL(self.y_obs, self.Xbeta, x0, Sigma0,
-                                         fitted_state=getattr(self, "_fitted_state", None))
+        logL = observed_loglik(self._fitted_state, self.y_obs, self.Xbeta, x0, Sigma0)
         # fun(params)
 
         # Pack free params into a flat array
@@ -585,9 +561,9 @@ class LRStateSpaceResults(StateSpaceResults):
         if self._cov_params is not None:
             return self._cov_params
 
-        self.model._log("Computing Hessian and standard errors of the parameters", verbose=True)
+        _print_info("Computing Hessian and standard errors of the parameters")
         H, tdelta = self._compute_hessian()
-        self.model._log(f"Hessian computed in {tdelta:.3f} seconds", verbose=True)
+        _print_info(f"Hessian computed in {tdelta:.3f} seconds")
 
         # Compute the covariance matrix as the inverse of the Hessian (of the positive log-likelihood)
         # Sigma = -jnp.linalg.pinv(H)
@@ -836,16 +812,21 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
+    @_on_device
     def predict(self, df, verbose=True, std=True):
         """
-        Compute out-of-sample predictions based on smoothed states and model
-        parameters. `self.model.predict` stores them directly on this
+        Compute out-of-sample predictions from the fitted state
+        (`fitted_state`: smoothed states, parameters, covariance functions
+        and formula builders of the fit; see
+        `geossm.stmodel._fitted.predict_from_fit`) and store them on this
         results object (`points_pred`, `block_p_pred`, `y_pred`,
         `Sigma_y_pred`, `tdelta_pred`, `timestamps_pred`, `crs_pred`; the
         per-variable views `y_pred_list`/`Sigma_y_pred_list` are then
-        derived properties) and returns `self`, so predictions travel with
-        the fitted model and can be reused by other methods (e.g.
-        `.to_geo()`, plotting, summaries) without re-running prediction.
+        derived properties), replacing a previous prediction and clearing
+        its back-transformed values. Returns `self`, so predictions can be
+        reused by other methods (e.g. `.to_geo()`, summaries) without
+        re-running prediction. Progress messages follow the model's
+        verbosity at the end of the fit.
 
         Parameters
         ----------
@@ -863,7 +844,22 @@ class LRStateSpaceResults(StateSpaceResults):
         LRStateSpaceResults
             `self`, with the prediction attributes populated.
         """
-        return self.model.predict(df, modelresults=self, verbose=verbose, std=std)
+        state = self._fitted_state
+        log = _print_info if state.verbose else None
+        pred = predict_from_fit(state, df, verbose=verbose, std=std, log=log)
+        self.points_pred = pred["points"]
+        # block_p of the prediction grid, separate from the training one: the
+        # prediction grid can have a different number of points per variable
+        self.block_p_pred = pred["block_p"]
+        self.y_pred = pred["y_pred"]
+        self.Sigma_y_pred = pred["Sigma_y_pred"]
+        self.tdelta_pred = pred["tdelta"]
+        self.timestamps_pred = pred["timestamps"]
+        self.crs_pred = pred["crs"]
+        # The original-scale predictions belong to the previous prediction (F46)
+        self.y_pred_back_list = None
+        self.Sigma_y_pred_back_list = None
+        return self
 
     # ---- Per-variable ("_list") views -----------------------------------
     #

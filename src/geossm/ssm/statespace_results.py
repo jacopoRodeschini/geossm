@@ -80,11 +80,13 @@ class StateSpaceResults:
     (converted from JAX arrays on construction, see `to_numpy`) in the
     dtype of the originating model.
 
+    The results do not reference the model: what they need from it is
+    copied when they are created (observed data, regressors, observation-
+    noise variances, shape, names, summary labels), so later changes to the
+    model do not change them.
+
     Attributes
     ----------
-    model : object or None
-        The `geossm.ssm.statespace.StateSpaceModel` (or subclass) instance
-        that produced these results.
     y_obs : numpy.ndarray, shape (p, T)
         Observed data used for fitting (may contain ``NaN``).
     y_hat : numpy.ndarray, shape (p, T)
@@ -162,10 +164,13 @@ class StateSpaceResults:
         ----------
         model : object or None
             The fitted `geossm.ssm.statespace.StateSpaceModel` (or
-            subclass) instance. When given, ``params``, ``params_names``,
-            ``params_dim``, ``yname``, ``y_obs`` (from ``model.y_t``),
-            ``Xbeta``, ``backend`` and ``dtype`` default to the
-            corresponding model attributes unless overridden below.
+            subclass) instance, read once and not stored. When given,
+            ``params``, ``params_names``, ``params_dim``, ``yname``,
+            ``y_obs`` (from ``model.y_t``), ``Xbeta``, ``backend`` and
+            ``dtype`` default to the corresponding model attributes unless
+            overridden below; its observation-noise variances, shape,
+            response names and summary labels (class name, type, order) are
+            copied.
         y_hat : array_like, shape (p, T)
             Predicted/fitted observation means.
         Sigma_y_hat : array_like, shape (p, p, T), optional
@@ -210,8 +215,7 @@ class StateSpaceResults:
             EM sufficient statistics.
         """
 
-        # ---- Update the metadata from the model----
-        self.model = model
+        # ---- Metadata from the model (read here, not stored) ----
 
         # ---- Backend: default to the model's backend, so any JAX
         # computation performed on the results (e.g. the Hessian in
@@ -296,6 +300,11 @@ class StateSpaceResults:
         shape = getattr(model, "shape", None) if model is not None else None
         self._model_shape = None if shape is None else tuple(int(v) for v in shape)
         self._model_y_name = getattr(model, "y_name", None) if model is not None else None
+        self._model_label = {
+            "name": type(model).__name__ if model is not None else "N/A",
+            "type": getattr(model, "type", "N/A"),
+            "order": getattr(model, "order", "N/A"),
+        }
 
         # convert arrays if needed
         self.to_numpy()
@@ -828,16 +837,14 @@ class StateSpaceResults:
         # Left: identity/config of the model and how it was run.
         top_left = dict(
             [
-                ("Model name:", lambda: [self.model.__class__.__name__]),
+                ("Model name:", lambda: [self._model_label["name"]]),
                 ("Model type (order):",
-                    lambda: [
-                        f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
-                    ],
+                    lambda: [f"{self._model_label['type']}, {self._model_label['order']}"],
                 ),
                 ("Dep. Variables:", lambda: [self._dep_variable_name()]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
-                ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
                 ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
                 (runtime_label, lambda v=runtime_value: [v]),
             ]
