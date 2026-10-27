@@ -22,7 +22,7 @@ classDiagram
         +estimate(y_t, ...) StateSpaceResults
         +predict(H, x_T, P_T, Xbeta, beta, std) tuple
         +sim(seed, ..., stats) tuple
-        +computeExpectedValues(x_T, P_T, P_T_1) tuple
+        +compute_expected_values(x_T, P_T, P_T_1) tuple
         +summary() Summary
         -_H, _R, _F, _Q, _x0, _Sigma0, _Xbeta, _beta, _y_t : Array
         -_update_parameters() / _check_parameters()
@@ -80,10 +80,10 @@ classDiagram
         +fit(params0, options) LRStateSpaceResults
         +predict(df, modelresults, variance, verbose) tuple, shortcut for results.predict
         +sim(formulas, seed, params, verbose, stats) tuple
-        +getDesignMatrix(df) tuple
-        +BuildDesignMatrix(df, formulas) tuple
-        +summary() Summary
-        -_cov_matern : list~spdeAppoxCov~
+        +get_design_matrix(df) tuple
+        +build_design_matrix(df, formulas) tuple
+        +summary(full) Summary
+        -_cov_matern : list~SPDEApproxCov~
         -_get_fitted_state() FittedState
         -_set_system_matrices(params, basis, pdim, qdim) tuple
         -_E_step(y) / _M_step(..., invQ, f_fixed)
@@ -93,7 +93,7 @@ classDiagram
     }
     class stmodel_kernels {
         <<module functions: stmodel._em>>
-        _compute_inital_values_jax_kernel() jit
+        _compute_initial_values_jax_kernel() jit
         _compute_beta_jax_kernel() jit
         _compute_s2e_jax_kernel() jit
         _compute_A2_jax_kernel() jit
@@ -149,7 +149,7 @@ classDiagram
     }
     class FittedState {
         <<frozen dataclass>>
-        +cov_function : tuple~spdeAppoxCov~
+        +cov_function : tuple~SPDEApproxCov~
         +points : tuple~ndarray~, read-only
         +pdim : ndarray, read-only
         +nvar, nlat : int
@@ -238,13 +238,13 @@ classDiagram
     class Matern {
         <<external: gstools.covmodel>>
     }
-    class spdeAppoxCov {
+    class SPDEApproxCov {
         +rescale : float, written by fit and precision
         +nu, var : inherited, must be 1 (validated, F05)
         +fem_solver : FEMSolver, property
         +n_latent : int, property
         +box : property
-        +meshIO, domain, domain_hull, sigma2k, emp_range : property
+        +mesh_io, domain, domain_hull, sigma2k, emp_range : property
         +latent_basis(points) csr_matrix
         +fem_arrays() tuple
         +setup(mesh_obj, domain, stats) self
@@ -260,7 +260,7 @@ classDiagram
         +inner : bool ndarray
         +n_inner_points, box, vertex, ... : 30 properties
         +angles, areas : property, computed on first access
-        +getBasis(points)
+        +eval_basis(points)
         +isinner(points) / covers_domain()
         +plot_mesh(...) delegates to plotting_functions
         +compute_stats() / summary()
@@ -275,7 +275,7 @@ classDiagram
     %% ================= relationships =================
     StateSpaceModel <|-- LRStateSpaceModel : implementation reuse, predict and sim deviate (documented, F26)
     StateSpaceResults <|-- LRStateSpaceResults
-    Matern <|-- spdeAppoxCov
+    Matern <|-- SPDEApproxCov
 
     StateSpaceModel ..> ssm_kernels : calls
     StateSpaceModel ..> StateSpaceResults : creates
@@ -283,8 +283,8 @@ classDiagram
 
     LRStateSpaceModel "1" *-- "1..*" DesignMatricesBuilder : builders
     LRStateSpaceModel "1" *-- "1..*" DesignMatrices : gridList
-    LRStateSpaceModel "1" o-- "0..*" spdeAppoxCov : _cov_matern, user-owned
-    LRStateSpaceModel ..> spdeAppoxCov : n_latent, box, latent_basis, fem_arrays
+    LRStateSpaceModel "1" o-- "0..*" SPDEApproxCov : _cov_matern, user-owned
+    LRStateSpaceModel ..> SPDEApproxCov : n_latent, box, latent_basis, fem_arrays
     LRStateSpaceModel ..> stmodel_kernels : EM M-step, ks optimisation
     LRStateSpaceModel ..> ssm_kernels : _filter_kernelJAX in _observed_logL
     LRStateSpaceModel ..> FittedState : creates in fit, with the smoothed state and sufficient statistics
@@ -301,12 +301,12 @@ classDiagram
     LRPredictionResults ..> output_functions : to_geo, to_poly, back_transform
     LRPredictionResults o-- "1" FittedState : fitted_state, shared with the fit results
     fitted_functions ..> design_functions
-    fitted_functions ..> spdeAppoxCov : latent_basis, fem_arrays, n_latent
+    fitted_functions ..> SPDEApproxCov : latent_basis, fem_arrays, n_latent
     fitted_functions ..> ssm_kernels : filter, prediction kernels
     LRStateSpaceResults "1" *-- "1" FittedState : _fitted_state
     LRStateSpaceResults "1" *-- "1" ModelParams : params
     LRStateSpaceResults --> "0..1" FitOptions : options
-    FittedState o-- "1..*" spdeAppoxCov : cov_function, by reference
+    FittedState o-- "1..*" SPDEApproxCov : cov_function, by reference
     FittedState o-- "1..*" DesignMatricesBuilder : builders, by reference
     FittedState o-- "1" ModelParams : params, shared with the results
     ModelParams "1" *-- "7" Param
@@ -317,7 +317,7 @@ classDiagram
     DesignMatricesBuilder *-- "1" _FormulaInfo
     DesignMatricesBuilder ..> _NAPassthrough : patsy NA action
 
-    spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
+    SPDEApproxCov "1" *-- "0..1" FEMSolver : created in setup
     FEMSolver ..> plotting_functions : plot_mesh
 
     note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference; the latent state is held by fitted_state and exposed as properties; prediction does not modify the results (predict returns arrays, get_prediction a new LRPredictionResults)"

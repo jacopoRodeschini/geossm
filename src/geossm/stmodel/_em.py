@@ -19,7 +19,7 @@ from geossm.stmodel._fitted import _spde_marginal_precision
 
 @partial(jax.jit, static_argnums=(2, 3))
 @_highest_matmul_precision
-def _compute_inital_values_jax_kernel(y_t, Xbeta, block_p, block_q):
+def _compute_initial_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     """
     Computes initial parameter values for a model using JAX.
 

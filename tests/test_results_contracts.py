@@ -237,13 +237,31 @@ def test_lr_update_recomputes_parameter_summaries(lr_fit):
 @pytest.mark.usefixtures("x64")
 def test_summary_and_repr_name_the_response(problem, lr_fit):
     # F48: the base summary read `y_name` (absent on a plain StateSpaceModel)
-    # and `repr` read `yname` (the default "y" on an LRStateSpaceModel).
+    # and `repr` read the old `yname` (the default "y" on an LRStateSpaceModel).
     res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
     model, lr = lr_fit
     for obj, name in ((res, "y"), (lr, ", ".join(model.y_name))):
         (line,) = [ln for ln in str(obj.summary()).splitlines() if ln.startswith("Dep. Variable")]
         assert line.split()[2] == name
         assert f"Dep. Variable:   {name}" in repr(obj)
+
+
+def test_set_keeps_the_response_name(problem, lr_fit):
+    # `set()` without `y_name` used to reset the name to "y" (an LRSSM lost
+    # its response names on fit).
+    model = _ssm(problem, jnp.float32)
+    model.set(y_t=np.asarray(problem.y), y_name="pm10")
+    model.set(F=problem.F)
+    assert model.y_name == "pm10" and model.smoother(np.asarray(problem.y)).y_name == "pm10"
+    lr_model, lr = lr_fit
+    assert lr_model.y_name == ["y"] and lr.y_name == ("y",)
+
+
+def test_model_summary_full_adds_grid_and_latent_sections(lr_fit):
+    model, _ = lr_fit
+    short, full = str(model.summary()), str(model.summary(full=True))
+    assert "Grid" not in short and "Latent." not in short
+    assert "Grid" in full and "Latent." in full
 
 
 def test_back_transform_without_prediction_covariance_warns(gdf, mesh):

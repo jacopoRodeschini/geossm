@@ -66,13 +66,13 @@ root_doc = "index"
 # Warn about all references where the target cannot be found.
 nitpicky = False
 
-# `gstools` (an upstream dependency of `geossm.covmodel.spdeAppoxCov`, via
+# `gstools` (an upstream dependency of `geossm.covmodel.SPDEApproxCov`, via
 # `gstools.covmodel.Matern`) appends its own `CovModel.__doc__` onto every
 # subclass's docstring at class-definition time (see
 # `gstools.covmodel.base.CovModel.__init_subclass__`), including ":any:"
 # roles (e.g. `KM_SCALE`, `hankel.SymmetricFourierTransform`) that are not
 # resolvable without gstools' own Sphinx inventory. That text is kept -- it
-# documents `spdeAppoxCov`'s inherited constructor arguments -- but the
+# documents `SPDEApproxCov`'s inherited constructor arguments -- but the
 # resulting unresolvable-target warnings are expected and suppressed here.
 suppress_warnings = ["ref.any"]
 
@@ -94,7 +94,7 @@ autodoc_default_options = {
 # `StateSpaceModel`/`StateSpaceResults`) it is opted into per-class in
 # `_templates/autosummary/class.rst`, since those inherited methods are
 # part of the documented public workflow. Left off elsewhere, it would
-# otherwise also pull in `spdeAppoxCov`'s ~90 inherited members from
+# otherwise also pull in `SPDEApproxCov`'s ~90 inherited members from
 # `gstools.covmodel.Matern`/`CovModel` (rotation/anisotropy/pykrige
 # plumbing that isn't part of geossm's own API).
 # Keep signatures readable: show type hints in the description, not stacked

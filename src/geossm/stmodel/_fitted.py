@@ -65,7 +65,7 @@ class FittedState:
 
     Attributes
     ----------
-    cov_function : tuple of spdeAppoxCov
+    cov_function : tuple of SPDEApproxCov
         Latent covariance functions of the fit (FEM mesh and basis).
     points : tuple of numpy.ndarray
         Observation sites of each response variable, shape ``(n_i, 2)``.
@@ -193,7 +193,7 @@ def _spde_marginal_precision(ks, mass_list, stiff_list, perm_list, n_inner):
     """Block-diagonal marginal precision of the inner FEM nodes, one block
     per covariance function, differentiable in `ks`.
 
-    Same math as `spdeAppoxCov.precision(marginal=True)` (NumPy/SciPy, used by
+    Same math as `SPDEApproxCov.precision(marginal=True)` (NumPy/SciPy, used by
     `fit()`): Q = sigma2(k) K C^-1 K with K = k^2 C + G (nu = 1), then the
     Schur complement Q_11 - Q_12 Q_22^-1 Q_12' of the inner nodes, solving for
     Q_22^-1 Q_12' directly instead of inverting Q_22.
@@ -242,7 +242,7 @@ def mesh_arrays(cov_function, dtype, itype):
 def latent_basis(cov_function, points, dtype):
     """
     Each latent factor's FEM basis at each response variable's sites,
-    row-normalised (see `spdeAppoxCov.latent_basis`): a nested list
+    row-normalised (see `SPDEApproxCov.latent_basis`): a nested list
     `basis[p][q]` of dense arrays of shape `(n_p, q_inner)`, used by `build_H`.
     """
     return [[jnp.asarray(cov.latent_basis(pts).toarray(), dtype=dtype) for cov in cov_function]

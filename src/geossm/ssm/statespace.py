@@ -1001,7 +1001,7 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
-        yname=None,
+        y_name=None,
     ):
         """Update any subset of the model's system matrices/metadata in place.
 
@@ -1034,7 +1034,7 @@ class StateSpaceModel:
             Regression coefficients for ``Xbeta``.
         xbeta_names : list of str, optional
             Names for the exogenous regression terms.
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
 
         Returns
@@ -1054,7 +1054,7 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
+            y_name=y_name,
         )
 
     def _update_parameters(
@@ -1069,7 +1069,7 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names = None,
-        yname = None,
+        y_name = None,
     ):
         """
         Helper function to update model parameters if provided.
@@ -1164,12 +1164,12 @@ class StateSpaceModel:
             self._p = self._y_t.shape[0]
             self._T = self._y_t.shape[1]
 
-        if yname is not None:
-            self._yname = yname
-        elif self._p is not None:
-            self._yname = "y"
-        else:
-            self._yname = None
+        if y_name is not None:
+            self._y_name = y_name
+        elif getattr(self, "_y_name", None) is None and self._p is not None:
+            self._y_name = "y"
+        elif not hasattr(self, "_y_name"):
+            self._y_name = None
 
         # update the params attributes
         self._params = self._beta
@@ -1352,7 +1352,7 @@ class StateSpaceModel:
     def estimate(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1377,7 +1377,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1397,7 +1397,7 @@ class StateSpaceModel:
         """
         return self.smoother(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1438,7 +1438,8 @@ class StateSpaceModel:
         std : bool, default True
             If `False`, skip the predictive covariance and return `None`
             for it -- useful when the ``(p, p, T)`` array does not fit in
-            device memory.
+            device memory. ``std`` switches the whole covariance (the
+            standard deviations are the square roots of its diagonal).
 
         Returns
         -------
@@ -1464,7 +1465,7 @@ class StateSpaceModel:
     def _run_filter_kernel(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1497,7 +1498,7 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
+            y_name=y_name,
         )
 
         # Check parameters
@@ -1533,7 +1534,7 @@ class StateSpaceModel:
     def filter(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1556,7 +1557,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1576,7 +1577,7 @@ class StateSpaceModel:
         """
         x_t, P_t, K, x_t_1, P_t_1, logL, tDelta = self._run_filter_kernel(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1589,7 +1590,7 @@ class StateSpaceModel:
         )
 
         # compute expected values (given the filterd values)
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+        y_hat, S11, S10, S00, tdelta_expectation = self.compute_expected_values(
             x_t, P_t, P_t_1
         )
 
@@ -1616,7 +1617,7 @@ class StateSpaceModel:
     def smoother(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1641,7 +1642,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1679,7 +1680,7 @@ class StateSpaceModel:
         # stay on-device until the smoother kernel has consumed them.
         x_t, P_t, K, x_t_1, P_t_1, logL, tDelta_filter = self._run_filter_kernel(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1707,7 +1708,7 @@ class StateSpaceModel:
         td_smoother = time.time() - tStart
 
         # compute expected values (given the smoothed values)
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+        y_hat, S11, S10, S00, tdelta_expectation = self.compute_expected_values(
             x_T, P_T, P_T_1
         )
 
@@ -1733,7 +1734,7 @@ class StateSpaceModel:
 
         return results
 
-    def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
+    def compute_expected_values(self, x_T, P_T, P_T_1) -> tuple:
         """Compute predicted observations and EM sufficient statistics
         from a set of state means/covariances (filtered or smoothed).
 
@@ -1839,7 +1840,7 @@ class StateSpaceModel:
         """
         # Update parameters if provided
         xbeta_names = None
-        yname = None
+        y_name = None
         self.set(
             H=H,
             R=R,
@@ -1850,7 +1851,7 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
+            y_name=y_name,
         )
 
         # Check parameters
@@ -2091,13 +2092,15 @@ class StateSpaceModel:
         self._xbeta_names = value
 
     @property
-    def yname(self):
-        """str: Name of the dependent variable ``y``, used in summaries."""
-        return self._yname
+    def y_name(self):
+        """str: Name of the dependent variable ``y``, used in summaries
+        (a list of names, one per response variable, on
+        `LRStateSpaceModel`)."""
+        return self._y_name
 
-    @yname.setter
-    def yname(self, value):
-        self._yname = value
+    @y_name.setter
+    def y_name(self, value):
+        self._y_name = value
 
     @property
     def type(self):
@@ -2241,7 +2244,7 @@ class StateSpaceModel:
             "today": self._today,
             "type": self._type,
             "order": self._order,
-            "yname": self._yname,
+            "y_name": self._y_name,
             "xbeta_names": self._xbeta_names,
         }
         return state
@@ -2302,7 +2305,7 @@ class StateSpaceModel:
         self._today = state.get("today", date.today())
         self._type = state.get("type", "Linear (Gaussian)")
         self._order = state.get("order", "(1, 0)")
-        self._yname = state.get("yname", None)
+        self._y_name = state.get("y_name", None)
         self._xbeta_names = state.get("xbeta_names", None)
         self._y_t = None
         self._params = self._beta

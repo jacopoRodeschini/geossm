@@ -160,10 +160,10 @@ ax.legend()
 
 # %% Set up the lrssm model (univiarte latent)
 
-from geossm.covmodel import spdeAppoxCov
+from geossm.covmodel import SPDEApproxCov
 
 # build the latent covariance function on the mesh, then attach it to the model
-cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
 model = model.setup(cov_fun=[cov_fun])
 print(model)
 print(model.backend)

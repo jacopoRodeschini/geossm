@@ -15,7 +15,7 @@ from shapely.geometry import Polygon
 # %% Import the Matern model based on the SPDE approach R^2
 
 if geossm.__file__:
-    from geossm.covmodel.covmodels import spdeAppoxCov
+    from geossm.covmodel.covmodels import SPDEApproxCov
 
 # %% Create random point on [0,1]^2
 
@@ -134,7 +134,7 @@ print(len(mesh.cells_dict["vertex"]))
 # %% Create the covariance function
 
 # Define the matern function (without any mesh definition)
-cov_matern = spdeAppoxCov(latlon=True)
+cov_matern = SPDEApproxCov(latlon=True)
 
 print(cov_matern)
 print(cov_matern.rescale)

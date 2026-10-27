@@ -10,7 +10,7 @@ builds them from:
 - a :class:`geopandas.GeoDataFrame` of observations,
 - one Patsy/R-style ``formula`` per response variable (block), and
 - a spatial ``domain`` and a fitted covariance model
-  (:class:`~geossm.covmodel.spdeAppoxCov`, see :doc:`covariance_models`)
+  (:class:`~geossm.covmodel.SPDEApproxCov`, see :doc:`covariance_models`)
   giving a **low-rank basis** for the latent spatial field.
 
 Representing the latent field through the low-rank, mesh-based SPDE
@@ -27,15 +27,15 @@ This is the same workflow used in :doc:`../quickstart`:
 .. code-block:: python
 
    from geossm.stmodel import LRStateSpaceModel
-   from geossm.covmodel import spdeAppoxCov
+   from geossm.covmodel import SPDEApproxCov
    from geossm.covmodel.utils import buildMesh2d
 
    # 1. Build the model from the data, formula(s) and domain
    model = LRStateSpaceModel(geodf, ["y ~ 1 + x1"], domain=domain)
 
    # 2. Build a mesh and a covariance model, then attach it
-   mesh_io, _ = buildMesh2d(model.points[0], domain=domain)
-   cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+   mesh_io, _ = buildMesh2d(model.points[0], lowrank=0.5, domain=domain)
+   cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
    model = model.setup(cov_fun=[cov_fun])
 
    # 3. Fit

@@ -16,7 +16,7 @@ print("Load from: ", geossm.__file__)
 # %% Import the Matern model based on the SPDE approach R^2
 
 if geossm.__file__:
-    from geossm.covmodel.covmodels import spdeAppoxCov
+    from geossm.covmodel.covmodels import SPDEApproxCov
 
 # %% Create a convex domain [0,1]^2
 n = 400
@@ -148,7 +148,7 @@ def minfun(par, H, spdeCov, yObs):
 mesh_io = buildMesh(domain, lc=0.1, points=points, lc_buffer=1)
 
 # Create the covariance funcion
-cov_matern = spdeAppoxCov(latlon=False, nu=1, var=1, rescale=1)
+cov_matern = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=1)
 
 # set the mesh
 cov_matern = cov_matern.setup(mesh_io, domain=domain)
@@ -200,7 +200,7 @@ def estimate(n=100):
     mesh_io = buildMesh(domain, lc=0.15, points=points, lc_buffer=0.5)
 
     # Create the covariance funcion
-    cov_matern = spdeAppoxCov(latlon=False, nu=1, var=1, rescale=1)
+    cov_matern = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=1)
     cov_matern = cov_matern.setup(mesh_io, domain=domain)
 
     # compute the H on the new points (while the mesh is fixed)

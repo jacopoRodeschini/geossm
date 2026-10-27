@@ -107,7 +107,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
 
 def _sigma2k(k):
     """Marginal variance of the nu = 1 SPDE field for kappa `k` (see
-    `spdeAppoxCov.sigma2k`)."""
+    `SPDEApproxCov.sigma2k`)."""
     return sc.special.gamma(1) / (sc.special.gamma(2) * 4 * np.pi * (k**2))
 
 
@@ -123,21 +123,21 @@ def _normalize_rows(H):
 
 # % FEM solver class
 class FEMSolver:
-    r"""Low-level finite-element engine behind `spdeAppoxCov`.
+    r"""Low-level finite-element engine behind `SPDEApproxCov`.
 
     Wraps a triangular mesh (e.g. built by `buildMesh2d`) in an MFEM
     order-1 :math:`H^1` finite element space, and assembles the sparse
-    mass and stiffness matrices that `spdeAppoxCov.precision` combines
+    mass and stiffness matrices that `SPDEApproxCov.precision` combines
     into the SPDE precision matrix. It also classifies mesh vertices as
     "inner" (covered by `domain`, the region of scientific interest) or
     "outer" (part of the surrounding buffer, whose role is only to push
     the FEM's Neumann boundary effects away from `domain`), evaluates
-    basis functions at arbitrary points (`getBasis`), and reports mesh
+    basis functions at arbitrary points (`eval_basis`), and reports mesh
     quality diagnostics (`compute_stats`, `summary`).
 
-    Most users go through `spdeAppoxCov` instead, which builds and owns a
-    `FEMSolver` internally in `spdeAppoxCov.setup()`. `FEMSolver` is
-    exposed directly (e.g. via `spdeAppoxCov.fem_solver`) for lower-level
+    Most users go through `SPDEApproxCov` instead, which builds and owns a
+    `FEMSolver` internally in `SPDEApproxCov.setup()`. `FEMSolver` is
+    exposed directly (e.g. via `SPDEApproxCov.fem_solver`) for lower-level
     access to the mesh, the assembled matrices, and mesh diagnostics.
 
     Notes
@@ -371,7 +371,7 @@ class FEMSolver:
             stiff[: self.effective_dofs, :][:, : self.effective_dofs],
         )
 
-    def getBasis(self, phy_points=None):
+    def eval_basis(self, phy_points=None):
         """
         Evaluate the FE basis functions at a set of physical points.
 
@@ -406,7 +406,7 @@ class FEMSolver:
         return count, notfindInx, H
 
     def _compute_basis(self, phy_points=None, thr=1e-5):
-        """Core of `getBasis`; `thr` is currently unused (kept for future
+        """Core of `eval_basis`; `thr` is currently unused (kept for future
         thresholding of the returned basis values)."""
         # @Points = physical point
 
@@ -432,7 +432,7 @@ class FEMSolver:
         # This method is not 100 percent reliable, i.e. it is not guaranteed to
         # find a point, even if it lies inside a mesh element.
         count, elem_ids, int_points = self.mesh.FindPoints(phy_points)
-        nbasis = self.GetVSize
+        nbasis = self.vsize
 
         # Termporary vector
         phys_point = mfem.Vector(self.mesh.Dimension())
@@ -658,12 +658,12 @@ class FEMSolver:
 
     # Property for number of boundary elements (mesh.GetNBE())
     @property
-    def nbElements(self):
+    def n_boundary_elements(self):
         """Number of boundary elements (edges, for a 2D mesh)."""
         return self.mesh.GetNBE()
 
     @property
-    def nbEdges(self):
+    def n_edges(self):
         """Total number of mesh edges."""
         return self.mesh.GetNEdges()
 
@@ -673,19 +673,19 @@ class FEMSolver:
         return self.mesh.GetElementGeometry(0)
 
     @property
-    def getBoundaryEdge(self):
-        """(nbElements, 2) ndarray of int -- vertex-index pairs for each
+    def boundary_edges(self):
+        """(n_boundary_elements, 2) ndarray of int -- vertex-index pairs for each
         boundary edge."""
         boundaryEdge = []
-        for i in range(self.nbElements):
+        for i in range(self.n_boundary_elements):
             boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
 
         return np.array(boundaryEdge)
 
     @property
     def boundary_vertex(self, boolean=True):
-        """(nbElements, 2) ndarray of int -- vertex-index pairs of the
-        boundary elements (see `nbElements`)."""
+        """(n_boundary_elements, 2) ndarray of int -- vertex-index pairs of the
+        boundary elements (see `n_boundary_elements`)."""
         bdr_vertex = []
         for i in range(self.mesh.GetNBE()):
             bdr_vertex.append(self.mesh.GetBdrElement(i).GetVerticesArray())
@@ -717,7 +717,7 @@ class FEMSolver:
 
     # Property for number of vector DOFs (fespace.GetVSize())
     @property
-    def GetVSize(self):
+    def vsize(self):
         """Total number of vector DOFs in `fespace` (`ndofs * fespace_order`)."""
         return self._fespace.GetVSize()
 
@@ -766,8 +766,8 @@ class FEMSolver:
 
     @property
     def shape(self):
-        """Tuple `(nvertex, nelements, nbElements)`."""
-        return (self.nvertex, self.nelements, self.nbElements)
+        """Tuple `(nvertex, nelements, n_boundary_elements)`."""
+        return (self.nvertex, self.nelements, self.n_boundary_elements)
 
 
     def compute_angles(self, vertex, triangle):
@@ -870,7 +870,7 @@ class FEMSolver:
                         ("Solver. type:", lambda: [self.__class__.__name__]),
                         ("Mesh vertex:",lambda: [f"{self.nvertex}"]),
                         ("Mesh triangles:", lambda: [f"{self.nelements}"]),
-                        ("Mesh lines:", lambda: [f"{self.nbElements}"]),
+                        ("Mesh lines:", lambda: [f"{self.n_boundary_elements}"]),
                         ("Mesh vertex (inner, outer):", lambda: [f"{self.n_inner_points}, {self.n_outer_points}"]),
                     ]
                 )
@@ -883,7 +883,7 @@ class FEMSolver:
 
 
         # "Mesh shape" is deliberately not repeated here -- it is just
-        # (nvertex, nelements, nbElements), already shown above.
+        # (nvertex, nelements, n_boundary_elements), already shown above.
         top_right = dict(
                     [
                         ("Box:", lambda: [f"{self.box}"]),
@@ -932,7 +932,7 @@ class FEMSolver:
         return self.summary().as_text()
 
     def generate_summary_header(self):
-        """Cheap mesh-size rows (`nelements`/`nbElements`, direct O(1)
+        """Cheap mesh-size rows (`nelements`/`n_boundary_elements`, direct O(1)
         MFEM accessor calls) - unlike `generate_summary()`, does not touch
         `nvertex`/`n_inner_points`/`n_outer_points`/`angles`/`areas`,
         which involve a Python loop over every mesh element or a
@@ -946,7 +946,7 @@ class FEMSolver:
         """
         return (
             [("Mesh triangles:", [f"{self.nelements}"])],
-            [("Mesh lines:", [f"{self.nbElements}"])],
+            [("Mesh lines:", [f"{self.n_boundary_elements}"])],
         )
 
     def __repr__(self):
@@ -1065,7 +1065,7 @@ class FEMSolver:
 
 
 # % SPDE Approximation of the Matern covariance model
-class spdeAppoxCov(Matern):
+class SPDEApproxCov(Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
     See [Rasmussen2003]_ for background on the Matérn family of
@@ -1079,7 +1079,7 @@ class spdeAppoxCov(Matern):
 
     Notes
     -----
-    `spdeAppoxCov` extends `gstools.covmodel.Matern`, but only `precision()`
+    `SPDEApproxCov` extends `gstools.covmodel.Matern`, but only `precision()`
     (and `emp_range`, `sigma2k`, `distance()`) are re-defined in terms of the
     FEM discretisation. The methods inherited unchanged from `Matern` --
     `variogram`, `covariance`, `correlation`, `spectrum`, `spectral_density`,
@@ -1131,7 +1131,7 @@ class spdeAppoxCov(Matern):
         # parameters it does not use instead of ignoring them (F05)
         if nu != 1 or var != 1:
             raise ValueError(
-                f"spdeAppoxCov implements the nu = 1, unit-variance SPDE: nu and var must be 1, "
+                f"SPDEApproxCov implements the nu = 1, unit-variance SPDE: nu and var must be 1, "
                 f"got nu={nu}, var={var}. The scale of the latent field is estimated by the "
                 f"loadings A of LRStateSpaceModel."
             )
@@ -1160,10 +1160,10 @@ class spdeAppoxCov(Matern):
             spatial_dim=2,
             nu=nu,
         )
-        self._log("spdeAppoxCov initialization complete.")
+        self._log("SPDEApproxCov initialization complete.")
 
     @property
-    def meshIO(self):
+    def mesh_io(self):
         """The `meshio.Mesh` passed to `setup`.
 
         Raises
@@ -1177,7 +1177,7 @@ class spdeAppoxCov(Matern):
 
     @property
     def fem_solver(self):
-        """The `FEMSolver` built by `setup` from `meshIO`/`domain`.
+        """The `FEMSolver` built by `setup` from `mesh_io`/`domain`.
 
         Raises
         ------
@@ -1217,10 +1217,10 @@ class spdeAppoxCov(Matern):
         scipy.sparse.csr_matrix, shape (n, n_latent)
             Row `i` maps the latent field to site `i`. A row is all zeros
             if the site lies in no mesh element, or only in elements whose
-            nodes are all outer (see `FEMSolver.getBasis`).
+            nodes are all outer (see `FEMSolver.eval_basis`).
         """
         fem = self.fem_solver
-        _, _, H = fem.getBasis(points)
+        _, _, H = fem.eval_basis(points)
         return _normalize_rows(H[:, fem.inner])
 
     def fem_arrays(self):
@@ -1595,7 +1595,7 @@ class spdeAppoxCov(Matern):
         self._mesh = None
         self._fem_solver = None
 
-        # Rebuild the mesh and finite element solver if meshIO is available
+        # Rebuild the mesh and finite element solver if mesh_io is available
         if self._meshIO is not None:
             self.setup(self._meshIO, domain=None if domain is None else list(domain))
 

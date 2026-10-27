@@ -7,7 +7,7 @@ full-rank spatial covariance over all sites is not tractable. The latent
 spatial field for each response variable ("block") is instead represented
 in a low-rank basis derived from a finite-element (SPDE/GMRF) discretization
 of a Matern-type covariance over a mesh covering the spatial domain (see
-:class:`geossm.covmodel.spdeAppoxCov`), and the model is fit with an EM
+:class:`geossm.covmodel.SPDEApproxCov`), and the model is fit with an EM
 algorithm built around the Kalman filter/smoother of the parent
 :class:`geossm.ssm.StateSpaceModel` class (`_E_step`/`_M_step`).
 """
@@ -16,7 +16,7 @@ import jax.numpy as jnp
 
 # inmport the state space model
 from geossm.ssm.statespace import StateSpaceModel, _filter_kernelJAX, _itype_for
-from geossm.covmodel.covmodels import spdeAppoxCov
+from geossm.covmodel.covmodels import SPDEApproxCov
 from statsmodels.iolib.summary import Summary
 
 import time
@@ -38,7 +38,7 @@ from .stmodel_results import LRStateSpaceResults
 from geossm.stmodel._fitted import (FittedState, _read_only_copy, _spde_marginal_precision, mesh_arrays,
                                     latent_basis, build_H, build_RF, observed_loglik, cov_sizes)
 from geossm.stmodel._design import prediction_design, split_design, stack_design
-from geossm.stmodel._em import (_compute_inital_values_jax_kernel, _compute_beta_jax_kernel,
+from geossm.stmodel._em import (_compute_initial_values_jax_kernel, _compute_beta_jax_kernel,
                                _compute_s2e_jax_kernel, _compute_A2_jax_kernel, _ks_value_and_grad)
 
 
@@ -90,7 +90,7 @@ class LRStateSpaceModel(StateSpaceModel):
     scale), the latent spatial field of each response variable ("block",
     one per formula) is written as a linear combination of a low-rank set
     of latent factors living on a finite-element (SPDE/GMRF) mesh -- one
-    already-`setup()`-ed :class:`geossm.covmodel.spdeAppoxCov` per latent
+    already-`setup()`-ed :class:`geossm.covmodel.SPDEApproxCov` per latent
     factor (see `setup`). The state-space measurement matrix `H` is built
     from a loading matrix `A` (one row per response variable, one column
     per latent factor) and each factor's finite-element basis evaluated at
@@ -107,7 +107,7 @@ class LRStateSpaceModel(StateSpaceModel):
     2. Build a mesh over (a buffer of) the domain and attach one already
        `setup()`-ed covariance function per latent factor::
 
-           cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[poly])
+           cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=[poly])
            model = model.setup(cov_fun=[cov_fun])
 
     3. Fit the model with the EM algorithm::
@@ -230,8 +230,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
         if formulas is not None:
             self.nvar, self.points, self.gridList, self.ndim, self.pdim, self.block_p, T, self.builders, \
-                self.y_train, Xbeta, self.y_name, xbeta_names, \
-                self.y_train_list, self.Xbeta_list = self.BuildDesignMatrix(
+                self.y_train, Xbeta, y_name, xbeta_names, \
+                self.y_train_list, self.Xbeta_list = self.build_design_matrix(
                     df, formulas, verbose=verbose, domain=domain
                 )
 
@@ -240,7 +240,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
             Xbeta = None
             xbeta_names = None
-
+            y_name = None
 
         # Check and set the domain (see `_checkDomain`/`_setDomain`); a
         # domain=None defaults to the convex hull of each group's observed
@@ -252,9 +252,10 @@ class LRStateSpaceModel(StateSpaceModel):
         # Latent dimensions: set by setup() (None before, Section D)
         self.qdim = self.block_q = self.nlat = None
 
-        # Inizialisate the StateSpaceModel as a null model (we will set the parameters later)
+        # Initialise the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
         super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
+        self.y_name = y_name
 
     def setup(self, cov_fun: list):
         """
@@ -264,11 +265,11 @@ class LRStateSpaceModel(StateSpaceModel):
 
         Parameters
         ----------
-        cov_fun : list of spdeAppoxCov
+        cov_fun : list of SPDEApproxCov
             Already-built (and already `setup()`-ed) covariance functions,
             one per latent factor, used as-is. Each factor's latent domain
             is already fixed as `covi.domain`, set when `covi` was itself
-            `setup()`-ed (validated by `spdeAppoxCov`, via
+            `setup()`-ed (validated by `SPDEApproxCov`, via
             `_validate_domain`) -- generally a *different*, usually smaller
             list than `self.domain` (the measurement-equation domain, one
             entry per formula); it is not defaulted from `self.domain`.
@@ -281,9 +282,9 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log(f"Checking {len(cov_fun)} covariance functions...")
 
         for i, covi in enumerate(cov_fun):
-            if not isinstance(covi, spdeAppoxCov):
+            if not isinstance(covi, SPDEApproxCov):
                 raise ValueError(
-                    "Covariance function must be an instance of spdeAppoxCov"
+                    "Covariance function must be an instance of SPDEApproxCov"
                 )
             self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
             self._cov_matern.append(covi)
@@ -299,7 +300,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return self
 
-    def BuildDesignMatrix(self, df, formulas, verbose=None, domain=None):
+    def build_design_matrix(self, df, formulas, verbose=None, domain=None):
         # Compute the design matrices
         self._log("Building observation grid...")
 
@@ -331,7 +332,7 @@ class LRStateSpaceModel(StateSpaceModel):
             y_train, Xbeta, y_name, xbeta_names, y_list, Xbeta_list,
         )
 
-    def getDesignMatrix(self, df, verbose=None):
+    def get_design_matrix(self, df, verbose=None):
         """
         Build the design matrix for new (out-of-sample) locations/times --
         e.g. a held-out test set -- exactly the way `predict()` builds it
@@ -359,7 +360,7 @@ class LRStateSpaceModel(StateSpaceModel):
             formula (e.g. a shared held-out set); a list with one
             GeoDataFrame per formula (see `geossm.stmodel._design.as_prediction_dataframes`) lets
             each response variable be compared at its own, different set
-            of locations -- e.g. `model.getDesignMatrix([gdf_no2_test,
+            of locations -- e.g. `model.get_design_matrix([gdf_no2_test,
             gdf_pm10_test])` for a bivariate model, one test set per
             pollutant, instead of a single combined `df` that would give
             every formula the union of both pollutants' locations.
@@ -511,7 +512,7 @@ class LRStateSpaceModel(StateSpaceModel):
             block_p = self.block_p
             points = self.points
             T = self.T
-            self._log("Using the formulas provided at initialization, lenght = {}.".format(len(formulas)))
+            self._log("Using the formulas provided at initialization, length = {}.".format(len(formulas)))
         else:
             self._log("Building observation grid...")
             
@@ -559,11 +560,11 @@ class LRStateSpaceModel(StateSpaceModel):
         if beta is not None and len(beta) != Xbeta.shape[1]:
             raise ValueError(f"Length of beta ({len(beta)}) must match number of columns in Xbeta ({Xbeta.shape[1]})")
         
-        # Check the lenght of A
+        # Check the length of A
         if A is None or A.shape[0] != nvar or A.shape[1] != self.nlat:
             raise ValueError(f"Shape of A ({A.shape}) must match (nvar, nlat) = ({nvar}, {self.nlat})")
         
-         # Check the lenght of ks
+         # Check the length of ks
         if ks is None or len(ks) != len(self._cov_matern):
             raise ValueError(f"Length of ks ({len(ks)}) must match number of covariance functions ({len(self._cov_matern)})")
         
@@ -1188,7 +1189,7 @@ class LRStateSpaceModel(StateSpaceModel):
     @property
     def cov_function(self):
         """
-        list of spdeAppoxCov : The latent covariance functions set by
+        list of SPDEApproxCov : The latent covariance functions set by
         `setup`, one per latent factor (`self._cov_matern`); `None` (or an
         empty list) until `setup` has been called.
         """
@@ -1439,14 +1440,14 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         Compute data-driven initial parameter values used by `fit()` when
         `params0` (or one of its fields) is not provided: OLS/moment-based
-        `beta`/`s2e`/`A`/`f`/`x0`/`Sigma0` (`_compute_inital_values_jax_kernel`)
+        `beta`/`s2e`/`A`/`f`/`x0`/`Sigma0` (`_compute_initial_values_jax_kernel`)
         and a mesh-based initial `ks` (from each covariance function's
         FEM bounding box).
         """
 
         # Compute the initial values of the parameters
         est_beta, est_s2e, est_f, est_x0, est_Sigma0, est_A = (
-            _compute_inital_values_jax_kernel(
+            _compute_initial_values_jax_kernel(
                 y_obs, Xbeta, tuple(block_p.tolist()), tuple(block_q.tolist())
             )
         )
@@ -1618,10 +1619,10 @@ class LRStateSpaceModel(StateSpaceModel):
         (`self.domain`) -- the length is the caller's responsibility to
         match to the right count.
 
-        Builds on `spdeAppoxCov`/`FEMSolver`'s own contract (see
+        Builds on `SPDEApproxCov`/`FEMSolver`'s own contract (see
         `geossm.covmodel.covmodels._validate_domain`), applied per-entry --
-        wrapping each entry the same way a `spdeAppoxCov` would
-        (`spdeAppoxCov(...).setup(mesh, domain=[domi])`) -- rather than to
+        wrapping each entry the same way a `SPDEApproxCov` would
+        (`SPDEApproxCov(...).setup(mesh, domain=[domi])`) -- rather than to
         the whole list at once: validating the whole list
         in one call would flatten a MultiPolygon entry into several
         separate entries and break the 1:1 correspondence with the list
@@ -1655,7 +1656,7 @@ class LRStateSpaceModel(StateSpaceModel):
         MultiPolygon per *measurement equation* (`len(formulas)`) -- see
         `_setDomain`. Distinct from the *latent* domain (one entry per
         latent factor, generally a different, usually smaller count): each
-        factor's latent domain is fixed on its own `spdeAppoxCov` when that
+        factor's latent domain is fixed on its own `SPDEApproxCov` when that
         object is `setup()`-ed, before it is passed to `setup(cov_fun=...)`,
         and is available via `cov_function[i].domain`. See `domain_hull`
         for a single Polygon summarising every measurement equation's
@@ -1861,7 +1862,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                 ),
                 (
                     "Dep. Variables:",
-                    lambda: [", ".join(self.y_name) if hasattr(self, "y_name") else "N/A"],
+                    lambda: [", ".join(self.y_name) if self.y_name is not None else "N/A"],
                 ),
                 ("Shape:", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
             ]
@@ -1898,17 +1899,17 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         return gen_top_left, gen_top_right
 
-    def generate_summary(self, print_short=False):
+    def generate_summary(self, full=False):
         """
         Build the left/right key-value rows used by `summary()`'s header
-        table: model name/type/shape, then (if `print_full=True`) one
+        table: model name/type/shape, then (if `full=True`) one
         "Grid ..." section per response variable's `DesignMatrices` and one
         "Latent. ..." section per latent covariance function, each via that
         object's own `generate_summary`.
 
         Parameters
         ----------
-        print_full : bool, default True
+        full : bool, default False
             If `False`, only the top model-level rows are returned (used
             when this table is embedded elsewhere, e.g. by
             `LRStateSpaceResults.generate_summary`, without repeating the
@@ -1922,7 +1923,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
 
         gen_top_left, gen_top_right = self.generate_summary_header()
-        if not print_short:
+        if not full:
             return gen_top_left, gen_top_right
 
         else:  
@@ -1946,12 +1947,12 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
                     # right side just carries a dash placeholder so it isn't
                     # repeated. `summary()` redraws this whole row as one
                     # continuous dashed line via `_continuous_dividers`.
-                    yname = (
+                    name = (
                         grid.y_design_info.column_names[0]
                         if getattr(grid, "y_design_info", None) is not None
                         else grid.y_name
                     )
-                    left = [(f"Grid {yname}", ["-"])] + left
+                    left = [(f"Grid {name}", ["-"])] + left
                     righ = [("-", ["-"])] + righ
 
                     gen_top_left_grid = gen_top_left_grid + left
@@ -1990,7 +1991,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             
             return gen_top_left, gen_top_right 
 
-    def summary(self, print_short=False) -> Summary:
+    def summary(self, full=False) -> Summary:
         """
         Return a `statsmodels`-style structured summary of the model
         (before fitting -- for the fitted results' own summary, see
@@ -1998,7 +1999,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
         Parameters
         ----------
-        print_full : bool, default True
+        full : bool, default False
             If `True`, includes one section per response variable's
             observation grid and one per latent covariance function (see
             `generate_summary`); if `False`, only the top model-level rows
@@ -2011,7 +2012,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             Printable summary object (`str(...)`/`print(...)`).
         """
         # Generate the summary tables
-        gen_top_left, gen_top_right = self.generate_summary(print_short=print_short)
+        gen_top_left, gen_top_right = self.generate_summary(full=full)
 
         # Add the header to the summary
         smry = Summary()
@@ -2020,7 +2021,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             title="LR State Space Model",
             gleft=gen_top_left,
             gright=gen_top_right,
-            yname= self.yname if self.yname is not None else "None",
+            yname= ", ".join(self.y_name) if self.y_name is not None else "None",
             xname= self.xbeta_names if self.xbeta_names is not None else "None",
         )
 
@@ -2038,7 +2039,7 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
 
     def __str__(self):
         """Return a human-readable summary of the model (see `summary`)."""
-        return str(self.summary(print_short=False))
+        return str(self.summary())
 
     def _get_summary_table(self):
         gen_top_left, gen_top_right = self.generate_summary_header()

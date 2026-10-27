@@ -1,4 +1,4 @@
-"""`FEMSolver` finite-element matrices/basis and `spdeAppoxCov` precision."""
+"""`FEMSolver` finite-element matrices/basis and `SPDEApproxCov` precision."""
 
 import pickle
 
@@ -7,7 +7,7 @@ import pytest
 import scipy.sparse as sp
 from shapely.geometry import Polygon
 
-from geossm.covmodel import FEMSolver, spdeAppoxCov
+from geossm.covmodel import FEMSolver, SPDEApproxCov
 from tests._known_bugs import known_bug
 from tests._printing import assert_printing_is_side_effect_free
 from tests._synthetic import make_square_mesh
@@ -28,7 +28,7 @@ def fem(mesh):
 
 @pytest.fixture
 def cov(mesh):
-    return spdeAppoxCov(latlon=False, rescale=0.8, verbose=False).setup(mesh, domain=[INNER], stats=False)
+    return SPDEApproxCov(latlon=False, rescale=0.8, verbose=False).setup(mesh, domain=[INNER], stats=False)
 
 
 def test_printing_has_no_side_effects(fem, cov):
@@ -64,7 +64,7 @@ class TestFEMSolver:
     def test_basis_partition_of_unity_and_linear_reproduction(self, fem):
         rng = np.random.default_rng(0)
         pts = rng.uniform(LO + 0.1, HI - 0.1, size=(50, 2))
-        count, not_found, B = fem.getBasis(pts)
+        count, not_found, B = fem.eval_basis(pts)
         assert count == 50 and len(not_found) == 0
         np.testing.assert_allclose(np.asarray(B.sum(axis=1)).ravel(), 1.0, atol=1e-10)
         f = lambda xy: 1.0 + 2.0 * xy[:, 0] - 3.0 * xy[:, 1]  # noqa: E731
@@ -115,14 +115,14 @@ class TestSpdePrecision:
         # F05 / Section C: precision() is the nu = 1, unit-variance SPDE; other
         # values used to be silently ignored.
         with pytest.raises(ValueError, match="nu and var must be 1"):
-            spdeAppoxCov(latlon=False, verbose=False, **kw)
+            SPDEApproxCov(latlon=False, verbose=False, **kw)
 
     @pytest.mark.parametrize("latlon", [False, True], ids=["planar", "latlon"])
     def test_inherited_matern_describes_the_spde_field(self, latlon):
         # The inherited gstools Matern methods describe the nu = 1 field whose
         # SPDE precision() approximates, with kappa = rescale (Section C, C3).
         from scipy.special import kv
-        cov = spdeAppoxCov(latlon=latlon, rescale=2.0, verbose=False)
+        cov = SPDEApproxCov(latlon=latlon, rescale=2.0, verbose=False)
         h = np.array([0.1, 0.5, 1.0, 2.0])
         r = np.deg2rad(h) * cov.geo_scale if latlon else h
         np.testing.assert_allclose(cov.covariance(r), 2.0 * h * kv(1, 2.0 * h), rtol=1e-6)
@@ -135,14 +135,14 @@ class TestSpdePrecision:
 
 
 class TestLatentInterface:
-    """Interface between spdeAppoxCov and the spatio-temporal model (Section B,
+    """Interface between SPDEApproxCov and the spatio-temporal model (Section B,
     P3): what the model used to read from `cov.fem_solver` directly."""
 
     def test_latent_basis_matches_the_fem_basis_on_inner_nodes(self, cov):
         rng = np.random.default_rng(0)
         pts = np.vstack([rng.uniform(0, 10, size=(30, 2)), [[50.0, 50.0]]])  # last site: outside the mesh
         B = cov.latent_basis(pts)
-        _, _, H = cov.fem_solver.getBasis(pts)
+        _, _, H = cov.fem_solver.eval_basis(pts)
         H_inner = H[:, cov.fem_solver.inner].toarray()
         # previous model code: multiply each row by the inverse of its sum
         sums = H_inner.sum(axis=1)
@@ -166,7 +166,7 @@ class TestLatentInterface:
         assert cov.box == fem.box
 
     def test_interface_requires_setup(self):
-        cov = spdeAppoxCov(latlon=False, verbose=False)
+        cov = SPDEApproxCov(latlon=False, verbose=False)
         for get in (lambda: cov.n_latent, lambda: cov.box, cov.fem_arrays, lambda: cov.latent_basis([[0.0, 0.0]])):
             with pytest.raises(RuntimeError, match="setup"):
                 get()

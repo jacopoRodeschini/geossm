@@ -63,19 +63,19 @@ temperature.
 
 The latent spatial field is represented on a triangular mesh, via a
 finite-element (SPDE) approximation of the Matérn covariance
-(:class:`~geossm.covmodel.spdeAppoxCov`).
+(:class:`~geossm.covmodel.SPDEApproxCov`).
 :func:`~geossm.covmodel.utils.buildMesh2d` builds a mesh covering the
 domain, refined around the observation locations:
 
 .. code-block:: python
 
-   from geossm.covmodel import spdeAppoxCov
+   from geossm.covmodel import SPDEApproxCov
    from geossm.covmodel.utils import buildMesh2d
 
    points = model.points[0]  # observation locations for this formula/block
-   mesh_io, _ = buildMesh2d(points, domain=domain, max_edge=0.35, min_edge=0.05)
+   mesh_io, _ = buildMesh2d(points, lowrank=0.5, domain=domain)
 
-   cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+   cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
    model = model.setup(cov_fun=[cov_fun])
 
 5. Fit the model

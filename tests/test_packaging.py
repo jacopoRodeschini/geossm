@@ -60,3 +60,28 @@ def test_modules_import_from_defining_modules():
             if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module in packages:
                 offending.append(f"{path.relative_to(root)}: from {node.module} import ...")
     assert offending == []
+
+
+@pytest.mark.parametrize("owner, old, new", [
+    ("geossm.covmodel", "spdeAppoxCov", "SPDEApproxCov"),
+    ("geossm", "spdeAppoxCov", "SPDEApproxCov"),
+    ("geossm", "getHardware", "get_hardware"),
+    ("geossm.covmodel", "buildMesh2d_density", "buildMesh2d"),
+    ("geossm.covmodel.utils", "buildMesh2d_density_new", "buildMesh2d"),
+    ("geossm.covmodel.FEMSolver", "getBasis", "eval_basis"),
+    ("geossm.covmodel.FEMSolver", "nbElements", "n_boundary_elements"),
+    ("geossm.covmodel.FEMSolver", "nbEdges", "n_edges"),
+    ("geossm.covmodel.FEMSolver", "getBoundaryEdge", "boundary_edges"),
+    ("geossm.covmodel.FEMSolver", "GetVSize", "vsize"),
+    ("geossm.covmodel.SPDEApproxCov", "meshIO", "mesh_io"),
+    ("geossm.ssm.StateSpaceModel", "computeExpectedValues", "compute_expected_values"),
+    ("geossm.ssm.StateSpaceModel", "yname", "y_name"),
+    ("geossm.stmodel.LRStateSpaceModel", "BuildDesignMatrix", "build_design_matrix"),
+    ("geossm.stmodel.LRStateSpaceModel", "getDesignMatrix", "get_design_matrix"),
+])
+def test_renamed_api_has_no_old_names(owner, old, new):
+    # Section E: names renamed without deprecated aliases. A capitalised last
+    # component of `owner` is a class of the module before it.
+    module, _, cls = owner.rpartition(".")
+    obj = getattr(importlib.import_module(module), cls) if cls[0].isupper() else importlib.import_module(owner)
+    assert not hasattr(obj, old) and hasattr(obj, new)

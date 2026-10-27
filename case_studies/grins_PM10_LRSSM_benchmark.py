@@ -48,7 +48,7 @@ from pathlib import Path
 
 
 if geossm.__file__:
-    from geossm.covmodel import spdeAppoxCov as matern_spde
+    from geossm.covmodel import SPDEApproxCov as matern_spde
     from geossm.stmodel import LRStateSpaceModel as lrssm
     from geossm.stmodel import FitOptions
     from geossm.covmodel import buildMesh2d_density

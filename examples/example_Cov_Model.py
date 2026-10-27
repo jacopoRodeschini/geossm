@@ -42,7 +42,7 @@ ax.set_ylabel("Latitude")
 # plt.savefig("mesh.pdf", bbox_inches="tight")
 
 # %% Create the Mater covariance function 
-from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
+from geossm.covmodel.covmodels import SPDEApproxCov as MaternCov
 
 
 covf = MaternCov(latlon=True, nu=1, var=1.0, rescale=1.0)

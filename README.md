@@ -219,7 +219,7 @@ import gmsh
 
 import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.covmodel import spdeAppoxCov
+from geossm.covmodel import SPDEApproxCov
 
 # 1. Load a dataset and turn it into a GeoDataFrame
 agri, shape = df.load_dataset('agrimonia')
@@ -247,7 +247,7 @@ def build_mesh(poly, lc, points, lc_points=1e22):
 mesh_io = build_mesh(buffer, lc=0.35, points=model.points[0])
 
 # 4. Build the latent covariance function on the mesh and attach it
-cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain_polygon)
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain_polygon)
 model = model.setup(cov_fun=[cov_fun])
 
 # 5. Fit the model
@@ -311,6 +311,13 @@ python -m http.server --directory docs/build/html 8000  # then open http://local
 ([.github/workflows/docs.yml](.github/workflows/docs.yml)) builds the docs
 on every push/PR touching `docs/`, `src/`, or `examples/`, and deploys them
 to GitHub Pages on pushes to `main`.
+
+## Run the tests 
+
+```bash
+conda activate env
+JAX_PLATFORMS=cpu python -m pytest tests -q -p no:cacheprovider
+```
 
 ## Contributing
 

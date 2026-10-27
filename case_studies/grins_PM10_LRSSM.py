@@ -48,10 +48,10 @@ from pathlib import Path
 
 
 if geossm.__file__:
-    from geossm.covmodel import spdeAppoxCov as matern_spde
+    from geossm.covmodel import SPDEApproxCov as matern_spde
     from geossm.stmodel import LRStateSpaceModel as lrssm
     from geossm.stmodel import FitOptions
-    from geossm.covmodel import buildMesh2d_density_new
+    from geossm.covmodel import buildMesh2d
     import geossm.datasets as df
 
 
@@ -108,12 +108,12 @@ lowrank = [0.5, 0.75]
 cov_funcs = {lr: None for lr in lowrank}
 for lr in lowrank:
 
-    mesh_io, hull, info = buildMesh2d_density_new(points, n_vertices=int(lr*len(points)), domain=domain,
-                                            eps=0.1, 
-                                            gradation=0.5,
-                                            bandwidth=0.1,
-                                            anchor_spacing=0.3, 
-                                            return_info=True)
+    mesh_io, hull, info = buildMesh2d(points, n_vertices=int(lr*len(points)), domain=domain,
+                                      eps=0.1, 
+                                      gradation=0.5,
+                                      bandwidth=0.1,
+                                      anchor_spacing=0.3, 
+                                      return_info=True)
 
 
 

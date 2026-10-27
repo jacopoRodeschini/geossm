@@ -19,7 +19,7 @@ flowchart TD
 
     subgraph MESH["Spatial discretisation (user-owned objects)  [host]"]
         MSH["buildMesh2d / pygmsh -> meshio.Mesh (planar coordinates, F07)"]
-        SPDE["spdeAppoxCov.setup(mesh, domain) -> FEMSolver:<br/>lumped mass C, stiffness G, inner/outer nodes"]
+        SPDE["SPDEApproxCov.setup(mesh, domain) -> FEMSolver:<br/>lumped mass C, stiffness G, inner/outer nodes"]
         SETUP["model.setup(cov_fun=[...]) -> qdim, block_q, nlat"]
     end
 

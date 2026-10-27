@@ -17,7 +17,7 @@ import pytest
 from scipy import optimize, stats
 from shapely.geometry import Polygon
 
-from geossm.covmodel import spdeAppoxCov
+from geossm.covmodel import SPDEApproxCov
 from geossm.ssm import StateSpaceResults
 from geossm.stmodel import (FitOptions, LRPredictionResults, LRStateSpaceModel, LRStateSpaceResults,
                             ModelParams, Param)
@@ -37,7 +37,7 @@ pytestmark = pytest.mark.filterwarnings("ignore:The EM algorithm reached max_ite
 def _build_model(gdf, mesh, dtype=jnp.float32):
     model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False,
                               backend="cpu", dtype=dtype)
-    cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+    cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
     return model.setup([cov])
 
 
@@ -545,7 +545,7 @@ class TestStandardErrors:
 @pytest.mark.usefixtures("x64")
 @pytest.mark.parametrize("ks", [0.3, 1.0, 3.0])
 def test_scipy_and_jax_marginal_precisions_agree(gdf, mesh, ks):
-    # Q^-1 is built with SciPy for the E-step (spdeAppoxCov.precision) and
+    # Q^-1 is built with SciPy for the E-step (SPDEApproxCov.precision) and
     # with JAX for the ks M-step and the Hessian (_spde_marginal_precision).
     model = _build_model(gdf, mesh, dtype=jnp.float64)
     (cov,) = model.cov_function
@@ -660,7 +660,7 @@ class TestResultsLifecycle:
     """Each results object is a snapshot of its own fit (F09, F27)."""
 
     def _model(self, gdf, mesh):
-        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+        cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
         model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
         return model.setup([cov]), cov
 
@@ -705,7 +705,7 @@ class TestResultsLifecycle:
         p, q, T = model.shape
         text = str(res.summary())
 
-        other = spdeAppoxCov(latlon=False, verbose=False).setup(make_square_mesh(mesh_size=2.5),
+        other = SPDEApproxCov(latlon=False, verbose=False).setup(make_square_mesh(mesh_size=2.5),
                                                                domain=[DOMAIN], stats=False)
         model.setup([other])
         assert model.shape[1] != q  # the model now has another latent dimension
@@ -720,7 +720,7 @@ class TestFittedState:
     """The fit-time configuration kept by results (`FittedState`, F09/F27)."""
 
     def _fit(self, gdf, mesh, max_iter=3):
-        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+        cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
         model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu").setup([cov])
         return model, cov, model.fit(options=_options(max_iter=max_iter))
 
@@ -828,7 +828,7 @@ class TestStateOwnership:
         np.testing.assert_array_equal(res.block_p, np.asarray(model.block_p))
 
     def test_covariance_set_up_again_is_detected(self, gdf, mesh):
-        cov = spdeAppoxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN])
+        cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN])
         model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu").setup([cov])
         res = model.fit(options=_options(max_iter=1))
         cov.setup(make_square_mesh(mesh_size=1.0), domain=[DOMAIN])  # another mesh, same object

@@ -18,7 +18,7 @@ import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.stmodel import ModelParams
-from geossm.covmodel import FEMSolver, spdeAppoxCov
+from geossm.covmodel import FEMSolver, SPDEApproxCov
 
 # %% Load the agrimonia dataset
 
@@ -119,7 +119,7 @@ fem_solver.plot_mesh(ax=ax)
 # %% Set up the lrssm model (univiarte latent)
 
 # build the latent covariance function on the mesh, then attach it to the model
-cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[Polygon(buffer)])
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=[Polygon(buffer)])
 model = model.setup(cov_fun=[cov_fun])
 
 

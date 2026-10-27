@@ -35,8 +35,8 @@ npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/architecture/class_diagram.mmd -o 
 | `FitOptions` | `stmodel.param` | EM stopping and logging options | public |
 | `DesignMatricesBuilder` | `data_preparation` | Validates a long-format GeoDataFrame and evaluates a formula into site × time design arrays, for training and prediction | public |
 | `DesignMatrices` | `data_preparation` | Design arrays and metadata of one formula | public |
-| `spdeAppoxCov` | `covmodel.covmodels` | SPDE (ν = 1) Matérn precision on a finite-element mesh, marginalised to the inner nodes | public |
-| `FEMSolver` | `covmodel.covmodels` | P1 finite elements on a mesh: mass and stiffness matrices, inner/outer nodes, basis evaluation, mesh statistics and plots | public (used through `spdeAppoxCov`) |
+| `SPDEApproxCov` | `covmodel.covmodels` | SPDE (ν = 1) Matérn precision on a finite-element mesh, marginalised to the inner nodes | public |
+| `FEMSolver` | `covmodel.covmodels` | P1 finite elements on a mesh: mass and stiffness matrices, inner/outer nodes, basis evaluation, mesh statistics and plots | public (used through `SPDEApproxCov`) |
 | `KeyStream`, `_StaticArray`, `_FormulaInfo`, `_NAPassthrough` | various | PRNG key splitting; hashable pytree aux data; parsed formula; patsy NA action | internal |
 
 Kernels (filter, smoother, sufficient statistics, prediction, M-step updates, SPDE marginal precision, `ks` objective)

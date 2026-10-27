@@ -62,7 +62,7 @@ def plot_mesh(
 
     # Collect all boundary edges
     outer_edges = []
-    for i in range(fem.nbElements):
+    for i in range(fem.n_boundary_elements):
         bElem = fem.mesh.GetBdrElement(i).GetVerticesArray()
         outer_edges.append(bElem)
 

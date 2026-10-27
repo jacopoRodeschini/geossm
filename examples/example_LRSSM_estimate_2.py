@@ -16,7 +16,7 @@ import geossm
 
 if geossm.__file__:
     # import lrssm
-    from geossm.covmodel import spdeAppoxCov as matern_spde
+    from geossm.covmodel import SPDEApproxCov as matern_spde
     from geossm.stmodel import ModelParams
     from geossm.stmodel import LRStateSpaceModel as lrssm
     from geossm.stmodel import FitOptions

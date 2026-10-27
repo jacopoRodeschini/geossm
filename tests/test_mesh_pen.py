@@ -20,10 +20,10 @@ from pathlib import Path
 
 
 if geossm.__file__:
-    from geossm.covmodel import spdeAppoxCov as matern_spde
+    from geossm.covmodel import SPDEApproxCov as matern_spde
     from geossm.stmodel import LRStateSpaceModel as lrssm
     from geossm.stmodel import FitOptions
-    from geossm.covmodel import buildMesh2d, buildMesh2d_density_new
+    from geossm.covmodel import buildMesh2d
     import geossm.datasets as df
 
 
@@ -84,12 +84,12 @@ points = np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
 
 # %% 
 
-mesh, hull, info = buildMesh2d_density_new(points, n_vertices=len(points), domain=list(italy_union.geoms),
-                                           eps=0.1, 
-                                           gradation=0.5,
-                                           bandwidth=0.1,
-                                           anchor_spacing=0.1, 
-                                           return_info=True)
+mesh, hull, info = buildMesh2d(points, n_vertices=len(points), domain=list(italy_union.geoms),
+                               eps=0.1,
+                               gradation=0.5,
+                               bandwidth=0.1,
+                               anchor_spacing=0.1,
+                               return_info=True)
 
 print("Inner vertices {}".format(info['n_inside']))
 print("Anchor ratio {}".format(len(info['anchors'])/ len(points)))

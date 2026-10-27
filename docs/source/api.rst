@@ -68,11 +68,9 @@ builders used to discretize the spatial domain it is defined on.
    :toctree: api/generated
    :nosignatures:
 
-   spdeAppoxCov
+   SPDEApproxCov
    FEMSolver
    buildMesh2d
-   buildMesh2d_density
-   buildMesh2d_new
    buildMeshGrid2d
 
 Spatial data preparation
@@ -114,5 +112,5 @@ General-purpose helpers shared across the package.
 
    block_diag_3D
    write
-   getHardware
+   get_hardware
    KeyStream

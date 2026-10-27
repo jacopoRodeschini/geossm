@@ -77,7 +77,7 @@ for i, (mesh_lr, buffer) in enumerate(meshes):
     ax[i].set_aspect('equal', adjustable='box')
 
 # %% Build the covaraince function 
-from geossm.covmodel.covmodels import spdeAppoxCov as MaternCov
+from geossm.covmodel.covmodels import SPDEApproxCov as MaternCov
 
 fig, ax = plt.subplots(1, len(meshes), figsize=(8, 8))
 

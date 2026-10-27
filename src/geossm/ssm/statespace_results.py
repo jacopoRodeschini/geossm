@@ -134,7 +134,7 @@ class StateSpaceResults:
         params_names=None,
         params_dim=None,
         y_obs=None,
-        yname=None,
+        y_name=None,
         Xbeta=None,
         backend=None,
         dtype=None,
@@ -169,7 +169,7 @@ class StateSpaceResults:
         model : object or None
             The fitted `geossm.ssm.statespace.StateSpaceModel` (or
             subclass) instance, read once and not stored. When given,
-            ``params``, ``params_names``, ``params_dim``, ``yname``,
+            ``params``, ``params_names``, ``params_dim``, ``y_name``,
             ``y_obs`` (from ``model.y_t``), ``Xbeta``, ``backend`` and
             ``dtype`` default to the corresponding model attributes unless
             overridden below; its observation-noise variances, shape,
@@ -187,8 +187,8 @@ class StateSpaceResults:
             `params_dim`.
         y_obs : array_like, shape (p, T), optional
             Override for the observed data (defaults to ``model.y_t``).
-        yname : str, optional
-            Override for the dependent variable's name.
+        y_name : str or sequence of str, optional
+            Override for the dependent variable's name(s).
         Xbeta : array_like, shape (p, b, T), optional
             Override for the exogenous regressors.
         backend : {'auto', 'cpu', 'gpu'} or jax.Device, optional
@@ -248,13 +248,14 @@ class StateSpaceResults:
             self.params = getattr(model, "params", None)
             self.params_names = getattr(model, "params_names", None)
             self.params_dim = getattr(model, "params_dim", None)
-            self.yname = getattr(model, "yname", None)
+            names = getattr(model, "y_name", None)
+            self.y_name = tuple(names) if isinstance(names, list) else names
             # observed data and regressors default to the model's
             y_obs = getattr(model, "y_t", None) if y_obs is None else y_obs
             Xbeta = getattr(model, "Xbeta", None) if Xbeta is None else Xbeta
 
-        if yname is not None:
-            self.yname = yname
+        if y_name is not None:
+            self.y_name = y_name
         if params is not None:
             self.params = params
         if params_names is not None:
@@ -299,7 +300,6 @@ class StateSpaceResults:
         self._R = None if R is None else np.array(R, dtype=self._dtype, copy=True)
         shape = getattr(model, "shape", None) if model is not None else None
         self._model_shape = None if shape is None else tuple(int(v) for v in shape)
-        self._model_y_name = getattr(model, "y_name", None) if model is not None else None
         self._model_label = {
             "name": type(model).__name__ if model is not None else "N/A",
             "type": getattr(model, "type", "N/A"),
@@ -960,10 +960,8 @@ class StateSpaceResults:
 
     def _dep_variable_name(self):
         """Response name(s) shown by `summary` and `repr`: the model's
-        `y_name` (one per response variable, `LRStateSpaceModel`) or, for
-        a plain `StateSpaceModel`, its `yname`."""
-        return (_format_names(getattr(self, "_model_y_name", None))
-                or getattr(self, "yname", None) or "N/A")
+        `y_name` (one per response variable on `LRStateSpaceModel`)."""
+        return _format_names(getattr(self, "y_name", None)) or "N/A"
 
     def __str__(self):
         return str(self.summary())

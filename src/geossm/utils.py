@@ -40,7 +40,7 @@ def _check_x64_for_dtype(dtype):
 def _validate_domain(domain):
     """
     Validate and normalize the ``domain`` argument shared by
-    :class:`FEMSolver` and :class:`spdeAppoxCov`.
+    :class:`FEMSolver` and :class:`SPDEApproxCov`.
 
     ``domain`` describes the region(s) of scientific interest, one polygon
     per region (e.g. one polygon per landmass for a multi-polygon country
@@ -55,7 +55,7 @@ def _validate_domain(domain):
 
     ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
     :math:`\\Omega` is implicitly defined by the mesh handed to
-    ``FEMSolver``/``spdeAppoxCov.setup()``. A reasonable default choice is
+    ``FEMSolver``/``SPDEApproxCov.setup()``. A reasonable default choice is
     the convex hull of the union of the ``domain`` polygons (extended by an
     offset to limit boundary effects), computed by ``_domain_hull(domain)``
     and exposed as the ``domain_hull`` property on both classes. Neither
@@ -319,7 +319,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
 
     Formats a timestamped, human-readable report -- the string
     representation (``__str__``) of each object in `grid_obs`, of
-    `ssm_model`, and of :func:`getHardware`'s output -- and writes it to
+    `ssm_model`, and of :func:`get_hardware`'s output -- and writes it to
     `filename`. Intended as a lightweight run log for long-running
     fits, not a machine-readable serialization format.
 
@@ -360,7 +360,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
     s += "\n"
 
     s += "HARDWARE \n"
-    s += getHardware()
+    s += get_hardware()
 
     with open(filename, mode) as f:
         f.write(s)
@@ -371,7 +371,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
 # % Get Hardware infromation
 
 
-def getHardware():
+def get_hardware():
     """
     Build a human-readable summary of the current machine's hardware.
 

@@ -1,7 +1,7 @@
 """Design-matrix assembly of the spatio-temporal model (internal).
 
 Functions of the fitted formula builders (`DesignMatricesBuilder`), shared by
-`LRStateSpaceModel` (training, `getDesignMatrix`, simulation) and the
+`LRStateSpaceModel` (training, `get_design_matrix`, simulation) and the
 prediction of fitted results (`geossm.stmodel._fitted.predict_from_fit`).
 """
 
@@ -13,7 +13,7 @@ from geossm.utils import block_diag_3D
 
 def as_prediction_dataframes(df, builders):
     """
-    Normalize `df` (as accepted by `predict`/`getDesignMatrix`) to a list of
+    Normalize `df` (as accepted by `predict`/`get_design_matrix`) to a list of
     GeoDataFrames, one per formula/builder.
 
     A single GeoDataFrame is broadcast to every formula (the same
@@ -90,7 +90,7 @@ def prediction_design(df, builders, domain, verbose=True, include_response=False
 
     Returns `(points, grids, ndim, pdim, block_p, T, Xbeta)`; with
     `include_response=True`, `(points, T, Xbeta_list, y_list)` instead (see
-    `LRStateSpaceModel.getDesignMatrix`). `log(msg)` receives progress
+    `LRStateSpaceModel.get_design_matrix`). `log(msg)` receives progress
     messages.
     """
     log = log or (lambda msg: None)

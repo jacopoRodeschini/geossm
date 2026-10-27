@@ -95,7 +95,9 @@ class FitOptions:
     std : bool, default True
         If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
         computed after the EM loop (left as `None`) -- useful when the
-        ``(p, p, T)`` array does not fit in device memory.
+        ``(p, p, T)`` array does not fit in device memory. ``std``
+        switches the whole covariance (the standard deviations are the
+        square roots of its diagonal).
     """
 
     max_iter: int = 20

@@ -57,7 +57,7 @@ def _mesh_min_angle(mesh):
 
 
 def _prepare_domain(points, domain, max_edge, min_edge, offset, cutoff):
-    """Shared setup for buildMesh2d/buildMesh2d_density: normalizes `domain`
+    """Domain setup for buildMesh2d: normalizes `domain`
     (Polygon, MultiPolygon, or a possibly nested list of these) into the
     scientific-interest domain and the convex hull used to build the mesh,
     fills in max_edge/min_edge/offset/cutoff defaults, merges near-
@@ -195,7 +195,7 @@ def _gmsh_mesh_from_size_grid(coords, xs, ys, h, embed=None, algorithm=6):
     if initialized_here:
         gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 0)
-    gmsh.model.add("buildMesh2d_density_new")
+    gmsh.model.add("buildMesh2d")
     view = None
     try:
         geo = gmsh.model.geo
@@ -335,12 +335,12 @@ def buildMesh2d(
         Observed locations.
     lowrank : float, optional
         Value in (0, 1]. Sets the budget to ``R = round(lowrank * len(points))``
-        vertices inside `D`, as in `buildMesh2d_density`.
+        vertices inside `D`.
     n_vertices : int, optional
         The budget `R` directly. Give exactly one of `lowrank` and
         `n_vertices`. Unlike `lowrank`, it may exceed ``len(points)``.
     domain : Polygon, MultiPolygon, or (possibly nested) list of these, optional
-        The interest domain `D`; see `buildMesh2d`. Defaults to the convex
+        The interest domain `D`. Defaults to the convex
         hull of `points`. The vertex budget counts vertices inside `D` only.
     intensity : callable, optional
         ``intensity(xy) -> (m,)`` non-negative values at the ``(m, 2)``
@@ -482,7 +482,7 @@ def buildMesh2d(
 
     if h[mask].min() < 2 * delta:
         warnings.warn(
-            f"buildMesh2d_density_new: the smallest element size "
+            f"buildMesh2d: the smallest element size "
             f"({h[mask].min():.3g}) is below two background-grid cells "
             f"({2 * delta:.3g}); increase `grid_size` to resolve the size field."
         )
@@ -540,14 +540,14 @@ def buildMesh2d(
     mesh, n_inside, kappa, h, anchors = best
     if abs(n_inside - target_n) > max(1, tol * target_n):
         warnings.warn(
-            f"buildMesh2d_density_new: reached {n_inside} vertices inside the "
+            f"buildMesh2d: reached {n_inside} vertices inside the "
             f"interest domain (target {target_n}, tol={tol}); consider a "
             "larger `max_iter`."
         )
     angle = _mesh_min_angle(mesh)
     if angle < min_angle:
         warnings.warn(
-            f"buildMesh2d_density_new: minimum interior angle is {angle:.1f} "
+            f"buildMesh2d: minimum interior angle is {angle:.1f} "
             f"deg < min_angle={min_angle} deg. Consider a smaller `gradation` "
             "or a larger `grid_size`."
         )

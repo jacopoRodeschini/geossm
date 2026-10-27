@@ -46,7 +46,7 @@ Covariance models and meshes
   density/grid variants.
 - `example_Cov_Model.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_Cov_Model.py>`_,
   `example_Cov_Model_italy.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_Cov_Model_italy.py>`_
-  -- build a mesh and set up :class:`~geossm.covmodel.spdeAppoxCov`, the
+  -- build a mesh and set up :class:`~geossm.covmodel.SPDEApproxCov`, the
   finite-element Matérn covariance approximation.
 - `example_spde_pyfem.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_spde_pyfem.py>`_,
   `example_GP_FEM_1.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_GP_FEM_1.py>`_
