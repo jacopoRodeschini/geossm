@@ -11,7 +11,7 @@ DesignMatricesBuilder class handles the preparation of the DesignMatrices object
 """
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 import ast
 import warnings
 import numpy as np
@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
-from geossm.utils import _summary_table_source, _check_x64_for_dtype
+from geossm.utils import _summary_table_source, _check_x64_for_dtype, _print_info
 
 
 import jax.numpy as jnp
@@ -1474,7 +1474,6 @@ class DesignMatricesBuilder:
         ----------
         msg : str
             Message to print, prefixed with the current UTC timestamp
-            (``YYYY-MM-DD HH:MM:SS``).
+            (``YYYY-MM-DD HH:MM:SS``; see `geossm.utils._print_info`).
         """
-        dt = datetime.now(timezone.utc)
-        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+        _print_info(msg)

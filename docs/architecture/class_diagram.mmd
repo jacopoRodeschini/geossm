@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P6, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P8, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -254,12 +254,17 @@ classDiagram
         +mass, stiff : scipy.sparse
         +inner : bool ndarray
         +n_inner_points, box, vertex, ... : 30 properties
+        +angles, areas : property, computed on first access
         +getBasis(points)
         +isinner(points) / covers_domain()
-        +plot_mesh(...)
+        +plot_mesh(...) delegates to plotting_functions
         +compute_stats() / summary()
         -_mesh : mfem.Mesh
         -_compute_basis(points)
+    }
+    class plotting_functions {
+        <<module functions: covmodel._plotting>>
+        plot_mesh(fem, ax, ...) matplotlib Axes
     }
 
     %% ================= relationships =================
@@ -308,6 +313,7 @@ classDiagram
     DesignMatricesBuilder ..> _NAPassthrough : patsy NA action
 
     spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
+    FEMSolver ..> plotting_functions : plot_mesh
 
     note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference; the latent state is held by fitted_state and exposed as properties; prediction does not modify the results (predict returns arrays, get_prediction a new LRPredictionResults)"
     note for StateSpaceModel "filter/smoother mutate the matrices via set(); LRStateSpaceModel uses them as the E-step channel"

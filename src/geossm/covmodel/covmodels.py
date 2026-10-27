@@ -16,10 +16,9 @@ from shapely.ops import unary_union
 from gstools.covmodel import Matern
 from gstools.tools.geometric import latlon2pos, chordal_to_great_circle
 from statsmodels.iolib.summary import Summary
-from datetime import datetime, timezone
-import time
 
-from geossm.utils import format_info_table, _validate_domain, _domain_hull
+from geossm.utils import format_info_table, _validate_domain, _domain_hull, _print_info
+from geossm.covmodel._plotting import plot_mesh as _plot_mesh
 
 
 # % Utility functions
@@ -143,7 +142,7 @@ class FEMSolver:
     or optimisation performed by this class.
     """
 
-    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=True):
+    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=False):
         """
         Parameters
         ----------
@@ -159,8 +158,12 @@ class FEMSolver:
             vertices, i.e. every vertex is treated as inner.
         verbose : bool, optional
             Whether to log progress messages.
-        stats : bool, optional
-            Whether to compute mesh quality statistics (angles, areas).
+        stats : bool, default False
+            If True, compute the mesh quality statistics (triangle angles
+            and areas) now and log them, with a note when the mesh has small
+            angles. Otherwise they are computed on first access of
+            `angles`/`areas` (e.g. by `summary`), which avoids the cost
+            (a Python loop over the triangles) when they are not needed.
         """
 
         # Validate inputs
@@ -196,13 +199,13 @@ class FEMSolver:
         # is treated as inner (no marginalisation) when no domain is given.
         self._domain = domain if domain is not None else (MultiPoint(self.vertex[:, :2]).convex_hull,)
 
-        # Compute the stats associate with the mesh (angles and areas of the triangles)
-        if stats == True:
+        # Mesh quality statistics (angles and areas of the triangles): computed
+        # here only with `stats=True`, otherwise on first access (P8)
+        self._angles, self._areas = None, None
+        if stats:
             self._log("Computing mesh quality statistics:angles and areas (takes a while)...")
             self._angles, self._areas = self.compute_stats()
             self._log("Mesh quality statistics computed successfully.")
-        else:
-            self._angles, self._areas = None, None
         
         # Print the mesh quality statistics
         if self._angles is not None and self._areas is not None:
@@ -518,89 +521,8 @@ class FEMSolver:
         -------
         matplotlib.axes.Axes
         """
-        # imported here, not at module level: matplotlib is only needed for
-        # plotting and costs ~0.35 s on `import geossm` (F29)
-        import matplotlib.pyplot as plt
-        import matplotlib.tri as mtri
-
-        # Convert the vertex array to a numpy array
-        vertex = self.vertex
-        triangles = self.elements
-
-        triang = mtri.Triangulation(vertex[:, 0], vertex[:, 1], triangles)
-
-        # Collect all triangles (elements)
-        # inner_triangles = []
-        # for i in range(self.nelement):
-        #     tri = self.mesh.GetElement(i).GetVerticesArray()
-        #     inner_triangles.append(tri)
-        # inner_triangles = np.array(inner_triangles)
-
-        # Collect all boundary edges
-        outer_edges = []
-        for i in range(self.nbElements):
-            bElem = self.mesh.GetBdrElement(i).GetVerticesArray()
-            outer_edges.append(bElem)
-
-        boundary_edge = np.array(outer_edges)
-
-        # Plot the mesh
-        # fig, ax = plt.subplots()
-
-        # Handle the 'ax' argument
-        if ax is None:
-            _, ax = plt.subplots(figsize=figsize)
-        else:
-            _ = ax.figure  # Get the figure from the provided axes
-            
-        ax.triplot(triang, "k-", lw=0.3, alpha=0.5, label="All Mesh Edges")
-
-        # Plot the interior vertices
-        # ax.plot(vertex[self.inner, 0], vertex[self.inner, 1],
-        #         'xm', label=f'Interior vertices ({sum(self.inner)}) ', alpha=alpha_vertex)
-        # ax.plot(vertex[~self.inner, 0], vertex[~self.inner, 1],
-        #         'xg', label=f'Outer vertices ({sum(~self.inner)}) ', alpha=alpha_vertex)
-
-        ax.plot(
-            vertex[self.inner, 0],
-            vertex[self.inner, 1],
-            "xm",
-            label="Interior vertices",
-            alpha=alpha_vertex,
-        )
-        ax.plot(
-            vertex[~self.inner, 0],
-            vertex[~self.inner, 1],
-            "xg",
-            label="Outer vertices",
-            alpha=alpha_vertex,
-        )
-
-        # Plot the boundary vertices
-        # ax.plot(self.outer_points[:, 0], self.outer_points[:, 1],
-        #         'x', color='black', label='Outer Vertices', alpha=alpha_border)
-
-        # Plot the boundary edges as dashed lines
-        for edge in boundary_edge:
-            x_coords = vertex[edge, 0]
-            y_coords = vertex[edge, 1]
-            ax.plot(x_coords, y_coords, "--r", alpha=alpha_border)
-
-        for poly in self.domain:
-            x, y = poly.exterior.xy
-            ax.plot(x, y, "-", color="orange", alpha=1)
-
-        # Add a legend
-        ax.legend()
-
-        # Display the plot
-        ax.set_title(title)
-        ax.set_xlabel("X-coordinate")
-        ax.set_ylabel("Y-coordinate")
-        ax.legend(loc="best")
-        ax.grid(True, linestyle=":", alpha=0.6)
-        # plt.show()
-        return ax
+        return _plot_mesh(self, ax=ax, figsize=figsize, title=title, alpha_vertex=alpha_vertex,
+                          alpha_triangle=alpha_triangle, alpha_border=alpha_border)
 
     def get_distance(self, points=None):
         """
@@ -893,9 +815,9 @@ class FEMSolver:
     def compute_stats(self):
         """
         Interior angles and areas of every mesh triangle (via
-        `compute_angles`/`compute_area`); used by `__init__` (when
-        ``stats=True``) to populate `angles`/`areas` and warn about
-        poor-quality (small-angle) meshes.
+        `compute_angles`/`compute_area`); used by `angles`/`areas` (on
+        first access) and by `__init__` with ``stats=True``, which also logs
+        them and a note about poor-quality (small-angle) meshes.
 
         Returns
         -------
@@ -917,13 +839,18 @@ class FEMSolver:
     @property
     def angles(self):
         """(nelements, 3) ndarray of the triangles' interior angles
-        (degrees), or None if `__init__` was called with ``stats=False``."""
+        (degrees); computed on first access (or at construction with
+        ``stats=True``)."""
+        if self._angles is None:
+            self._angles, self._areas = self.compute_stats()
         return self._angles
 
     @property
     def areas(self):
-        """(nelements,) ndarray of triangle areas, or None if `__init__`
-        was called with ``stats=False``."""
+        """(nelements,) ndarray of triangle areas; computed on first access
+        (or at construction with ``stats=True``)."""
+        if self._areas is None:
+            self._angles, self._areas = self.compute_stats()
         return self._areas
 
 
@@ -1034,9 +961,8 @@ class FEMSolver:
             self.print_info(msg)
 
     def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp."""
-        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
-        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
+        _print_info(msg)
 
 
 # % Heat kernel
@@ -1290,7 +1216,7 @@ class spdeAppoxCov(Matern):
 
         return base
 
-    def setup(self, mesh_obj: meshio._mesh.Mesh, domain=None, stats=True):
+    def setup(self, mesh_obj: meshio._mesh.Mesh, domain=None, stats=False):
         """
         Initialize the covariance model with a mesh.
 
@@ -1314,8 +1240,9 @@ class spdeAppoxCov(Matern):
             reasonable default choice used to build it). If omitted,
             `FEMSolver` falls back to the convex hull of the mesh's own
             vertices, i.e. every vertex is treated as inner.
-        stats : bool, optional
-            Whether to compute mesh quality statistics (default is True)
+        stats : bool, default False
+            Compute and log the mesh quality statistics at setup (see
+            `FEMSolver`); otherwise they are computed on first access.
 
         Returns
         -------
@@ -1615,9 +1542,8 @@ class spdeAppoxCov(Matern):
             self.print_info(msg)
 
     def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp."""
-        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
-        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
+        _print_info(msg)
 
     def __getstate__(self):
         # Create a dictionary of the object's state excluding non-picklable attributes

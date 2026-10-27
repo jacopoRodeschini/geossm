@@ -19,7 +19,6 @@ from geossm.ssm.statespace import StateSpaceModel, _filter_kernelJAX, _itype_for
 from geossm.covmodel.covmodels import spdeAppoxCov
 from statsmodels.iolib.summary import Summary
 
-from datetime import datetime, timezone
 import time
 import warnings
 from jax.scipy.linalg import block_diag
@@ -28,7 +27,7 @@ from scipy.optimize import minimize
 
 from geossm.data_preparation import DesignMatricesBuilder
 from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table, _summary_table_source
-from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull
+from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull, _print_info
 
 
 from shapely.geometry import MultiPoint
@@ -2042,7 +2041,5 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             self.print_info(msg)
 
     def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp."""
-
-        dt = datetime.fromtimestamp(time.time(), tz=timezone.utc)
-        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
+        _print_info(msg)

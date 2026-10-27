@@ -159,3 +159,42 @@ def test_model_uses_only_the_latent_interface():
     import inspect
     from geossm.stmodel import lrssm
     assert "fem_solver" not in inspect.getsource(lrssm)
+
+
+class TestPresentation:
+    """Section B, P8: one log format, plotting outside the numerical class,
+    mesh statistics computed on demand."""
+
+    def test_mesh_statistics_are_computed_on_first_access(self, mesh):
+        fem = FEMSolver(mesh, domain=[INNER], verbose=False)
+        assert fem._angles is None and fem._areas is None  # not computed at construction
+        angles, areas = fem.compute_stats()
+        np.testing.assert_array_equal(fem.angles, angles)
+        np.testing.assert_array_equal(fem.areas, areas)
+        eager = FEMSolver(mesh, domain=[INNER], verbose=False, stats=True)
+        assert eager._angles is not None
+        np.testing.assert_array_equal(eager.angles, angles)
+        assert "N/A" not in str(FEMSolver(mesh, domain=[INNER], verbose=False).summary())
+
+    def test_plot_mesh_draws_with_the_plotting_function(self, fem):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from geossm.covmodel._plotting import plot_mesh
+        ax = fem.plot_mesh(title="mesh")
+        assert ax.get_title() == "mesh" and len(ax.lines) + len(ax.collections) > 0
+        ax2 = plot_mesh(fem, title="mesh")
+        assert len(ax2.lines) == len(ax.lines) and len(ax2.collections) == len(ax.collections)
+        plt.close("all")
+
+    def test_print_info_format_is_shared(self, fem, cov, capsys):
+        import re
+        from geossm import DesignMatricesBuilder
+        from geossm.stmodel import LRStateSpaceModel
+        printers = [fem.print_info, cov.print_info, DesignMatricesBuilder.print_info,
+                    lambda m: LRStateSpaceModel.print_info(None, m)]
+        for p in printers:
+            p("hello")
+        lines = capsys.readouterr().out.splitlines()
+        assert len(lines) == 4
+        assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} - hello", ln) for ln in lines)
