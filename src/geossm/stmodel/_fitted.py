@@ -18,6 +18,7 @@ import numpy as np
 from geossm.ssm.statespace import (
     _compute_predict_mean_kernel_JAX,
     _compute_predict_sigma_kernel_JAX,
+    _compute_predict_var_kernel_JAX,
     _filter_kernelJAX,
 )
 from geossm.stmodel._design import prediction_design
@@ -264,19 +265,23 @@ def observed_loglik(state, y_obs, Xbeta, x0, Sigma0):
 
 # %% Prediction
 
-def predict_from_fit(state, df, verbose=True, std=True, log=None):
+def predict_from_fit(state, df, verbose=True, cov="full", log=None):
     """
     Out-of-sample prediction from a fitted state (`state.params`,
     `state.x_smoothed`/`P_smoothed`): design matrix at `df` with the fitted
-    builders, basis at the new sites, `y = H x + X beta` and, if `std`, the
-    state-driven covariance `H P H'`, at the prediction timestamps (a subset
-    of the training ones).
+    builders, basis at the new sites, `y = H x + X beta` and the state-driven
+    uncertainty `H P H'` (no measurement error), at the prediction timestamps
+    (a subset of the training ones).
 
-    `verbose` is passed to the design-matrix builders; `log(msg)` receives
-    progress messages. Returns a dict with `points`, `block_p`, `y_pred`,
-    `Sigma_y_pred` (NumPy, `state.dtype`; `None` if not `std`), `tdelta`,
-    `timestamps` and `crs`.
+    `cov` selects the uncertainty: `"full"` (covariance `(p, p, T)` and its
+    diagonal), `"diag"` (point-wise variance `(p, T)` only, without building
+    the covariance) or `None`. `verbose` is passed to the design-matrix
+    builders; `log(msg)` receives progress messages. Returns a dict with
+    `points`, `block_p`, `y_pred`, `Sigma_y_pred`, `var_pred` (NumPy,
+    `state.dtype`; `None` when not computed), `tdelta`, `timestamps`, `crs`.
     """
+    if cov not in ("full", "diag", None):
+        raise ValueError("cov must be 'full', 'diag' or None")
     log = log or (lambda msg: None)
     log("Predicting response variable...")
 
@@ -325,7 +330,8 @@ def predict_from_fit(state, df, verbose=True, std=True, log=None):
     log("Start Prediction the SSM...")
     t_start = time.time()
     y_pred = _compute_predict_mean_kernel_JAX(H, x_T, Xbeta_predict, beta)
-    Sigma_y_pred = _compute_predict_sigma_kernel_JAX(H, P_T) if std else None
+    Sigma_y_pred = _compute_predict_sigma_kernel_JAX(H, P_T) if cov == "full" else None
+    var_pred = _compute_predict_var_kernel_JAX(H, P_T) if cov == "diag" else None
     tdelta = time.time() - t_start
     log("Prediction done. Time elapsed: {}.".format(tdelta))
 
@@ -334,6 +340,9 @@ def predict_from_fit(state, df, verbose=True, std=True, log=None):
         "block_p": block_p,
         "y_pred": np.asarray(y_pred, dtype=dtype),
         "Sigma_y_pred": None if Sigma_y_pred is None else np.asarray(Sigma_y_pred, dtype=dtype),
+        "var_pred": (np.asarray(var_pred, dtype=dtype) if var_pred is not None
+                     else None if Sigma_y_pred is None
+                     else np.ascontiguousarray(np.diagonal(np.asarray(Sigma_y_pred, dtype=dtype), axis1=0, axis2=1).T)),
         "tdelta": tdelta,
         # CRS is assumed identical across variables (build_predict already
         # enforces it matches the training CRS for each formula)

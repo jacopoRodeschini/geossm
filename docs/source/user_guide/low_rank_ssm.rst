@@ -80,10 +80,15 @@ Results, inference, and prediction
 - :attr:`~geossm.stmodel.LRStateSpaceResults.aic` /
   :attr:`~geossm.stmodel.LRStateSpaceResults.bic` -- information
   criteria for model comparison.
-- :meth:`~geossm.stmodel.LRStateSpaceResults.predict` and
-  :meth:`~geossm.stmodel.LRStateSpaceResults.to_geo` -- predict at new
-  locations/times and export fitted/predicted values back to a
-  :class:`geopandas.GeoDataFrame`.
+- :meth:`~geossm.stmodel.LRStateSpaceResults.predict` -- predicted mean
+  and point-wise variance at new locations/times, as arrays.
+- :meth:`~geossm.stmodel.LRStateSpaceResults.get_prediction` -- the same
+  prediction as a :class:`~geossm.stmodel.LRPredictionResults` object, with
+  the predictive covariance, back-transformation, export to a
+  :class:`geopandas.GeoDataFrame` (``to_geo``) and change of support to
+  polygons (``to_poly``).
+- :meth:`~geossm.stmodel.LRStateSpaceResults.to_geo` -- export the fitted
+  values back to a :class:`geopandas.GeoDataFrame`.
 - :meth:`~geossm.stmodel.LRStateSpaceResults.back_transform` -- map
   parameters back through a formula transformation (e.g. undo a
   ``np.sqrt(...)`` response transform) via the delta method.

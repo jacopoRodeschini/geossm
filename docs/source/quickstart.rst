@@ -91,8 +91,10 @@ Fitting runs an EM-type procedure built on the Kalman filter/smoother.
 ``results`` is a :class:`~geossm.stmodel.LRStateSpaceResults`: use
 ``results.compute_cov_params()`` to obtain standard errors and
 significance (``results.bse``, ``results.pvalues``, ``results.conf_int()``),
-``results.predict(...)`` to predict at new locations, and
-``results.to_geo()`` to export fitted/predicted values back to a
+``results.predict(...)`` for the predicted mean and point-wise variance
+at new locations (arrays), ``results.get_prediction(...)`` for a
+prediction object (covariance, back-transformation, export, polygons),
+and ``results.to_geo()`` to export the fitted values back to a
 GeoDataFrame.
 
 Next steps

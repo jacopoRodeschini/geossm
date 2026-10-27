@@ -7,12 +7,14 @@ Type/shape/dtype checks right after `LRStateSpaceModel.fit` are in
 test_lrssm.py (`TestFit`).
 """
 
+import geopandas as gpd
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from geossm.ssm import StateSpaceModel, StateSpaceResults
+from geossm.stmodel import LRPredictionResults
 from tests.test_lrssm import _build_model, _options
 from tests._synthetic import make_panel_gdf, make_square_mesh
 
@@ -162,46 +164,54 @@ class TestLRResultsAfterFit:
 
 
 class TestLRPredictLifecycle:
-    def test_predict_returns_self_and_replaces_previous_predictions(self, gdf, mesh):
+    """Predictions do not modify the fit results; each `get_prediction` is an
+    independent `LRPredictionResults` (Section B, P2)."""
+
+    def test_predictions_are_independent_objects(self, gdf, mesh):
         _, res = _fresh_fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
-        assert res.predict(newdata, verbose=False) is res
-        p_all = res.y_pred.shape[0]
-        res.predict(newdata[newdata["site"] < 10], verbose=False)
-        assert res.y_pred.shape[0] == 10 < p_all
-        assert np.asarray(res.block_p_pred)[-1] == 10
+        a = res.get_prediction(newdata, verbose=False)
+        b = res.get_prediction(newdata[newdata["site"] < 10], verbose=False)
+        assert isinstance(a, LRPredictionResults) and a is not b
+        assert a.y_pred.shape[0] == 25 and b.y_pred.shape[0] == 10 and a.block_p[-1] == 25
+        assert a.fitted_state is res.fitted_state
+        for name in ("y_pred", "Sigma_y_pred", "points_pred", "y_pred_back_list"):
+            assert not hasattr(res, name), name
 
     @pytest.mark.usefixtures("x64")
     def test_predictions_are_numpy_in_the_model_dtype(self, gdf, mesh):
         # F45: JAX arrays, and y_pred float64 in a float32 fit under x64.
         _, res = _fresh_fit(gdf, mesh, dtype=jnp.float32)
-        res.predict(gdf.drop(columns="y"), verbose=False)
-        for name in ("y_pred", "Sigma_y_pred"):
-            value = getattr(res, name)
+        newdata = gdf.drop(columns="y")
+        pred = res.get_prediction(newdata, verbose=False)
+        y_pred, var_pred = res.predict(newdata, verbose=False)
+        for name, value in (("y_pred", pred.y_pred), ("Sigma_y_pred", pred.Sigma_y_pred),
+                            ("var_pred", pred.var_pred), ("predict mean", y_pred), ("predict variance", var_pred)):
             assert type(value) is np.ndarray and value.dtype == np.float32, name
+        assert not pred.y_pred.flags.writeable and not pred.Sigma_y_pred.flags.writeable
 
-    def test_new_prediction_invalidates_back_transformed_predictions(self, gdf, mesh):
-        # F46: the lists of the previous prediction were kept; to_geo() failed.
+    def test_back_transform_of_one_prediction_does_not_affect_another(self, gdf, mesh):
+        # F46 (stale back-transformed predictions) cannot occur: each
+        # prediction keeps its own back-transformed values.
         _, res = _fresh_fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
-        res.predict(newdata, verbose=False)
-        res.back_transform(lambda v: v)
-        res.predict(newdata[newdata["site"] < 10], verbose=False)
-        assert res.y_pred_back_list is None and res.Sigma_y_pred_back_list is None
-        assert res.y_hat_back_list is not None  # in-sample: still valid
-        assert not any("back" in c for c in res.to_geo()["pred"].columns)
+        a = res.get_prediction(newdata, verbose=False).back_transform(lambda v: v)
+        b = res.get_prediction(newdata[newdata["site"] < 10], verbose=False)
+        assert a.y_pred_back_list is not None and b.y_pred_back_list is None
+        assert not any("back" in c for c in b.to_geo().columns)
+        assert res.y_hat_back_list is None  # the fit results are untouched
 
     def test_to_geo_columns_and_lengths(self, gdf, mesh):
         model, res = _fresh_fit(gdf, mesh)
-        newdata = gdf.drop(columns="y")
         geo = res.to_geo()
-        assert set(geo) == {"hat", "pred"} and geo["pred"] is None
         p, _, T = model.shape
-        assert len(geo["hat"]) == p * T
-        res.predict(newdata, verbose=False)
-        geo = res.to_geo()
-        assert len(geo["pred"]) == res.y_pred.size
-        assert {"point_id", "timestamp", "y_pred_y", "std_pred_y", "geometry"} <= set(geo["pred"].columns)
+        assert isinstance(geo, gpd.GeoDataFrame) and len(geo) == p * T
+        assert {"point_id", "timestamp", "y_hat_y", "std_hat_y", "geometry"} <= set(geo.columns)
+        pred = res.get_prediction(gdf.drop(columns="y"), verbose=False)
+        geo = pred.to_geo()
+        assert isinstance(geo, gpd.GeoDataFrame) and len(geo) == pred.y_pred.size
+        assert {"point_id", "timestamp", "y_pred_y", "std_pred_y", "geometry"} <= set(geo.columns)
+        np.testing.assert_allclose(geo["std_pred_y"].to_numpy() ** 2, pred.var_pred.T.ravel(), rtol=1e-5)
 
 
 def test_lr_sim_returns_states_with_initial_state(gdf, mesh):
@@ -238,15 +248,15 @@ def test_summary_and_repr_name_the_response(problem, lr_fit):
 
 def test_back_transform_without_prediction_covariance_warns(gdf, mesh):
     _, res = _fresh_fit(gdf, mesh)
-    res.predict(gdf.drop(columns="y"), verbose=False, std=False)
+    pred = res.get_prediction(gdf.drop(columns="y"), std=False, verbose=False)
     with pytest.warns(RuntimeWarning, match="predictions have no covariance"):
-        res.back_transform(lambda v: v)
-    assert res.y_pred_back_list is None and res.y_hat_back_list is not None
+        assert pred.back_transform(lambda v: v) is pred
+    assert pred.y_pred_back_list is None
 
 
 def test_to_geo_columns_are_in_the_model_dtype(lr_fit):
     _, res = lr_fit
-    hat = res.to_geo()["hat"]
+    hat = res.to_geo()
     assert hat["y_hat_y"].dtype == hat["std_hat_y"].dtype == np.dtype(res.dtype)
 
 

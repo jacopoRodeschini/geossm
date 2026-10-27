@@ -38,6 +38,7 @@ from .stmodel import (
     FitOptions,
     ModelParams,
     LRStateSpaceResults,
+    LRPredictionResults,
 )
 
 # Public API
@@ -71,4 +72,5 @@ __all__ = [
     "FitOptions",
     "ModelParams",
     "LRStateSpaceResults",
+    "LRPredictionResults",
 ]

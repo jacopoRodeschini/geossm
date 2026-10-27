@@ -51,6 +51,7 @@ covariance basis (see *Covariance* below).
 
    LRStateSpaceModel
    LRStateSpaceResults
+   LRPredictionResults
    Param
    ModelParams
    FitOptions

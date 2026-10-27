@@ -18,7 +18,8 @@ from scipy import optimize, stats
 from shapely.geometry import Polygon
 
 from geossm.covmodel import spdeAppoxCov
-from geossm.stmodel import FitOptions, LRStateSpaceModel, LRStateSpaceResults, ModelParams, Param
+from geossm.stmodel import (FitOptions, LRPredictionResults, LRStateSpaceModel, LRStateSpaceResults,
+                            ModelParams, Param)
 from geossm.stmodel.lrssm import _ks_value_and_grad, _spde_marginal_precision
 from geossm.stmodel.stmodel_results import FittedState, _pack_params, _unpack_params
 from tests._known_bugs import known_bug
@@ -350,37 +351,64 @@ class TestStoppingRule:
 
 
 class TestPredict:
+    """`predict` (mean and point-wise variance, arrays) and `get_prediction`
+    (`LRPredictionResults`); neither modifies the fit results (P2)."""
+
     def test_predict_on_time_window(self, fitted, gdf):
         model, res = fitted
         times = np.sort(gdf["Time"].unique())
         sub = gdf[gdf["Time"] <= times[9]].drop(columns="y")
-        out = model.predict(sub, res, verbose=False)
-        assert out is res  # predict() stores into and returns the passed results (F27)
-        assert res.y_pred.shape == (N_SITES, 10)
-        assert res.Sigma_y_pred.shape == (N_SITES, N_SITES, 10)
-        assert np.all(np.diagonal(res.Sigma_y_pred, axis1=0, axis2=1) >= -1e-6)
+        y_pred, var_pred = res.predict(sub, verbose=False)
+        assert type(y_pred) is np.ndarray and y_pred.shape == (N_SITES, 10)
+        assert type(var_pred) is np.ndarray and var_pred.shape == (N_SITES, 10)
+        assert np.all(var_pred >= -1e-6)
+        pred = res.get_prediction(sub, verbose=False)
+        assert isinstance(pred, LRPredictionResults)
+        assert pred.Sigma_y_pred.shape == (N_SITES, N_SITES, 10)
+        np.testing.assert_array_equal(pred.y_pred, y_pred)
+        assert not hasattr(res, "y_pred")  # the fit results are not modified
+
+    def test_variance_is_the_diagonal_of_the_covariance(self, fitted, gdf):
+        # predict computes diag(H P H') without the (p, p, T) covariance.
+        _, res = fitted
+        newdata = gdf.drop(columns="y")
+        _, var_pred = res.predict(newdata, verbose=False)
+        pred = res.get_prediction(newdata, verbose=False)
+        diag = np.diagonal(pred.Sigma_y_pred, axis1=0, axis2=1).T
+        scale = np.abs(diag).max()
+        np.testing.assert_allclose(var_pred, diag, rtol=1e-5, atol=1e-6 * scale)
+        np.testing.assert_array_equal(pred.var_pred, diag)
 
     def test_predict_at_new_locations(self, fitted, mesh):
         model, res = fitted
         xy = np.array([[2.0, 2.0], [5.0, 5.0], [8.0, 3.0]])
-        new = make_panel_gdf(n_sites=3, n_times=N_TIMES, missing_frac=0.0, seed=3, xy=xy)
-        model.predict(new.drop(columns="y"), res, verbose=False, std=False)
-        assert res.y_pred.shape == (3, N_TIMES)
-        assert res.Sigma_y_pred is None
-        assert np.all(np.isfinite(res.y_pred))
+        new = make_panel_gdf(n_sites=3, n_times=N_TIMES, missing_frac=0.0, seed=3, xy=xy).drop(columns="y")
+        y_pred, var_pred = res.predict(new, variance=False, verbose=False)
+        assert y_pred.shape == (3, N_TIMES) and var_pred is None
+        assert np.all(np.isfinite(y_pred))
+        pred = res.get_prediction(new, std=False, verbose=False)
+        assert pred.Sigma_y_pred is None and pred.var_pred is None
+        np.testing.assert_array_equal(pred.y_pred, y_pred)
+
+    def test_model_predict_is_a_shortcut(self, fitted, gdf):
+        model, res = fitted
+        newdata = gdf.drop(columns="y")
+        for a, b in zip(model.predict(newdata, res, verbose=False), res.predict(newdata, verbose=False)):
+            np.testing.assert_array_equal(a, b)
 
     def test_predict_outside_training_period_raises(self, fitted, gdf):
         model, res = fitted
         later = gdf.copy()
         later["Time"] = later["Time"] + np.timedelta64(365, "D")
         with pytest.raises(ValueError):
-            model.predict(later.drop(columns="y"), res, verbose=False)
+            res.predict(later.drop(columns="y"), verbose=False)
+        with pytest.raises(ValueError):
+            res.get_prediction(later.drop(columns="y"), verbose=False)
 
     def test_in_sample_prediction_reproduces_fitted_values(self, fitted, gdf):
-        model, res = fitted
-        y_hat = res.y_hat.copy()
-        model.predict(gdf.drop(columns="y"), res, verbose=False, std=False)
-        np.testing.assert_allclose(res.y_pred, y_hat, rtol=1e-5, atol=1e-5)
+        _, res = fitted
+        y_pred, _ = res.predict(gdf.drop(columns="y"), variance=False, verbose=False)
+        np.testing.assert_allclose(y_pred, res.y_hat, rtol=1e-5, atol=1e-5)
 
 
 @pytest.fixture(scope="module")
@@ -644,10 +672,10 @@ class TestResultsLifecycle:
         model, cov = self._model(gdf, mesh)
         newdata = gdf.drop(columns="y")
         res_a = model.fit(options=_options(max_iter=3))
-        y_pred_a = res_a.predict(newdata, verbose=False, std=False).y_pred.copy()
+        y_pred_a = res_a.predict(newdata, variance=False, verbose=False)[0].copy()
         model.fit(params0=ModelParams(s2e=Param("s2e", [2.0], fixed=True)), options=_options(max_iter=3))
         rescale = cov.rescale
-        np.testing.assert_array_equal(res_a.predict(newdata, verbose=False, std=False).y_pred, y_pred_a)
+        np.testing.assert_array_equal(res_a.predict(newdata, variance=False, verbose=False)[0], y_pred_a)
         assert cov.rescale == rescale  # predict does not modify the covariance functions
 
     def test_results_survive_setup_with_another_mesh(self, gdf, mesh):
@@ -655,7 +683,7 @@ class TestResultsLifecycle:
         newdata = gdf.drop(columns="y")
         res = model.fit(options=_options(max_iter=3))
         H = np.asarray(res._compute_hessian()[0]).copy()
-        y_pred = res.predict(newdata, verbose=False, std=False).y_pred.copy()
+        y_pred = res.predict(newdata, variance=False, verbose=False)[0].copy()
         p, q, T = model.shape
         text = str(res.summary())
 
@@ -666,7 +694,7 @@ class TestResultsLifecycle:
 
         res._hessian = None  # recompute from the results' own fit-time state
         np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
-        np.testing.assert_array_equal(res.predict(newdata, verbose=False, std=False).y_pred, y_pred)
+        np.testing.assert_array_equal(res.predict(newdata, variance=False, verbose=False)[0], y_pred)
         assert f"q = {q}" in text and f"q = {q}" in str(res.summary())
 
 
@@ -691,7 +719,7 @@ class TestFittedState:
     def test_predict_and_hessian_ignore_later_changes_to_the_model(self, gdf, mesh):
         model, _, res = self._fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
-        y_pred = res.predict(newdata, verbose=False, std=False).y_pred.copy()
+        y_pred = res.predict(newdata, variance=False, verbose=False)[0].copy()
         H = np.asarray(res._compute_hessian()[0]).copy()
 
         # Outside code changes the model configuration the results used: the
@@ -700,7 +728,7 @@ class TestFittedState:
         model.domain = [Polygon([(0, 0), (5, 0), (5, 5), (0, 5)])]
         model.builders = model.points = model.pdim = None
 
-        np.testing.assert_array_equal(res.predict(newdata, verbose=False, std=False).y_pred, y_pred)
+        np.testing.assert_array_equal(res.predict(newdata, variance=False, verbose=False)[0], y_pred)
         res._hessian = None
         np.testing.assert_array_equal(np.asarray(res._compute_hessian()[0]), H)
 
@@ -751,16 +779,18 @@ class TestFittedState:
         # back_transform, to_geo and the summary work after it is collected.
         model, _, res = self._fit(gdf, mesh, max_iter=2)
         assert not hasattr(res, "model")
-        y_pred = model.predict(gdf.drop(columns="y"), res, verbose=False).y_pred.copy()
+        y_pred = model.predict(gdf.drop(columns="y"), res, verbose=False)[0].copy()
         ref = weakref.ref(model)
         del model
         gc.collect()
         assert ref() is None
         res.compute_cov_params()
         assert res._hessian is not None
-        np.testing.assert_array_equal(res.predict(gdf.drop(columns="y"), verbose=False).y_pred, y_pred)
+        np.testing.assert_array_equal(res.predict(gdf.drop(columns="y"), verbose=False)[0], y_pred)
+        pred = res.get_prediction(gdf.drop(columns="y"), verbose=False)
         res.back_transform(lambda v: v)
-        assert set(res.to_geo()) == {"hat", "pred"}
+        pred.back_transform(lambda v: v)
+        assert len(res.to_geo()) == len(res.y_hat.ravel()) and len(pred.to_geo()) == pred.y_pred.size
         assert "LRStateSpaceModel" in str(res.summary())
 
 
@@ -812,8 +842,6 @@ class TestResultsMethods:
         cov = res.coverage_probability(alpha=0.05)
         assert 0.0 <= cov <= 1.0
 
-    # The shared fit may carry a predict(std=False) from an earlier test.
-    @pytest.mark.filterwarnings("ignore:back_transform\\(\\). the predictions have no covariance:RuntimeWarning")
     def test_back_transform_identity(self, fitted):
         _, res = fitted
         res.back_transform(lambda v: v)
@@ -823,37 +851,35 @@ class TestResultsMethods:
         # F39: columns read y_hat_['y'], std_hat_['y'] and the summary [['y']].
         model = _build_model(gdf, mesh)
         res = model.fit(options=_options(max_iter=1))
-        res.predict(gdf.drop(columns="y"), verbose=False)
+        pred = res.get_prediction(gdf.drop(columns="y"), verbose=False)
         res.back_transform(lambda v: v)
-        geo = res.to_geo()
-        assert {"y_hat_y", "std_hat_y", "y_hat_back_y", "std_hat_back_y"} <= set(geo["hat"].columns)
-        assert {"y_pred_y", "std_pred_y", "y_pred_back_y", "std_pred_back_y"} <= set(geo["pred"].columns)
-        poly = res.to_poly([DOMAIN], std=True)
+        pred.back_transform(lambda v: v)
+        geo_hat, geo_pred = res.to_geo(), pred.to_geo()
+        assert {"y_hat_y", "std_hat_y", "y_hat_back_y", "std_hat_back_y"} <= set(geo_hat.columns)
+        assert {"y_pred_y", "std_pred_y", "y_pred_back_y", "std_pred_back_y"} <= set(geo_pred.columns)
+        poly = pred.to_poly([DOMAIN], std=True)
         assert {"y", "std_y"} <= set(poly.columns)
-        assert not any("[" in str(c) for df in (geo["hat"], geo["pred"], poly) for c in df.columns)
-        for obj in (res, model):
+        assert not any("[" in str(c) for df in (geo_hat, geo_pred, poly) for c in df.columns)
+        for obj in (res, model, pred):
             (line,) = [ln for ln in str(obj.summary()).splitlines() if ln.startswith("Dep. Variables:")]
             assert line.split()[2] == "y"
 
 
 def test_to_poly_std_with_two_responses():
-    # F10. Stubbed results object: the defect was in to_poly's own loop, so
-    # no fit is needed. One polygon containing all 4 points, so W = 1/4 * 1'.
-    res = object.__new__(LRStateSpaceResults)
+    # F10. Prediction built directly: the defect was in to_poly's own loop,
+    # so no fit is needed. One polygon containing all 4 points, so W = 1/4 * 1'.
     n, T = 4, 3
     pts = np.array([[0.1, 0.1], [0.9, 0.1], [0.1, 0.9], [0.9, 0.9]])
     ts = np.array(["2020-01-01", "2020-01-02", "2020-01-03"], dtype="datetime64[D]")
-    res.y_pred = np.vstack([np.ones((n, T)), 2.0 * np.ones((n, T))])
+    y_pred = np.vstack([np.ones((n, T)), 2.0 * np.ones((n, T))])
     # Response a: iid unit points. Response b: unit variances, correlation 0.5.
     Sigma_b = 0.5 * np.eye(n) + 0.5 * np.ones((n, n))
     Sigma = np.zeros((2 * n, 2 * n))
     Sigma[:n, :n], Sigma[n:, n:] = np.eye(n), Sigma_b
-    res.Sigma_y_pred = np.tile(Sigma[:, :, None], (1, 1, T))
-    res.block_p_pred = np.array([0, n, 2 * n])
-    res.points_pred, res.timestamps_pred = [pts, pts], [ts, ts]
-    res.crs_pred, res.y_pred_back_list = "EPSG:3857", None
-    res._fitted_state = types.SimpleNamespace(y_name=("a", "b"))
-    out = res.to_poly([Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], std=True)
+    state = types.SimpleNamespace(y_name=("a", "b"), dtype=np.dtype(np.float64))
+    pred = LRPredictionResults(state, y_pred, Sigma_y_pred=np.tile(Sigma[:, :, None], (1, 1, T)),
+                               points=[pts, pts], block_p=[0, n, 2 * n], timestamps=[ts, ts], crs="EPSG:3857")
+    out = pred.to_poly([Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])], std=True)
     np.testing.assert_allclose(out["a"], 1.0)
     np.testing.assert_allclose(out["b"], 2.0)
     # sqrt(w' Sigma w), w = 1/4: a -> sqrt(4/16) = 0.5; b -> sqrt((4 + 12 * 0.5)/16)

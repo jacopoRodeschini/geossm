@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P1, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P2, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -55,6 +55,7 @@ classDiagram
         _compute_expected_values_kernelJAX() jit
         _compute_predict_mean_kernel_JAX() jit
         _compute_predict_sigma_kernel_JAX() jit
+        _compute_predict_var_kernel_JAX() jit, diagonal only
         _sim_kernelJAX()
         _highest_matmul_precision() decorator
     }
@@ -77,7 +78,7 @@ classDiagram
         +cov_function, domain_hull, shape : property
         +setup(cov_fun) self
         +fit(params0, options) LRStateSpaceResults
-        +predict(df, modelresults, verbose, std) LRStateSpaceResults, delegates to results
+        +predict(df, modelresults, variance, verbose) tuple, shortcut for results.predict
         +sim(formulas, seed, params, verbose, stats) tuple
         +getDesignMatrix(df) tuple
         +BuildDesignMatrix(df, formulas) tuple
@@ -108,25 +109,41 @@ classDiagram
         +iterations : int
         +llf_path : list~float~, entry 0 is nan
         +block_p, points_hat, timestamps_hat, crs_hat
-        +y_pred, Sigma_y_pred : ndarray, set by predict
-        +points_pred, block_p_pred, timestamps_pred, crs_pred
-        +y_hat_back_list, y_pred_back_list, ... : set by back_transform
-        +y_hat_list, y_obs_list, residuals_list, y_pred_list : property
+        +y_hat_back_list, y_obs_back_list, ... : set by back_transform
+        +y_hat_list, y_obs_list, residuals_list : property
         +n_params, df_resid, aic, bic : property
         +theta_hat, bse, bse_vector, tvalues, pvalues : property
         +compute_cov_params() Array
         +conf_int(alpha) ndarray
-        +predict(df, verbose, std) self
+        +predict(df, variance, verbose) tuple of ndarray
+        +get_prediction(df, std, verbose) LRPredictionResults
         +back_transform(g_invs) self
-        +to_geo() dict
-        +to_poly(polys, back_transform, std) GeoDataFrame
+        +to_geo() GeoDataFrame
         +fitted_state : FittedState, read-only property
         +x_smoothed, P_smoothed, P_pred_smoothed, S11, S10, S00 : property, views of fitted_state
         +summary(alpha) Summary
         -_fitted_state : FittedState
         -_hessian, _cov_params, _n_params, ... : lazy caches
         -_compute_hessian() / _inference_params()
-        -_delta_method() / _areal_weights()
+    }
+    class LRPredictionResults {
+        +y_pred : ndarray p x T, read-only
+        +Sigma_y_pred : ndarray p x p x T or None
+        +var_pred : ndarray p x T or None
+        +points, block_p, timestamps, crs, tdelta
+        +y_pred_back_list, Sigma_y_pred_back_list : set by back_transform
+        +y_pred_list, var_pred_list, Sigma_y_pred_list : property
+        +fitted_state, y_name : property
+        +back_transform(g_invs) self
+        +to_geo() GeoDataFrame
+        +to_poly(polys, back_transform, std) GeoDataFrame
+        +summary() Summary
+    }
+    class output_functions {
+        <<module functions: stmodel._output>>
+        build_geo_dataframe() / diag_variance()
+        as_polygon_gdf() / areal_weights()
+        delta_method() / direct_transform() / normalize_g_invs()
     }
     class FittedState {
         <<frozen dataclass>>
@@ -148,7 +165,7 @@ classDiagram
     class fitted_functions {
         <<module functions: stmodel._fitted>>
         observed_loglik(state, y_obs, Xbeta, x0, Sigma0) callable
-        predict_from_fit(state, df, verbose, std, log) dict
+        predict_from_fit(state, df, verbose, cov, log) dict
         latent_basis(cov_function, points, dtype) list
         build_H(A, basis) / build_RF(s2e, f, pdim, qdim, dtype)
         mesh_arrays(cov_function, dtype, itype) tuple
@@ -269,6 +286,10 @@ classDiagram
     LRStateSpaceModel ..> FitOptions : consumes
 
     LRStateSpaceResults ..> fitted_functions : Hessian, predict
+    LRStateSpaceResults ..> LRPredictionResults : get_prediction creates
+    LRStateSpaceResults ..> output_functions : to_geo, back_transform
+    LRPredictionResults ..> output_functions : to_geo, to_poly, back_transform
+    LRPredictionResults o-- "1" FittedState : fitted_state, shared with the fit results
     fitted_functions ..> design_functions
     fitted_functions ..> spdeAppoxCov : latent_basis, fem_arrays, n_latent
     fitted_functions ..> ssm_kernels : filter, prediction kernels
@@ -288,5 +309,5 @@ classDiagram
 
     spdeAppoxCov "1" *-- "0..1" FEMSolver : created in setup
 
-    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference; the latent state is held by fitted_state and exposed as properties; predict and back_transform store into and return self"
+    note for LRStateSpaceResults "Contract (tested): read-only NumPy arrays in the fit dtype; no model reference; the latent state is held by fitted_state and exposed as properties; prediction does not modify the results (predict returns arrays, get_prediction a new LRPredictionResults)"
     note for StateSpaceModel "filter/smoother mutate the matrices via set(); LRStateSpaceModel uses them as the E-step channel"

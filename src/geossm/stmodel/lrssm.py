@@ -949,22 +949,16 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_sim, x_sim, info, tdelta    
     
-    def predict(self, df, modelresults: LRStateSpaceResults, verbose = True, std=True):
+    def predict(self, df, modelresults: LRStateSpaceResults, variance=True, verbose=True):
         """
-        Out-of-sample prediction of the response variable(s) at new
-        locations/times, from an already-fitted model.
-
-        Equivalent to `modelresults.predict(df, verbose, std)`: the
-        prediction is computed from the results' `fitted_state` alone (see
-        `geossm.stmodel._fitted.predict_from_fit`), not from the model. For
-        each formula, a new design matrix/grid over `df` is built with the
-        formula's fitted `DesignMatricesBuilder`, so stateful transforms in
-        the formula (e.g. `standardize()`) are evaluated with the training
-        mean/std rather than recomputed on `df`; the smoothed states are
-        mapped through the new observation matrix `H` and design matrix to
-        get the predictive mean and covariance. The public
-        `getDesignMatrix` builds this same design matrix (plus the response
-        `y_obs`) for inspection/comparison outside of `predict()`.
+        Predicted mean and point-wise variance of the response variable(s)
+        at new locations/times, from an already-fitted model: a shortcut for
+        `modelresults.predict(df, variance, verbose)` (see
+        `LRStateSpaceResults.predict`; `LRStateSpaceResults.get_prediction`
+        returns an object with the full covariance, back-transformation and
+        export). The prediction is computed from the results' `fitted_state`
+        alone, not from the model, and neither the model nor the results are
+        modified.
 
         Parameters
         ----------
@@ -974,37 +968,22 @@ class LRStateSpaceModel(StateSpaceModel):
             not needed for prediction) and the same CRS as the training
             data. A single GeoDataFrame is used for every formula (e.g. a
             shared regular grid); a list with one GeoDataFrame per formula
-            (see `geossm.stmodel._design.as_prediction_dataframes`) predicts each response variable
-            at its own, different set of locations instead.
+            (see `geossm.stmodel._design.as_prediction_dataframes`) predicts
+            each response variable at its own, different set of locations.
         modelresults : LRStateSpaceResults
-            Results of a previous `fit()` call, providing the estimated
-            parameters (`modelresults.params`) and smoothed states used to
-            build the prediction, together with the covariance functions
-            of that fit (so the prediction does not depend on later
-            `fit()`/`setup()` calls on the model, and neither the model nor
-            its covariance functions are modified). Updated and returned in
-            place: the `*_pred` attributes of a previous `predict()` on the
-            same results are replaced, and its back-transformed predictions
-            (`y_pred_back_list`/`Sigma_y_pred_back_list`) are cleared
-            (rerun `back_transform` for the new prediction).
+            Results of a previous `fit()` call.
+        variance : bool, default True
+            Also compute the point-wise variance.
         verbose : bool, default True
-            Verbosity of the design-matrix builders. Progress messages
-            follow the model's verbosity at the end of the fit.
-        std : bool, default True
-            If `False`, skip the predictive covariance `Sigma_y_pred`
-            (left as `None`) -- useful when the ``(p, p, T)`` array does
-            not fit in device memory.
+            Verbosity of the design-matrix builders.
 
         Returns
         -------
-        LRStateSpaceResults
-            The same `modelresults` object, with `points_pred`,
-            `y_pred`/`Sigma_y_pred` (NumPy arrays in the dtype of the fit,
-            and their per-variable views
-            `y_pred_list`/`Sigma_y_pred_list`; `Sigma_y_pred` is `None`
-            if `std=False`), `tdelta_pred`,
-            `timestamps_pred`, and `crs_pred` populated (one entry per
-            response variable, except `tdelta_pred`/`crs_pred`).
+        y_pred : numpy.ndarray, shape (p, T)
+            Predicted mean, response variables stacked as in the fit.
+        var_pred : numpy.ndarray, shape (p, T), or None
+            Point-wise predictive variance `diag(H P_t H')` (`None` if
+            `variance=False`).
 
         Raises
         ------
@@ -1013,7 +992,7 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         if modelresults is None:
             raise ValueError("Model results must be provided for prediction")
-        return modelresults.predict(df, verbose=verbose, std=std)
+        return modelresults.predict(df, variance=variance, verbose=verbose)
 
     @_on_device
     def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):

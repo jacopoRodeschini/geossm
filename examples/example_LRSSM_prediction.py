@@ -194,17 +194,18 @@ grid = geodf.GeoDataFrame(grid, crs=4326)
 
 # %% Model prediction 
 
-results = results.predict(grid, verbose=True)
-print(results)  # results.summary()
+pred = results.get_prediction(grid, verbose=True)
+print(pred)  # pred.summary()
 
 # %% Compute the back transformation of the predicted values and their covariance matrix
 import jax.numpy as jnp
-results = results.back_transform(g_inv=jnp.exp)
+results = results.back_transform(jnp.exp)
+pred = pred.back_transform(jnp.exp)
 
 
 print(results.y_hat_list[0].min(), results.y_hat_list[0].max())
 print(results.y_hat_back_list[0].min(), results.y_hat_back_list[0].max())
-print(np.nanmin(results.y_pred_back_list[0]), np.nanmax(results.y_pred_back_list[0]))
+print(np.nanmin(pred.y_pred_back_list[0]), np.nanmax(pred.y_pred_back_list[0]))
 
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
@@ -233,7 +234,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(results.y_pred_back_list[0][:, start:end], axis=1)
+    avg = np.nanmean(pred.y_pred_back_list[0][:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
@@ -249,8 +250,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     ax = axs[i // 4, i % 4]
 
     # Get unique sorted coordinates
-    x_unique = np.sort(np.unique(results.points_pred[0][:, 0]))
-    y_unique = np.sort(np.unique(results.points_pred[0][:, 1]))
+    x_unique = np.sort(np.unique(pred.points[0][:, 0]))
+    y_unique = np.sort(np.unique(pred.points[0][:, 1]))
     
     # Create mapping dictionaries
     x_to_idx = {x: idx for idx, x in enumerate(x_unique)}
@@ -261,8 +262,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     Z = np.full((rows, cols), np.nan)
     
     # Fill grid
-    x_indices = np.array([x_to_idx[x] for x in results.points_pred[0][:, 0]])
-    y_indices = np.array([y_to_idx[y] for y in results.points_pred[0][:, 1]])
+    x_indices = np.array([x_to_idx[x] for x in pred.points[0][:, 0]])
+    y_indices = np.array([y_to_idx[y] for y in pred.points[0][:, 1]])
     Z[y_indices, x_indices] = avg_data
     
     # Mask pixels outside boundary
@@ -305,6 +306,7 @@ plt.tight_layout(rect=[0, 0, 0.88, 1])
 
 # %% Export the results to a shapefile
 
-geo = results.to_geo()
-# geo["hat"].to_file("fitted.shp")
-# geo["pred"].to_file("predictions.shp")
+geo_fitted = results.to_geo()
+geo_pred = pred.to_geo()
+# geo_fitted.to_file("fitted.shp")
+# geo_pred.to_file("predictions.shp")

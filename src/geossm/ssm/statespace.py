@@ -778,6 +778,31 @@ def _compute_predict_sigma_kernel_JAX(H, P_T):
     return Sigma_y_hat
 
 
+@jit
+@_highest_matmul_precision
+def _compute_predict_var_kernel_JAX(H, P_T):
+    """Diagonal of `_compute_predict_sigma_kernel_JAX`: the point-wise
+    state-driven predictive variance, without building the (p, p, T)
+    covariance.
+
+    .. math::
+        \\mathrm{var}(\\hat y_{i, t}) = h_i^T P_{t|T} h_i
+
+    Parameters
+    ----------
+    H : jax.numpy.ndarray, shape (p, q)
+        Observation matrix.
+    P_T : jax.numpy.ndarray, shape (q, q, T+1)
+        State covariances; index 0 (the prior) is dropped.
+
+    Returns
+    -------
+    var_y_hat : jax.numpy.ndarray, shape (p, T)
+        Diagonal of :math:`H P_{t|T} H^T` (excludes observation noise ``R``).
+    """
+    return jnp.einsum("ip,pqt,iq->it", H, P_T[:, :, 1:], H)
+
+
 # %% State Space Model Class
 class StateSpaceModel:
     """A linear-Gaussian state-space model with Kalman filtering,
