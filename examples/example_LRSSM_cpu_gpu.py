@@ -142,9 +142,7 @@ def build_dataframe(n, T=50):
 # backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
 
 
-# opt = FitOptions()
-# opt.max_iter = 50
-# opt.tol_relat = 1e-3
+# opt = FitOptions(max_iter=50, tol_relat=1e-3)
 
 # records = []
 # for backend in backends:
@@ -246,10 +244,7 @@ if __name__ == "__main__":
             est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
             # fit the estimation model
-            opt = FitOptions()
-            opt.max_iter = 50
-            opt.tol_relat = 1e-3
-            opt.verbose = False
+            opt = FitOptions(max_iter=50, tol_relat=1e-3, verbose=False)
 
 
             # 2) Create the model

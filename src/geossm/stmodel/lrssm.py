@@ -1134,8 +1134,9 @@ class LRStateSpaceModel(StateSpaceModel):
             number of EM iterations, `tol_relat` is the tolerance on the
             log-likelihood change per observation below which EM is
             considered converged, and `verbose` overrides `self.verbose`
-            for the whole call (including the per-iteration log printed via
-            `logger`). Defaults to `max_iter=100`, `tol_relat=1e-3` if not
+            for this call only, including the per-iteration log printed via
+            `logger` (the model's `verbose` is restored afterwards). Defaults
+            to `max_iter=100`, `tol_relat=1e-3` if not
             given (note this differs from `FitOptions`'s own dataclass
             defaults, which are only used if `options` itself is `None`
             -- passing an explicit `FitOptions()` uses its `max_iter=20`).
@@ -1163,12 +1164,20 @@ class LRStateSpaceModel(StateSpaceModel):
             If `setup()` has not been called (no latent covariance
             functions).
         """
-
         self._require_setup("fit")
+        # `options.verbose` applies to this call only; the model's own
+        # `verbose` is restored afterwards (F17).
+        verbose_before = self.verbose
+        if options is not None:
+            self.verbose = options.verbose
+        try:
+            return self._fit(params0, options)
+        finally:
+            self.verbose = verbose_before
 
-        # set the global options
-        self.verbose = options.verbose if options is not None else self.verbose
-        
+    def _fit(self, params0, options):
+        """EM estimation behind `fit` (see there), with `self.verbose` set
+        for the call."""
         if self.verbose:
             print(self._get_summary_table())
         self._log("Starting the estimation of the model parameters using EM algorithm...")

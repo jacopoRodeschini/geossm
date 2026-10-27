@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P2, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (Section B, updated with P7, 2026-10-27).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -69,7 +69,7 @@ classDiagram
         +df : GeoDataFrame, copy
         +formulas : list~str~
         +domain : list~Polygon~
-        +verbose : bool
+        +verbose : bool, not changed by fit
         +builders : list~DesignMatricesBuilder~
         +gridList : list~DesignMatrices~
         +points, pdim, block_p, nvar, y_name, xbeta_names
@@ -193,7 +193,7 @@ classDiagram
         <<internal: hashable pytree aux data>>
     }
     class FitOptions {
-        <<dataclass, mutable>>
+        <<frozen dataclass>>
         +max_iter = 20
         +tol_relat = 1e-3
         +verbose = True

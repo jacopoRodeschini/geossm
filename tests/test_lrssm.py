@@ -111,6 +111,23 @@ class TestFit:
         assert len(res.llf_path) == MAX_ITER + 1  # initial entry + one per iteration
         assert [len(v) for v in res.y_hat_list] == [p]
 
+    def test_fit_does_not_change_the_model_verbosity(self, gdf, mesh):
+        # F17 / Section B, P7: options.verbose applies to the call only.
+        model = _build_model(gdf, mesh)
+        assert model.verbose is False
+        opts = _options(max_iter=1, verbose=True)
+        res = model.fit(options=opts)
+        assert model.verbose is False and res.options is opts
+
+        def failing_fit(params0, options):
+            assert model.verbose is True  # set for the call
+            raise RuntimeError("stop")
+
+        model._fit = failing_fit
+        with pytest.raises(RuntimeError, match="stop"):
+            model.fit(options=opts)
+        assert model.verbose is False  # restored after an error too
+
     def test_result_contract_types_shapes_dtypes(self, fitted):
         # Documented contract (StateSpaceResults): array attributes are NumPy
         # arrays in the model dtype; llf is a float.

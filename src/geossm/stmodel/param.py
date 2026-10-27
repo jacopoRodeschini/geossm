@@ -60,10 +60,15 @@ def _safe_asarray(value):
             return jnp.atleast_1d(jnp.asarray(value))
 
 
-@dataclass
+@dataclass(frozen=True)
 class FitOptions:
     """
     Stopping-rule and logging options for :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
+
+    Immutable: fields cannot be reassigned after construction; use
+    ``dataclasses.replace(options, max_iter=50)`` to derive modified options.
+    The results of a fit keep the `FitOptions` they were fitted with
+    (`LRStateSpaceResults.options`).
 
     Parameters
     ----------
@@ -77,7 +82,8 @@ class FitOptions:
         a change relative to ``|llf|``, it does not depend on additive
         constants in the log-likelihood.
     verbose : bool, default True
-        If `True`, log per-iteration progress during `fit`.
+        If `True`, log per-iteration progress during `fit` (for that call
+        only: the model's own `verbose` is not changed).
     force_iter : bool, default False
         How a log-likelihood decrease larger than `tol_relat` is handled.
         If `False`, `fit` stops at the first one and returns the
