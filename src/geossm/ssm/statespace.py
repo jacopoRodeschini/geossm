@@ -36,7 +36,7 @@ from geossm.utils import KeyStream
 from datetime import date
 from statsmodels.iolib.summary import Summary
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device, format_info_table, _summary_table_source
+from geossm.utils import _select_device, _to_backend, _on_device, _on_backend_arg, format_info_table, _summary_table_source
 from geossm.utils import _check_x64_for_dtype
 
 
@@ -837,6 +837,7 @@ class StateSpaceModel:
     `_prepare_diag_array`); ``H`` and ``Q`` are general dense matrices.
     """
 
+    @_on_backend_arg
     def __init__(
         self,
         H=None,
@@ -989,6 +990,7 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
+    @_on_device
     def set(
         self,
         H=None,
@@ -1894,6 +1896,7 @@ class StateSpaceModel:
         return y_t_sim, x_t_sim, stats, tdelta
 
 
+    @_on_device
     def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=True) -> dict:
         """Compute (and optionally print) a compact summary comparing
         theoretical (model-implied) and empirical (simulation-based)

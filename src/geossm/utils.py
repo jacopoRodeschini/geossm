@@ -4,6 +4,7 @@ General utility functions for GEOSSM.
 
 import numpy as np
 import datetime
+import inspect
 import jax
 import platform
 import psutil
@@ -166,6 +167,26 @@ def _on_device(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with jax.default_device(self._backend):
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
+def _on_backend_arg(method):
+    """
+    `_on_device` for constructors: `self._backend` does not exist yet when
+    `__init__` starts, so the device is resolved from the method's own
+    `backend` argument instead. Without this, arrays built before
+    `self._backend` is set (design matrices, default `x0`/`Sigma0`, ...)
+    are first allocated on JAX's default device - the GPU - and only then
+    moved, which fails outright when the GPU is out of memory.
+    """
+    signature = inspect.signature(method)
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        with jax.default_device(_select_device(bound.arguments["backend"])):
             return method(self, *args, **kwargs)
     return wrapper
 

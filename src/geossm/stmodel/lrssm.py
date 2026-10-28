@@ -26,7 +26,7 @@ import jax
 from scipy.optimize import minimize
 
 from geossm.data_preparation import DesignMatricesBuilder
-from geossm.utils import _select_device, _to_backend, _on_device, split_by_block, format_info_table, _summary_table_source
+from geossm.utils import _select_device, _to_backend, _on_device, _on_backend_arg, split_by_block, format_info_table, _summary_table_source
 from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull, _print_info
 
 
@@ -141,6 +141,7 @@ class LRStateSpaceModel(StateSpaceModel):
     snapshots), and the next `fit` rebuilds them.
     """
 
+    @_on_backend_arg
     def __init__(self, df, formulas:list, domain:list,
         verbose=True, backend="auto", dtype=jnp.float32):
         """
@@ -257,6 +258,7 @@ class LRStateSpaceModel(StateSpaceModel):
         super().__init__(Xbeta=Xbeta, beta=None, xbeta_names=xbeta_names, backend=backend, dtype=dtype)
         self.y_name = y_name
 
+    @_on_device
     def setup(self, cov_fun: list):
         """
         Build the model's latent covariance functions, one per latent
@@ -332,6 +334,7 @@ class LRStateSpaceModel(StateSpaceModel):
             y_train, Xbeta, y_name, xbeta_names, y_list, Xbeta_list,
         )
 
+    @_on_device
     def get_design_matrix(self, df, verbose=None):
         """
         Build the design matrix for new (out-of-sample) locations/times --
