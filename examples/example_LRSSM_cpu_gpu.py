@@ -16,15 +16,6 @@ import geopandas as gpd
 from datetime import date, timedelta
 import jax
 import jax.numpy as jnp
-import geossm
-
-if geossm.__file__:
-    # import lrssm
-    from geossm.covmodel import SPDEApproxCov as matern_spde
-    from geossm.stmodel import ModelParams
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-    from geossm.stmodel import FitOptions
-    from geossm.covmodel import buildMesh2d
 
 # assert the presence of a GPU device
 try:
@@ -41,18 +32,6 @@ def _fit_safely(model, opt, label):
     """
     Run model.fit(), skipping the current sweep point instead of crashing
     when the config doesn't fit in memory.
-
-    Only helps for a GPU RESOURCE_EXHAUSTED: XLA raises that as a normal
-    Python exception, so it can be caught and the process survives. A CPU
-    (host RAM) OOM is a different beast - the Linux OOM-killer sends SIGKILL
-    from outside the process, which nothing in Python can catch, so a config
-    that's too large for the CPU backend still takes the whole run down.
-
-    jax.clear_caches() is called after a hit to reduce (not guarantee) the
-    chance that a fragmented/dirty allocator state causes a smaller, later
-    config to spuriously fail too. If OOMs keep bleeding into later configs
-    despite this, the robust fix is to isolate each config in its own
-    subprocess so a blown-out run can't poison the ones after it.
     """
     try:
         return model.fit(options=opt)
@@ -99,88 +78,13 @@ def build_dataframe(n, T=50):
 
     return gdf, points
 
-
-# %% one simulation comparison 
-# dims = {"n": 200, "T": 1000}
-
-# # create the dataframe with the specified dimensions
-# gdf, points = build_dataframe(dims["n"], T=dims["T"])
-
-# # Create the mesh 
-# domain = polygon.Polygon([(0, 0), (1, 0), (1, 1), (0, 1)])
-
-# mesh_io, buffer = buildMesh2d(points, boundary=domain, offset=0.1, 
-#                       lowrank=0.5, density_neighbors=5)
-
-# print(mesh_io)
-
-# params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
-
-# # Create the covariance function used to simulate the "truth"
-# cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=4)
-# cov_fun = cov_fun.setup(mesh_io)
-
-# # fig, ax = plt.subplots(1, 1, figsize=(6, 6))
-# # ax.plot(points[:, 0], points[:, 1], "x", markersize=3)
-# # cov_fun.fem_solver.plot_mesh(ax=ax)
-
-# # Build a dedicated model to simulate the "truth" data and set up its covariance
-# sim_model = lrssm(df=gdf, formulas=["1"], domain=[domain], verbose=False)
-# sim_model = sim_model.setup(cov_fun=[cov_fun], domain_latent=[domain])
-
-# # Print the var. statistics (verbose = True)
-# y_sim, x_sim, info, tdelta = sim_model.sim(params=params, stats=True, verbose=True)
-
-# # 0) Create the geopandas dataframe with the simulated data
-# gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
-
-# # 1) Create the covariance matrix 
-# est_cov_fun = matern_spde([domain], latlon=False, nu=1, var=1, rescale=2)
-# est_cov_fun = est_cov_fun.setup(mesh_io)
-
-# # 2) Create the model
-# backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
-
-
-# opt = FitOptions(max_iter=50, tol_relat=1e-3)
-
-# records = []
-# for backend in backends:
-#     model = lrssm(
-#         df=gdf, 
-#         formulas=["y_sim ~ 1"], 
-#         domain=[domain], 
-#         verbose=False, backend=backend, dtype=jnp.float32)
-
-
-#     # 3) Set up the model cov. 
-#     model = model.setup(cov_fun=[est_cov_fun], domain_latent=[domain])
-#     # print(model)
-
-#     # 4) fit the model
-#     results = _fit_safely(model, opt, label=f"backend={backend}")
-#     if results is None:
-#         continue
-
-#     records.append(
-#         {
-#             "backend": backend,
-#             "tsim_estep": results.runtime_tot_estep,
-#             "tsim_mstep": results.runtime_tot_mstep,
-#             "mse": results.mse(), 
-#             'llf': results.llf,
-#             'params': results.params,
-#     }
-#     )
-
-#     print(
-#         f"backend={'gpu':>3s}, mse: {results.mse():.4f} - "
-#         f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
-#     )
-
 # %% Comparison between CPU and GPU backends for the LRSSM model fitting
-
+from geossm.stmodel import LRStateSpaceModel as lrssm
+from geossm.stmodel import ModelParams, FitOptions
+from geossm.covmodel import SPDEApproxCov, buildMesh2d
 # Baseline dimensions, held fixed while sweeping one dimension at a time
+ 
+# %% Run the comparison between CPU and GPU backends for the LRSSM model fitting
 
 if __name__ == "__main__":
 
@@ -218,15 +122,16 @@ if __name__ == "__main__":
             # create the dataframe with the specified dimensions
             gdf, points = build_dataframe(dims["n"], T=dims["T"])
 
-            # Create the mesh
-            mesh_io, buffer = buildMesh2d(points, domain=domain, offset=0.1,
-                                    lowrank=1, density_neighbors=5)
+            # Create the mesh buildMesh2d
+            mesh_io, poly, info = buildMesh2d(points, domain=domain, offset=0.3, 
+                gradation=1, lowrank=0.75, eps=0.05, return_info=True)
+
             # print(mesh_io)
 
             params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
 
             # Create the covariance function used to simulate the "truth"
-            cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+            cov_fun = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=4)
             cov_fun = cov_fun.setup(mesh_io, domain=domain)
 
             # Build a dedicated model to simulate the "truth" data and set up its covariance
@@ -240,7 +145,7 @@ if __name__ == "__main__":
             gdf["y_sim"] = y_sim.flatten(order='F')  # Flatten in column-major order to match the time series structure
 
             # 1) Create the covariance matrix
-            est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2, verbose=False)
+            est_cov_fun = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=2, verbose=False)
             est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
             # fit the estimation model

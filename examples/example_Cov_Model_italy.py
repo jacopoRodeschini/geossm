@@ -11,66 +11,67 @@ import numpy as np
 import geopandas as geodf
 import geossm.datasets as df
 from geossm.covmodel import FEMSolver
-from geossm.covmodel.utils import buildMesh2d, buildMesh2d_density
+from geossm.covmodel.utils import buildMesh2d
 from shapely import ops
 
 # %% Import the grins dataset
 
-grins_data, _ = df.load_dataset('aqclim_points', return_geometry=True)
+grins_data, shape = df.load_dataset('aqclim_points', return_geometry=True)
 points = np.array([[geom.x, geom.y] for geom in grins_data.geometry.unique()])
 
-# compute only the continetal italian (connected mesh)
-shapepath = '/home/jrodeschini/geopy_casestudy/geopy_grins/EApplication/Ita_region/Reg01012024_g_WGS84.shp'
+# shape = MULTILINE string
+print(shape)
 
-sh_italy = geodf.read_file(shapepath)
-sh_italy.to_crs(4326, inplace=True)
 
-def getLargestPoly(geometry):
-    if isinstance(geometry, Polygon):
-        return geometry
-    elif isinstance(geometry, MultiPolygon):
-        # Return the polygon with the largest area
-        # (itarable, key = scalar ordering function)
-        return max(geometry.geoms, key=lambda p: p.area)
-    else:
-        return geometry  # Just in case
+# %% Fix the shape (MULTILINESTRINGS) into a list of poligons
 
-# remove minly island
-ct_italy = sh_italy.copy()
+from shapely.geometry import MultiLineString
+from shapely.ops import polygonize
 
-# get the largest polygon
-ct_italy['geometry'] = ct_italy['geometry'].apply(
-    lambda geo: getLargestPoly(geo))
+shape["geometry"] = shape.geometry.apply(
+    lambda geom: MultiLineString(
+        sorted(geom.geoms, key=lambda g: g.length, reverse=True)[:3]
+    )
+    if geom.geom_type == "MultiLineString"
+    else geom
+)
 
-# ct_italy.plot()
-italy_union = ops.unary_union(ct_italy.geometry)
+# create the union of the polygons in the shape dataframe
+italy_union = ops.unary_union(shape.geometry) # you can also simply the geometry using the simplify method, but this will not preserve the topology of the polygons
+
+# List of polygons in the union of the polygons in the shape dataframe
+domain = list(polygonize(italy_union))
+
+# Continental Italy and two main islands (Sicily and Sardinia) are the three 
+# disjoint polygons
+print(f"n. domain: {len(domain)}") 
+
+# %% Build the mesh for the AQ_pm10 observed variable
 
 # Build a low-rank mesh: reduce the vertex budget to ~30% of len(points),
 # while keeping more vertices where points are dense and fewer where they
 # are sparse
 lr = [0.5, 0.75]
 
-# meshes = [buildMesh2d(points, max_edge=0.4, min_edge=0.1, lowrank=r, density_neighbors=8) for r in  lr]
+meshes_io = [
+        buildMesh2d(points, domain=domain, offset=1, 
+            gradation=0.5, bandwidth=0.05, lowrank=r, return_info=True) 
+        for r in  lr]
 
-meshes = [buildMesh2d_density(points, lowrank=r, snap_to_points=False, cutoff=0.01) for r in  lr]
-
-for i, (mesh_lr, buffer) in enumerate(meshes):
-    print(f"low-rank mesh: {len(mesh_lr.points)} vertices "
+for i, (mesh_lr, buffer, info) in enumerate(meshes_io):
+    print(f"low-rank mesh: {info['n_inside']} vertices "
         f"(target {round(lr[i] * len(points))})")
 
-# %% Build the mesh for the AQ_pm10 observed variable
+# %% Plot the derived meshes and the observed points
 
-fig, ax = plt.subplots(1, len(meshes), figsize=(8, 8))
+fig, ax = plt.subplots(1, len(meshes_io), figsize=(8 * len(meshes_io), 8))
 
-# Create the FEM solver for the mesh 
-for i, (mesh_lr, buffer) in enumerate(meshes):
-    fem_solver = FEMSolver(mesh_lr, list(italy_union.geoms))
+for i, (mesh_lr, buffer, info) in enumerate(meshes_io):
+    fem_solver = FEMSolver(mesh_lr, domain, verbose=False)
 
-    # plot the mesh using the utilities
+    # plot the mesh using the FEM solver utilities
     fem_solver.plot_mesh(ax=ax[i])
     ax[i].plot(points[:, 0], points[:, 1], "x", markersize=2, alpha=0.5)
-
-    # export the figure in pdf
     ax[i].set_xlabel("Longitude")
     ax[i].set_ylabel("Latitude")
     ax[i].set_title(f"Low-rank mesh (r={lr[i]})")
@@ -79,22 +80,13 @@ for i, (mesh_lr, buffer) in enumerate(meshes):
 # %% Build the covaraince function 
 from geossm.covmodel.covmodels import SPDEApproxCov as MaternCov
 
-fig, ax = plt.subplots(1, len(meshes), figsize=(8, 8))
 
-for i, (mesh_lr, buffer) in enumerate(meshes):
+for i, (mesh_lr, buffer, info) in enumerate(meshes_io):
     cov_fun = MaternCov(latlon=True, nu=1, var=1, rescale=4)
-    cov_fun = cov_fun.setup(mesh_lr, domain=list(italy_union.geoms))
+    cov_fun = cov_fun.setup(mesh_lr, domain=domain)
 
-    # print(f"Covariance function for low-rank mesh (r={lr[i]}):")
-    # print(cov_fun.summary())
-
-    cov_fun.fem_solver.plot_mesh(ax=ax[i])
-    ax[i].plot(points[:, 0], points[:, 1], "x", markersize=2, alpha=0.5)
-    # export the figure in pdf
-    ax[i].set_xlabel("Longitude")
-    ax[i].set_ylabel("Latitude")
-    ax[i].set_title(f"Low-rank mesh (r={lr[i]})")
-    ax[i].set_aspect('equal', adjustable='box')
+    print(f"Covariance function for low-rank mesh (r={lr[i]}):")
+    print(cov_fun.summary())
 
 
 

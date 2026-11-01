@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 @author: jacopo
+@title: Example of estimating the parameters of the OLS fixed effect.
 """
 # %% Import the necessary libraries
 import numpy as np
@@ -36,50 +37,54 @@ plt.axis("equal")
 plt.show()
 
 # %% Create the spatio-temporal covariates (e.g. temperature and humidity)
-n = points.shape[0]
-T = 20
 
-# repeat the points T times for the temporal dimension
-_points = np.tile(points, (T, 1, 1)).reshape(-1, 2) 
+def getdataset(points, T=20, beta=[10, 0.5, 0.3], s2e=0.5):
+    n = points.shape[0]
 
-d = np.linspace(0, 2 * np.pi, n)
-t2m = np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-t2m = t2m.reshape(-1, )
+    # repeat the points T times for the temporal dimension
+    _points = np.tile(points, (T, 1, 1)).reshape(-1, 2) 
+    
+    d = np.linspace(0, 2 * np.pi, n)
+    t2m = np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+    t2m = t2m.reshape(-1, )
 
-humidity = 1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-humidity = humidity.reshape(-1, )
+    humidity = 1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+    humidity = humidity.reshape(-1, )
 
-tstart = date(2020, 1, 1)
-time = np.sort(np.tile([tstart + timedelta(days=d) for d in range(T)], n))
+    tstart = date(2020, 1, 1)
+    time = np.sort(np.tile([tstart + timedelta(days=d) for d in range(T)], n))
 
-# create the response variable as a linear combination of the covariates plus some noise
-beta = [10, 0.5, 0.3]  # coefficients for the covariates
-s2e = 0.5  # variance of the noise
-y = beta[0] + beta[1] * t2m + beta[2] * humidity + np.random.normal(0, np.sqrt(s2e), size=n * T).reshape(n, T).reshape(-1, )
+    # create the response variable as a linear combination of the covariates plus some noise
+    y = beta[0] + beta[1] * t2m + beta[2] * humidity + np.random.normal(0, np.sqrt(s2e), size=n * T).reshape(n, T).reshape(-1, )
 
+    # Create the GeoDataFrame
+    gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(_points[:, 0], _points[:, 1]))
+    gdf["temperature"] = t2m
+    gdf["humidity"] = humidity
+    gdf["y"] = y
+    gdf["Time"] = time
+    gdf.crs = "EPSG:4326"  # Set the coordinate reference system
+
+    return gdf
 
 # %% Create a GeoDataFrame from the points
 
-gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(_points[:, 0], _points[:, 1]))
-gdf["temperature"] = t2m
-gdf["humidity"] = humidity
-gdf["y"] = y
-gdf["Time"] = time
-gdf.crs = "EPSG:4326"  # Set the coordinate reference system
-
+gdf = getdataset(points, T=20, beta=[10, 0.5, 0.3], s2e=0.5)
 
 # %% Create the spatio-temporal grid obgect
 
 builder = DesignMatricesBuilder(gdf, "y ~ 1 + temperature + humidity", verbose=True)
 dataset = builder.build(verbose=True)
 
-Xbeta = np.array(dataset.X)
-y = np.array(dataset.y)
+Xbeta = dataset.X
+y = dataset.y
 # %% OLS spatio-temporal regression 
 
-# expected value
+# Compute X'@ y and X'@ X using einsum for better performance
 cond_xy = np.einsum('nbt,nt->b', Xbeta, y)
 cond_xx = np.einsum('nbt,nct->bc', Xbeta, Xbeta)
+
+# Compute inv(X'X) using np.linalg.inv for better numerical stability
 beta = np.linalg.solve(cond_xx, cond_xy)  
 s2e = np.mean((y - np.einsum('nbt,b->nt', Xbeta, beta))**2)
 

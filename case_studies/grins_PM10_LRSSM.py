@@ -31,8 +31,6 @@ os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax")
 print(msg)
 
 import numpy as np
-import pandas as pd
-import geopandas as gpd
 import jax
 import jax.numpy as jnp
 
@@ -41,11 +39,8 @@ import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 import geossm
-from shapely.geometry import Polygon, MultiPolygon
 from shapely import ops
 import matplotlib.pyplot as plt
-from pathlib import Path
-
 
 if geossm.__file__:
     from geossm.covmodel import SPDEApproxCov as matern_spde

@@ -12,20 +12,12 @@ and the simulated response variable for multiple time steps.
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import polygon
-import pygmsh
-import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
-import geossm
 
-if geossm.__file__:
-    # import lrssm
-    from geossm.covmodel import SPDEApproxCov as matern_spde
-    from geossm.stmodel import ModelParams
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-    from geossm.stmodel import FitOptions
-
-
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["JAX_PLATFORMS"] = "cpu"
 
 # %% Simulate random point in a convex space (regular grind) and plot them
 
@@ -48,63 +40,15 @@ plt.legend()
 plt.axis("equal")
 plt.show()
 
-# %% Create a mesh
-
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(
-            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
-        )
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
-        for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        gmsh.model.mesh.embed(0, embedded_tags, 2, domain._id)
-
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
-
-        # 5. Generate
-        gmsh.model.mesh.generate(2)
-
-        gmsh.model.mesh.optimize("Laplace2D")
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
-
-        # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-
-        mesh = geom.generate_mesh()
-
-    return mesh
-
-
 
 # %% Create the covariance function 
+from geossm.covmodel import buildMesh2d
+from geossm.covmodel import SPDEApproxCov as matern_spde
+
 # Create the mesh 
-mesh_io = buildMesh(domain, 0.25, points, lc_buffer=1)
+mesh_io, poly, info = buildMesh2d(points, domain=domain, offset=0.3,
+        gradation=0.5, bandwidth=0.1, lowrank=0.5, return_info=True)
+
 print(mesh_io)
  
 # Create the covariance function
@@ -114,7 +58,6 @@ cov_fun = cov_fun.setup(mesh_io, domain=domain)
 print(cov_fun.summary())
 cov_fun.fem_solver.plot_mesh()
 
-# %% Plot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
 cov_fun.fem_solver.plot_mesh(ax=ax)
 ax.plot(points[:, 0], points[:, 1], "ro", label="Observation Points")
@@ -162,24 +105,12 @@ gdf['y'] = y
 gdf["Time"] = time
 gdf.crs = "EPSG:4326"  # Set the coordinate reference system
 
-# %% Plot the response variable time series for one point
-point_index = np.random.randint(0, n)  # Index of the point to plot
-
-fig, ax = plt.subplots(figsize=(10, 6))
-point_gdf = gdf.iloc[point_index::n]  # Extract the time series for the selected point
-ax.plot(point_gdf["Time"], point_gdf["y"], marker="o", linestyle="-", color="blue", label="Response Variable")
-ax.plot(point_gdf["Time"], point_gdf["temperature"], marker="x", linestyle="--", color="orange", label="Temperature")
-ax.plot(point_gdf["Time"], point_gdf["humidity"], marker="s", linestyle="-.", color="green", label="Humidity")
-ax.set_title(f"Time Series of Response Variable for Point {point_index}")
-ax.set_xlabel("Time")
-ax.set_ylabel("Response Variable (y)")
-ax.grid(True, linestyle="--", alpha=0.6)
-ax.legend()
-plt.show()
-
 # %% Build the lrssm and set the covariance function
+from geossm import stmodel as st
 
-model = lrssm(df=gdf, formulas=None, domain=[domain], verbose=True)
+model = st.LRStateSpaceModel(df=gdf, formulas=None, domain=[domain], 
+    verbose=True, backend="gpu")
+
 model = model.setup(cov_fun=[cov_fun])
 print(model)
 
@@ -187,7 +118,9 @@ print(model)
 # print(model)
 
 # %% Simulate the model
-params = ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[6], ks=[5], f=[0.7])
+theta = 0.3
+ks = np.sqrt(8)/theta
+params = st.ModelParams(beta=[3], A=np.array([[1.5]]), s2e=[2], ks=[ks], f=[0.7])
 
 # Print the var. statistics (verbose = True)
 y_sim, x_sim, info, tdelta = model.sim(["1"], params=params, stats=True, verbose=True)
@@ -223,7 +156,7 @@ est_cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=2)
 est_cov_fun = est_cov_fun.setup(mesh_io, domain=domain)
 
 # 2) Create the model
-model = lrssm(
+model = st.LRStateSpaceModel(
     df=gdf,
     formulas=["y_sim ~ 1"],
     domain=[domain],
@@ -237,9 +170,7 @@ print(model)
 # 4) fit the model 
 
 # %% Debug pls 
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-5
+opt = st.FitOptions(max_iter=50, tol_relat=1e-5)
 
 results = model.fit(options=opt)
 
@@ -249,7 +180,8 @@ results = model.fit(options=opt)
 # 0) Create mesh with fewer points to reduce the rank of the model (85%)
 inx = np.random.choice(points.shape[0], size=85, replace=False)
 points_lr = points[inx, :]
-lr_mesh_io = buildMesh(domain, 0.5, points_lr, lc_buffer=0.5)
+lr_mesh_io, poly, info = buildMesh2d(points_lr, domain=domain, 
+        offset=0.3, gradation=1, lowrank=0.75, eps=0.05, return_info=True)
 print(lr_mesh_io)
 
 # 1) Create the covariance matrix
@@ -258,7 +190,7 @@ lr_cov_fun = lr_cov_fun.setup(lr_mesh_io, domain=domain)
 print(lr_cov_fun.summary())
 
 # 2) Create the model
-lr_model = lrssm(
+lr_model = st.LRStateSpaceModel(
     df=gdf,
     formulas=["y_sim ~ 1"],
     domain=[domain],
@@ -267,13 +199,17 @@ lr_model = lrssm(
 
 # 3) Set up the model cov.
 lr_model = lr_model.setup(cov_fun=[lr_cov_fun])
-print(model)
+print(lr_model)
 
 # 4) fit the low-rank model 
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-5
+opt = st.FitOptions(max_iter=50, tol_relat=1e-5)
 
 lr_results = lr_model.fit(options=opt)
 
+# %% Compute the hessian (using the hessian matrix) 
+hessian_matrix, tdelta = lr_results.get_hessian()
 
+
+cov_params= lr_results.compute_cov_params()
+
+print(lr_results)

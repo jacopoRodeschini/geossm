@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 @author: jacopo
+@title: Example of estimating the parameters of the fixed effect.
 """
 import numpy as np
 import geopandas as geodf
@@ -15,29 +16,21 @@ print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
 
-Agrimonia, shape = df.load_dataset("agrimonia")
-print(Agrimonia.columns)
+agrimonia, shape = df.load_dataset("agrimonia")
+print(agrimonia.columns)
 
 # if you do not want the shapefile associate
-# Agrimonia, _ = df.load_dataset('agrimonia')
+# agrimonia, _ = df.load_dataset('agrimonia')
 
-# %% From .csv to geopandas
-
-ct = np.array([Agrimonia.Longitude.to_numpy(), Agrimonia.Latitude.to_numpy()]).T
-Agrimonia["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
-Agrimonia = geodf.GeoDataFrame(Agrimonia, crs=4326)
-
-# %% Crate the regression matrix
+# %% Create the regression matrix
 
 # set a threshold for the PM10 variable to avoid log(0)
-Agrimonia["AQ_pm10"] = np.where(Agrimonia["AQ_pm10"] <= 0, np.nan, Agrimonia["AQ_pm10"])
+agrimonia["AQ_pm10"] = np.where(agrimonia["AQ_pm10"] <= 0, np.nan, agrimonia["AQ_pm10"])
 
 # create the design matrix builder
-builder = DesignMatricesBuilder(Agrimonia, "np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m)", verbose=True)
+builder = DesignMatricesBuilder(agrimonia, "np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m)", verbose=True)
 
-
-# %% build the design matrices
+# build the design matrices
 dataset = builder.build(verbose=True)
 
 # print the dataset class
@@ -64,18 +57,17 @@ X = np.array(dataset.X) # shape (n_samples, n_covariates, n_time_steps)
 # %% Linear spatio-temporal regression 
 
 # mask for missing values in the target variable
-mask = ~np.isnan(y)
-  
+mask = ~np.isnan(y) 
 X_masked = np.where(mask[:, None, :], X, 0)
 y_masked = np.where(mask, y, 0)
 
+# Compute X'@ y and X'@ X using einsum for better performance
 cond_xy = np.einsum('nbt,nt->b', X_masked, y_masked)
 cond_xx = np.einsum('nbt,nct->bc', X_masked, X_masked)
 
 # solve for beta using np.linalg.solve for better numerical stability
 beta = np.linalg.solve(cond_xx, cond_xy)  
 s2e = np.mean((y_masked - np.einsum('nbt,b->nt', X_masked, beta))**2)
-
 std_beta = np.sqrt(np.diag(s2e * np.linalg.inv(cond_xx)))
 
 print("Estimated coefficients:")
@@ -84,20 +76,22 @@ for i in range(len(beta)):
   
 # %% Plot the residuals moving average across days
 residuals = y_masked - np.einsum('nbt,b->nt', X_masked, beta)
-residuals = residuals.reshape(-1, X.shape[2])  # reshape to (n_samples, n_time_steps)
+residuals = residuals.reshape(X.shape[0], X.shape[2]) # reshape to (n_samples, n_time_steps)
+residuals = residuals.mean(axis=0) # Compute daily mean residuals across all samples
 
-# group the residuals by week (assuming daily data and 7 days in a week)
-# residuals_by_week = [residuals[:, i:i+3].flatten() for i in range(0, residuals.shape[1], 3)]
+# OLS residuals mean = 0 (by definition)
+print(residuals.mean())
 
 # Moving average of residuals across days
-window_size = 5  # size of the moving average window (e.g., 3 days)
-residuals_ma = [np.mean(residuals[:, i:i+window_size]) for i in range(0, residuals.shape[1], window_size)]
+window_size = 5  # size of the moving average window (e.g., 5 days)
+residuals_ma = np.convolve(residuals, np.ones(window_size)/window_size, mode='valid')
 
 
 plt.figure(figsize=(12, 6))
 plt.plot(residuals_ma)
-plt.xlabel('Weeks')
+plt.xlabel('Days')
 plt.ylabel('Residuals')
-plt.title('Boxplot of Residuals Across Weeks')
+plt.title('Moving Average of Residuals Across Days')
 plt.grid(True, linestyle="--", alpha=0.6)
 plt.show()
+

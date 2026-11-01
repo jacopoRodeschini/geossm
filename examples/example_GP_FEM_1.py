@@ -1,22 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+@author: jacopo
+@title: Estimate the Matern SPDE covariance function using Monte Carlo simulations.
+"""
+
+# %% [Imports]
+
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy as sc
 from shapely.geometry import Polygon
 from gstools.covmodel import Matern
-import pygmsh
-import gmsh
 from scipy.spatial.distance import cdist
 from joblib import Parallel, delayed
 from tqdm import tqdm
-import geossm
-
-# print("Version: ", geossm.__version__)
-print("Load from: ", geossm.__file__)
-
-# %% Import the Matern model based on the SPDE approach R^2
-
-if geossm.__file__:
-    from geossm.covmodel.covmodels import SPDEApproxCov
+from geossm.covmodel import buildMesh2d, SPDEApproxCov
 
 # %% Create a convex domain [0,1]^2
 n = 400
@@ -63,55 +62,8 @@ plt.colorbar(s, label="Observed Value")
 plt.show()
 
 
-# %% [Utils] Build mesh gmsh
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22, embed=False):
-    with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(
-            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
-        )
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer * 0.1)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
-        for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        if embed:
-            gmsh.model.mesh.embed(0, embedded_tags, 2, domain._id)
-
-        # gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 2)
-
-        # 5. Generate
-        gmsh.model.mesh.generate(2)
-        # gmsh.option.setNumber("Mesh.Smoothing", 10)
-
-        # # This allows the optimizer to move nodes more freely
-        # gmsh.option.setNumber("Mesh.Optimize", 1)
-        # gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-
-        mesh = geom.generate_mesh()
-
-    return mesh
-
-
-# %% [Utils] Optimisation function
-def minfun(par, H, spdeCov, yObs):
+# %% [Utils] Optimisation function (raw Python implementation)
+def minfun(par, H, spdeCov, yObs, s2):
 
     n = len(yObs)
     # par comes in as a length-1 array from scipy's optimizer; gstools'
@@ -130,7 +82,7 @@ def minfun(par, H, spdeCov, yObs):
     Sigma_mar = np.linalg.inv(Q_mar)
 
     # use SWM formula
-    M = H @ Sigma_mar @ H.T + 0.1 * np.eye(n)
+    M = H @ Sigma_mar @ H.T + s2 * np.eye(n)
     invM = np.linalg.inv(M)
 
     # Calculate the log-pdf using the multivariate normal formula
@@ -142,12 +94,16 @@ def minfun(par, H, spdeCov, yObs):
     return 0.5 * logpdf
 
 
-# %% Create the covariance funtion
+# %% Create the approximate covariance function
 
-# create the mesh
-mesh_io = buildMesh(domain, lc=0.1, points=points, lc_buffer=1)
+# create the mesh: help(buildMesh2d) to see the parameters of the buildMesh2d function
+mesh_io, poly, info = buildMesh2d(points, lowrank=0.5, 
+    domain=domain, offset=0.1, return_info=True)
 
-# Create the covariance funcion
+print(f"min angle: {info['min_angle']}")
+print(f"min d: {info['h_min_D']}")
+
+# Create the covariance function
 cov_matern = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=1)
 
 # set the mesh
@@ -165,20 +121,20 @@ ax.set_ylabel("Y-axis")
 plt.colorbar(s, label="Observed Value")
 plt.show()
 
-# compute the H on the new points (while the mesh is fixed)
-count, notfind, H = cov_matern.fem_solver._compute_basis(points)
+# Compute the basis function on the obsereved points
+count, notfind, H = cov_matern.fem_solver.eval_basis(points)
+# Cut the H on the inner nodes of the mesh (the outer nodes are fixed to 0)
 H = H[:, cov_matern.fem_solver.inner]
 
 # minimise the - log_likelihood
-# %% Estiamte single process
+# %% Estimate single process
 
 res = sc.optimize.minimize(
-    minfun, args=(H, cov_matern, yobs), x0=np.log(5), method="Nelder-Mead"
+    minfun, args=(H, cov_matern, yobs, 0.1), x0=np.log(5), method="Nelder-Mead"
 )
-
+print(np.exp(res.x))
 
 # %% The estimate task
-
 
 def estimate(n=100):
 
@@ -197,18 +153,19 @@ def estimate(n=100):
     )
 
     # create the mesh
-    mesh_io = buildMesh(domain, lc=0.15, points=points, lc_buffer=0.5)
+    mesh_io, _ = buildMesh2d(points, lowrank=0.5, 
+    domain=domain, offset=0.1, return_info=False)
 
-    # Create the covariance funcion
+    # Create the covariance function
     cov_matern = SPDEApproxCov(latlon=False, nu=1, var=1, rescale=1)
     cov_matern = cov_matern.setup(mesh_io, domain=domain)
 
-    # compute the H on the new points (while the mesh is fixed)
-    count, notfind, H = cov_matern.fem_solver._compute_basis(points)
+    # Compute the basis function on the observed points (while the mesh is fixed)
+    _, _, H = cov_matern.fem_solver.eval_basis(points)
     H = H[:, cov_matern.fem_solver.inner]
 
     res = sc.optimize.minimize(
-        minfun, args=(H, cov_matern, yobs), x0=np.log(0.3), method="Nelder-Mead"
+        minfun, args=(H, cov_matern, yobs, s2), x0=np.log(0.3), method="Nelder-Mead"
     )
 
     return np.exp(res.x)
