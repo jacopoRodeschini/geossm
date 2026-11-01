@@ -211,43 +211,23 @@ plotting) is available at
 [examples/example_LRSSM_build.py](examples/example_LRSSM_build.py).
 
 ```python
-from shapely.geometry import Point, Polygon
-import numpy as np
-import geopandas as geodf
-import pygmsh
-import gmsh
-
 import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.covmodel import SPDEApproxCov
+from geossm.covmodel import SPDEApproxCov, buildMesh2d
 
-# 1. Load a dataset and turn it into a GeoDataFrame
+# 1. Load a dataset and the domain
 agri, shape = df.load_dataset('agrimonia')
-
-domain = list(shape.geometry[0].geoms)[0].boundary
-buffer = list(domain.buffer(0.3).boundary.geoms)[0]
-domain_polygon = [Polygon(buffer)]
+domain = list(shape.geometry[0].geoms)[0].buffer(0.3)
 
 # 2. Define the model formula and the observation domain
-model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain=domain_polygon)
-
+model = lrssm(agri, ['np.log(AQ_pm10) ~ 1 + WE_temp_2m'], verbose=True, domain=[domain])
 
 # 3. Build a mesh over the domain for the latent spatial field with gmsh
-def build_mesh(poly, lc, points, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-        coords = np.array(poly.buffer(lc).simplify(lc).exterior.coords[:-1])
-        surface = geom.add_polygon(coords, mesh_size=lc * 0.1)
-        for p in points:
-            gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-        gmsh.model.occ.synchronize()
-        gmsh.model.mesh.generate(2)
-        return geom.generate_mesh()
-
-
-mesh_io = build_mesh(buffer, lc=0.35, points=model.points[0])
+points = model.points[0]
+mesh_io, poly = buildMesh2d(points, lowrank=0.75,gradation=1, offset = 1, anchor_spacing=1)
 
 # 4. Build the latent covariance function on the mesh and attach it
-cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain_polygon)
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
 model = model.setup(cov_fun=[cov_fun])
 
 # 5. Fit the model
