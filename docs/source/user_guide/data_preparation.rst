@@ -49,6 +49,23 @@ values are kept as ``NaN`` (not dropped), so the site x time grid stays
 rectangular -- this is what lets the state-space models below treat
 irregular reporting as ordinary missing data in the Kalman filter.
 
+Data rules:
+
+- The formula is evaluated on the columns as given; ``X`` and ``y`` are
+  cast to ``dtype`` afterwards.
+- The response must be numeric (one column); infinite values become
+  missing, with a warning.
+- Repeated (site, time) rows: the first row of each pair (in the input
+  order) is kept, with a warning.
+- Missing or infinite covariates are kept in ``X``. In
+  :class:`~geossm.stmodel.LRStateSpaceModel` the corresponding (site,
+  time) observations are treated as missing in ``fit()`` and their fitted
+  values are ``NaN`` (with a warning); a prediction with a missing
+  covariate is ``NaN`` (with a warning).
+- Sites whose response is never observed are dropped.
+- Timestamps must be regularly spaced (fixed steps, months, quarters or
+  years).
+
 Predicting at new locations/times
 ------------------------------------
 
@@ -57,7 +74,8 @@ builder can construct design matrices for new data with
 :meth:`~geossm.data_preparation.DesignMatricesBuilder.build_predict`,
 reusing the training formula's fitted state (e.g. ``standardize(...)``
 statistics) so covariates are transformed consistently between training
-and prediction.
+and prediction. Timestamps outside the training period are dropped, with
+a warning (the latent state exists only on that period).
 
 Where this fits in
 --------------------

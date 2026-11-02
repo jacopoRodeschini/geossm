@@ -38,7 +38,7 @@ from .stmodel_results import LRStateSpaceResults
 from geossm.stmodel._fitted import (FittedState, _read_only_copy, _spde_marginal_precision, mesh_arrays,
                                     latent_basis, latent_support, support_message, build_H, build_RF,
                                     observed_loglik, cov_sizes)
-from geossm.stmodel._design import prediction_design, split_design, stack_design
+from geossm.stmodel._design import missing_covariates, prediction_design, split_design, stack_design
 from geossm.stmodel._em import (_compute_initial_values_jax_kernel, _compute_beta_jax_kernel,
                                _compute_s2e_jax_kernel, _compute_A2_jax_kernel, _ks_value_and_grad)
 
@@ -236,6 +236,22 @@ class LRStateSpaceModel(StateSpaceModel):
                 self.y_train_list, self.Xbeta_list = self.build_design_matrix(
                     df, formulas, verbose=verbose, domain=domain
                 )
+            # Entries with a missing or infinite covariate are missing
+            # observations for fit(); in the stacked design used by the filter
+            # their covariates are 0, so that no NaN reaches the kernels (nor
+            # their derivatives, through the unselected branch of a `where`).
+            # `gridList`/`Xbeta_list` keep the design as built.
+            self._x_missing = missing_covariates(Xbeta)
+            if self._x_missing.any():
+                counts = ", ".join(
+                    f"'{name}': {int(self._x_missing[self.block_p[i]:self.block_p[i + 1]].sum())}"
+                    for i, name in enumerate(y_name))
+                warnings.warn(
+                    f"Some (site, time) entries have a missing or infinite covariate ({counts}): "
+                    "fit() treats them as missing observations (and their fitted values are NaN).",
+                    UserWarning, stacklevel=2,
+                )
+                Xbeta = jnp.where(jnp.isfinite(Xbeta), Xbeta, 0)
 
         else:
             self._log("Formulas not provided. The model will be initialized without them")
@@ -243,6 +259,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Xbeta = None
             xbeta_names = None
             y_name = None
+            self._x_missing = None
 
         # Check and set the domain (see `_checkDomain`/`_setDomain`); a
         # domain=None defaults to the convex hull of each group's observed
@@ -978,6 +995,10 @@ class LRStateSpaceModel(StateSpaceModel):
             if msg:
                 warnings.warn(msg, UserWarning, stacklevel=3)
         y_obs = jnp.where(jnp.asarray(in_support)[:, None], y_obs, jnp.nan)
+        # Entries with a missing covariate are missing observations too (their
+        # covariates are already 0 in `self.Xbeta`, see `__init__`)
+        x_missing = jnp.asarray(self._x_missing)
+        y_obs = jnp.where(x_missing, jnp.nan, y_obs)
         # Observed entries: the stopping rule uses the log-likelihood change
         # per observation, which (unlike a change relative to |llf|) does not
         # depend on additive constants in the log-likelihood.
@@ -1211,6 +1232,7 @@ class LRStateSpaceModel(StateSpaceModel):
         y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(
             H, x_T, P_T, Xbeta, beta_est, std=std
         )
+        y_hat_full = jnp.where(x_missing, jnp.nan, y_hat_full)  # no covariate, no fitted value
 
         # Training grid (points/timestamps/CRS), one entry per response
         # variable -- snapshotted here for the same reason as block_p above:

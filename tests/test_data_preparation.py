@@ -174,7 +174,9 @@ def test_build_predict_requires_build(gdf):
 
 @pytest.mark.parametrize(
     "freq, expected",
-    [("D", (True, 1, "day")), ("h", (True, 1, "hour")), ("MS", (True, 1, "month"))],
+    [("D", (True, 1, "day")), ("h", (True, 1, "hour")), ("MS", (True, 1, "month")),
+     # anchored aliases (pandas infers "YS-JAN", "QS-OCT"), Section N
+     ("YS", (True, 1, "year")), ("YS-JUL", (True, 1, "year")), ("QS-OCT", (True, 3, "month"))],
 )
 def test_check_regular_timestamps(freq, expected):
     ts = pd.date_range("2020-01-01", periods=6, freq=freq)
@@ -184,3 +186,42 @@ def test_check_regular_timestamps(freq, expected):
 def test_check_regular_timestamps_irregular():
     ts = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-04"])
     assert check_regular_timestamps(ts) == (False, None, None)
+
+
+# --- Section N: data validation ---------------------------------------------
+
+def test_formula_is_evaluated_before_the_cast(gdf):
+    # float32 cannot hold 2**24 + 1: the transform must see the column as given
+    gdf["big"] = 16777216.0 + (gdf.site % 2)
+    dm = _build(gdf, "y ~ I(big - 16777216)", dtype=np.float32)
+    assert sorted(np.unique(np.asarray(dm.X[:, 1, :])).tolist()) == [0.0, 1.0]
+
+
+def test_duplicated_rows_keep_the_first_with_a_warning(gdf):
+    dup = gdf.iloc[[0]].copy()
+    dup["y"] = -1.0
+    with pytest.warns(UserWarning, match="1 rows repeat a"):
+        dm = _build(pd.concat([gdf, dup]))
+    assert dm.N == N and float(np.asarray(dm.y).min()) >= 0
+
+
+def test_text_response_raises(gdf):
+    gdf["y"] = gdf["y"].astype(str)
+    with pytest.raises(ValueError, match="must be numeric"):
+        _build(gdf)
+
+
+def test_infinite_response_is_missing_with_a_warning(gdf):
+    gdf.loc[gdf.index[4], "y"] = np.inf
+    with pytest.warns(UserWarning, match="infinite response"):
+        dm = _build(gdf)
+    assert int(np.isnan(np.asarray(dm.y)).sum()) == 1
+
+
+def test_prediction_outside_the_training_period_warns(gdf):
+    builder = DesignMatricesBuilder(gdf, "y ~ 1 + x", verbose=False)
+    builder.build()
+    longer = make_panel_gdf(n_sites=N, n_times=T + 3, missing_frac=0.0, seed=1)
+    with pytest.warns(UserWarning, match="3 of 11 timestamps"):
+        pred = builder.build_predict(longer, verbose=False)
+    assert pred.T == T

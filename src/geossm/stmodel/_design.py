@@ -82,6 +82,12 @@ def stack_design(y_list, Xbeta_list):
     return y, Xbeta
 
 
+def missing_covariates(Xbeta):
+    """`(p, T)` boolean mask of the (site, time) entries with a missing or
+    infinite covariate in the stacked design matrix `Xbeta` `(p, b, T)`."""
+    return ~np.all(np.isfinite(np.asarray(Xbeta)), axis=1)
+
+
 def prediction_design(df, builders, domain, verbose=True, include_response=False, log=None):
     """
     Design matrix for new (out-of-sample) locations/times, reusing each

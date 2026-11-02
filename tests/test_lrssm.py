@@ -1049,3 +1049,25 @@ class TestLatentSupport:
         poly = pred.to_poly([whole])
         assert int(poly["n_points_y"].iloc[0]) == 1
         np.testing.assert_allclose(poly["y"].to_numpy(), pred.y_pred[0], rtol=1e-12)
+
+
+
+# --- Missing covariates (Section N) ------------------------------------------
+
+@pytest.mark.usefixtures("x64")
+def test_missing_covariates_are_missing_observations(gdf, mesh):
+    g = gdf.copy()
+    rows = g.index[[0, 1, 2]]
+    g.loc[rows, "y"] = 1.0  # observed responses with missing covariates
+    g.loc[rows, "x"] = [np.nan, np.inf, np.nan]
+    with pytest.warns(UserWarning, match="missing or infinite covariate"):
+        model = _build_model(g, mesh, dtype=jnp.float64)
+    res = model.fit(options=_options())
+    assert np.isfinite(res.llf) and np.all(np.isfinite(res.params.beta.value))
+    # the three entries are site 0..2 at the first time step (sorted by time, then site)
+    assert np.all(np.isnan(res.y_obs[:3, 0])) and np.all(np.isnan(res.y_hat[:3, 0]))
+    assert np.all(np.isfinite(res.Xbeta))
+    assert res.nobs == int(np.sum(~np.isnan(np.asarray(model.y_train)))) - 3
+    with pytest.warns(UserWarning, match="2 prediction"):
+        y_pred, _ = res.predict(gdf.assign(x=np.where(gdf.index.isin(rows[:2]), np.nan, gdf.x)), verbose=False)
+    assert int(np.isnan(y_pred).sum()) == 2

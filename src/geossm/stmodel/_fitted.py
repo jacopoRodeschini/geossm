@@ -22,7 +22,7 @@ from geossm.ssm.statespace import (
     _compute_predict_var_kernel_JAX,
     _filter_kernelJAX,
 )
-from geossm.stmodel._design import prediction_design
+from geossm.stmodel._design import missing_covariates, prediction_design
 
 
 def _read_only_copy(a):
@@ -445,9 +445,17 @@ def predict_from_fit(state, df, verbose=True, cov="full", log=None):
     # In the dtype of the fit (the design matrix is not cast, F45)
     dtype = np.dtype(state.dtype)
     Xbeta_predict = jnp.asarray(Xbeta_predict, dtype=dtype)
+    x_missing = missing_covariates(Xbeta_predict)
+    if x_missing.any():
+        warnings.warn(
+            f"{int(x_missing.sum())} prediction (site, time) entries have a missing or infinite "
+            "covariate: their predicted mean is NaN.",
+            UserWarning, stacklevel=4,
+        )
     log("Start Prediction the SSM...")
     t_start = time.time()
     y_pred = _compute_predict_mean_kernel_JAX(H, x_T, Xbeta_predict, beta)
+    y_pred = jnp.where(jnp.asarray(x_missing), jnp.nan, y_pred)
     Sigma_y_pred = _compute_predict_sigma_kernel_JAX(H, P_T) if cov == "full" else None
     var_pred = _compute_predict_var_kernel_JAX(H, P_T) if cov == "diag" else None
     tdelta = time.time() - t_start

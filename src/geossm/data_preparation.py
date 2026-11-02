@@ -282,11 +282,15 @@ def check_regular_timestamps(timestamps):
             n += code[i]
             i += 1
         mult = int(n) if n else 1
-        base = code[i:]
+        base = code[i:].split("-")[0]  # drop the anchor of e.g. "YS-JAN", "QS-OCT"
 
         # Month-like frequencies
         if base in {"M", "MS", "BM", "BMS", "ME"}:
             return True, mult, "month"
+
+        # Quarter-like frequencies: three months
+        if base in {"Q", "QS", "QE", "BQ", "BQS", "BQE"}:
+            return True, 3 * mult, "month"
 
         # Year-like frequencies
         if base in {"A", "AS", "Y", "YS", "YE", "BA", "BAS"}:
@@ -715,7 +719,7 @@ class DesignMatricesBuilder:
 
         Runs all validation/coercion steps on `geodf` (spatial checks,
         time column detection and coercion, formula-column existence,
-        time-regularity check, numeric dtype casting, and optional
+        time-regularity check, and optional
         time-window/domain filtering) so that `build` can construct the
         design matrices directly. Does not build the design matrices
         itself.
@@ -747,9 +751,9 @@ class DesignMatricesBuilder:
             is allowed and builds covariates only (`y` is `None`).
             Every column referenced by `formula` must exist in `geodf`.
         dtype : numpy.dtype, default numpy.float32
-            Numeric precision used when casting `geodf`'s numeric columns
-            and when building the resulting `DesignMatrices` (`X`, `y`;
-            `points` are float64).
+            Numeric precision of the resulting `DesignMatrices` (`X`, `y`;
+            `points` are float64). The formula is evaluated on the columns
+            as given, before the cast.
         verbose : bool, default True
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.
@@ -810,7 +814,7 @@ class DesignMatricesBuilder:
         self._log(f"Time column detected: '{self.time_col_name}'")
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
 
-    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False, domain=None):
+    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False, domain=None, warn_time_range=False):
         """
         Run every check/coercion a GeoDataFrame needs before it can be
         turned into design matrices. Shared by `__init__` (on the training
@@ -845,11 +849,9 @@ class DesignMatricesBuilder:
 
         delta, unit = self._check_time_regularity(geodf, time_col_name)
 
-        self._cast_numeric_columns(geodf, geometry_id)
-
         # Cut the dataset to the specified time range if tmin and tmax are provided
         if tmin is not None or tmax is not None:
-            geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax)
+            geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax, warn=warn_time_range)
 
         if domain is not None:
             geodf = self._filter_domain(geodf, geometry_id, domain)
@@ -1015,7 +1017,8 @@ class DesignMatricesBuilder:
                 )
                 df = df.to_crs(self.crs)
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
-                self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response)
+                self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response,
+                                    warn_time_range=True)
             )
             self._check_consistent_with_training(crs, delta, unit)
             self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
@@ -1234,22 +1237,39 @@ class DesignMatricesBuilder:
             raise ValueError(f"Timestamps in column '{time_col_name}' are not regularly spaced")
         return delta, unit
 
-    def _cast_numeric_columns(self, geodf, geometry_id) -> None:
-        """Cast all numeric columns of `geodf` (except `geometry_id`) to `self.dtype`, in place."""
-        numeric_cols = [
-            col for col in geodf.columns
-            if pd.api.types.is_numeric_dtype(geodf[col]) and col != geometry_id
-        ]
-        geodf[numeric_cols] = (
-            geodf[numeric_cols]
-            .apply(lambda col: pd.to_numeric(col, errors="coerce"))
-            .astype(self.dtype)
-        )
-        self._log(f"Converted numeric columns to dtype={self.dtype}")
+    def _check_response(self, y_matrix):
+        """The response must be one numeric column; infinite values become
+        missing (NaN), with a warning."""
+        if y_matrix.shape[1] != 1:
+            raise ValueError(
+                f"The response '{self.formula_info.response_name}' must be numeric (one column); "
+                f"Patsy built {y_matrix.shape[1]} columns ({', '.join(y_matrix.design_info.column_names[:3])}"
+                f"{', ...' if y_matrix.shape[1] > 3 else ''}), e.g. from a text or categorical column."
+            )
+        inf = np.isinf(y_matrix)
+        if inf.any():
+            warnings.warn(f"{int(inf.sum())} infinite response values are treated as missing (NaN).",
+                          UserWarning, stacklevel=5)
+            y_matrix[inf] = np.nan
+        return y_matrix
 
-    def _filter_time_range(self, geodf, time_col_name, tmin, tmax):
-        """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound optional)."""
+    @staticmethod
+    def _drop_duplicate_rows(geodf, geometry_id, time_col_name):
+        """Keep the first row (in the input order) of each repeated
+        (site, time) pair, with a warning giving their number."""
+        dup = geodf.duplicated(subset=[geometry_id, time_col_name])
+        if dup.any():
+            warnings.warn(
+                f"{int(dup.sum())} rows repeat a (site, time) pair: the first row of each pair is kept.",
+                UserWarning, stacklevel=5,
+            )
+        return geodf[~dup]
+
+    def _filter_time_range(self, geodf, time_col_name, tmin, tmax, warn=False):
+        """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound
+        optional); with `warn`, a warning gives the number of timestamps dropped."""
         self._log("Filtering dataset by time range")
+        n_times = geodf[time_col_name].nunique()
         if tmin is not None:
             tmin = _to_naive_utc(tmin)
             geodf = geodf[geodf[time_col_name] >= tmin]
@@ -1261,6 +1281,13 @@ class DesignMatricesBuilder:
 
         if geodf.empty:
             raise ValueError(f"No rows remain after filtering to tmin={tmin}, tmax={tmax}")
+        n_dropped = n_times - geodf[time_col_name].nunique()
+        if warn and n_dropped:
+            warnings.warn(
+                f"{n_dropped} of {n_times} timestamps of the prediction data are outside the training "
+                f"period [{tmin}, {tmax}] and are dropped (the latent state exists only on that period).",
+                UserWarning, stacklevel=5,
+            )
         self._log(f"Dataset filtered to {len(geodf)} rows")
         return geodf
 
@@ -1324,8 +1351,8 @@ class DesignMatricesBuilder:
         """Evaluate `formula` on `self.geodf` with Patsy and reshape the result to `[N, P, T]`/`[N, T]`."""
         self._log("Computing design matrix from GeoDataFrame")
 
-        geodf = self.geodf.sort_values([self.time_col_name, self.geometry_id])
-        geodf = geodf.drop_duplicates(subset=[self.geometry_id, self.time_col_name])
+        geodf = self.geodf.sort_values([self.time_col_name, self.geometry_id], kind="stable")
+        geodf = self._drop_duplicate_rows(geodf, self.geometry_id, self.time_col_name)
         self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
 
         # len(lhs_termlist) > 0 -> response required, == 0 -> covariates-only formula
@@ -1354,7 +1381,7 @@ class DesignMatricesBuilder:
             y_matrix, x_matrix = dmatrices(
                 self.formula, data=geodf, NA_action=na_action, return_type="matrix",
             )
-            y_matrix[np.isinf(y_matrix)] = np.nan
+            y_matrix = self._check_response(y_matrix)
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
             self._log(f"y name: {y_design_info.column_names[0]}, shape={y.shape}")
@@ -1393,8 +1420,8 @@ class DesignMatricesBuilder:
         """
         self._log("Computing prediction design matrix from GeoDataFrame")
 
-        geodf = geodf.sort_values([time_col_name, geometry_id])
-        geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
+        geodf = geodf.sort_values([time_col_name, geometry_id], kind="stable")
+        geodf = self._drop_duplicate_rows(geodf, geometry_id, time_col_name)
         self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
 
         timestamps = np.sort(np.unique(geodf[time_col_name]))
@@ -1437,7 +1464,7 @@ class DesignMatricesBuilder:
                 [self.design_matrices.y_design_info], data=geodf,
                 NA_action=na_action, return_type="matrix",
             )
-            y_matrix[np.isinf(y_matrix)] = np.nan
+            y_matrix = self._check_response(y_matrix)
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
             y_name = y_design_info.column_names[0]
