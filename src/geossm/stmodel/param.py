@@ -73,9 +73,9 @@ class FitOptions:
     Parameters
     ----------
     max_iter : int, default 20
-        Maximum number of EM iterations to run.
+        Maximum number of EM iterations to run (>= 1).
     tol_relat : float, default 1e-3
-        Convergence tolerance on the log-likelihood change per observed
+        Convergence tolerance (>= 0) on the log-likelihood change per observed
         value, ``|llf_k - llf_{k-1}| / n_obs``. EM stops as converged once
         it is reached (before `max_iter`), including when the change is a
         decrease of that size (iterates oscillating on the plateau). Unlike
@@ -105,6 +105,14 @@ class FitOptions:
     verbose: bool = True
     force_iter: bool = False
     std: bool = True
+
+    def __post_init__(self):
+        if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
+                or self.max_iter < 1:
+            raise ValueError(f"max_iter must be an integer >= 1, got {self.max_iter!r}.")
+        if not (isinstance(self.tol_relat, (int, float, np.number)) and np.isfinite(self.tol_relat)
+                and self.tol_relat >= 0):
+            raise ValueError(f"tol_relat must be a finite number >= 0, got {self.tol_relat!r}.")
 
     def __str__(self):
         lines = ["FitOptions:"]

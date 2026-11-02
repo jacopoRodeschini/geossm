@@ -40,12 +40,12 @@ def _compute_initial_values_jax_kernel(y_t, Xbeta, block_p, block_q):
 
     # --- beta (OLS) ---
 
-    # In JAX, arrays are immutable. Use jnp.where to replace nan/inf values
-    # instead of in-place assignment.
-    Yt_clean = jnp.nan_to_num(y_t)
+    # OLS over the observed entries only (F53: missing values are not zeros)
+    observed = ~jnp.isnan(y_t)
+    Yt_clean = jnp.where(observed, y_t, 0.0)
 
-    # Reshape X to (ni, T, b)
-    Xr = Xbeta.transpose(0, 2, 1)  # (ni, T, b)
+    # Reshape X to (ni, T, b), with the rows of missing entries set to 0
+    Xr = jnp.where(observed[:, None, :], Xbeta, 0.0).transpose(0, 2, 1)  # (ni, T, b)
 
     # Compute Xs and ys efficiently using Einstein summation convention
     # This part is identical in syntax to NumPy.
@@ -59,15 +59,15 @@ def _compute_initial_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     # Vectorize the residual calculation instead of using a Python loop.
     # 'ibt,b->it' means: multiply (ni, b, T) with (b,) -> result (ni, T)
     predicted_y = jnp.einsum("ibt,b->it", Xbeta, est_beta)
-    res = Yt_clean - predicted_y
+    res = jnp.where(observed, y_t - predicted_y, jnp.nan)
 
     # --- s2 measurement error [1 * p] ---
     # A Python loop over static values (from block_p) is acceptable and will
     # be "unrolled" by the JIT compiler.
     var_res_list = []
     for p in range(nvar):
-        # Slicing and computing variance
-        var_res_list.append(jnp.var(res[block_p[p] : block_p[p + 1]]))
+        # Variance of the observed residuals of the block
+        var_res_list.append(jnp.nanvar(res[block_p[p] : block_p[p + 1]]))
 
     var_res = jnp.stack(var_res_list)
     est_s2 = var_res * 0.2

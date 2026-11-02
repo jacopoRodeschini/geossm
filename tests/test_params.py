@@ -143,3 +143,12 @@ def test_fit_options_are_immutable():
         opts.max_iter = 50
     new = dataclasses.replace(opts, max_iter=50)
     assert (new.max_iter, opts.max_iter) == (50, 5) and new.tol_relat == opts.tol_relat
+
+
+# --- Section N: FitOptions validation ----------------------------------------
+
+@pytest.mark.parametrize("kw", [dict(max_iter=0), dict(max_iter=-1), dict(max_iter=2.5), dict(max_iter=True),
+                                dict(tol_relat=-1.0), dict(tol_relat=float("nan"))])
+def test_fit_options_reject_invalid_values(kw):
+    with pytest.raises(ValueError):
+        FitOptions(**kw)

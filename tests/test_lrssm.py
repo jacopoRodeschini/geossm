@@ -566,7 +566,8 @@ def _state_G(model, f, ks, T, S11, S10, S00, ldim):
 
 @pytest.fixture(scope="module")
 def m_step_call(gdf, mesh):
-    """Arguments and result of the third M-step of a float64 fit."""
+    """Arguments and result of the sixth M-step of a float64 fit (ks moves from its
+    starting value only from the fourth one, see F54)."""
     before = jax.config.jax_enable_x64
     jax.config.update("jax_enable_x64", True)
     try:
@@ -581,7 +582,7 @@ def m_step_call(gdf, mesh):
             return out
 
         model._M_step = spy
-        model.fit(options=_options(max_iter=3))
+        model.fit(options=_options(max_iter=6))
     finally:
         jax.config.update("jax_enable_x64", before)
     bound, ks_cur, new = calls[-1]
@@ -1071,3 +1072,34 @@ def test_missing_covariates_are_missing_observations(gdf, mesh):
     with pytest.warns(UserWarning, match="2 prediction"):
         y_pred, _ = res.predict(gdf.assign(x=np.where(gdf.index.isin(rows[:2]), np.nan, gdf.x)), verbose=False)
     assert int(np.isnan(y_pred).sum()) == 2
+
+
+# --- params0 validation (Section N) ------------------------------------------
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(A=Param("A", jnp.ones((2, 2)))), "params0.A has shape"),
+    (dict(A=Param("A", jnp.array([1.5]))), "params0.A has shape"),
+    (dict(beta=Param("beta", jnp.array([1.0, 0.5, 0.1]))), "params0.beta has shape"),
+    (dict(s2e=Param("s2e", jnp.array([-1.0]))), "s2e"),
+    (dict(ks=Param("ks", jnp.array([-1.0]))), "ks"),
+    (dict(f=Param("f", jnp.array([1.0]))), "f"),
+    (dict(f=Param("f", jnp.array([jnp.nan]))), "non-finite"),
+    (dict(Sigma0=Param("Sigma0", jnp.eye(3))), "params0.Sigma0 has shape"),
+])
+def test_invalid_params0_raises(gdf, mesh, kw, match):
+    with pytest.raises(ValueError, match=match):
+        _build_model(gdf, mesh).fit(params0=ModelParams(**kw), options=_options())
+
+
+@pytest.mark.usefixtures("x64")
+def test_initial_values_ignore_missing_observations(gdf, mesh):
+    # F53: masked sites (all NaN) do not change the starting values
+    from geossm.stmodel._em import _compute_initial_values_jax_kernel
+    model = _build_model(gdf, mesh, dtype=jnp.float64)
+    y, X = jnp.asarray(model.y_train), jnp.asarray(model.Xbeta)
+    keep = np.arange(y.shape[0]) >= 5
+    bp, bq = (0, y.shape[0]), (0, 3)
+    masked = _compute_initial_values_jax_kernel(jnp.where(keep[:, None], y, jnp.nan), X, bp, bq)
+    dropped = _compute_initial_values_jax_kernel(y[keep], X[keep], (0, int(keep.sum())), bq)
+    for a, b in zip(masked, dropped):
+        np.testing.assert_allclose(a, b, rtol=1e-10)

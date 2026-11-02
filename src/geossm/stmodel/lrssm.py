@@ -930,7 +930,9 @@ class LRStateSpaceModel(StateSpaceModel):
         ------
         ValueError
             If `setup()` has not been called (no latent covariance
-            functions).
+            functions), or if a value given in `params0` has the wrong
+            shape, is not finite, or is out of range (`s2e > 0`, `ks > 0`,
+            `|f| < 1`).
         """
         self._require_setup("fit")
         # `options.verbose` applies to this call only; the model's own
@@ -962,6 +964,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
         self._log("Parsing the initial parameters (ModelParams|None)...")
         params0 = self._parseParams(params0)
+        self._check_params0(params0)
 
         # Get global constants
         nvar = self.nvar  # len(self.pdim)
@@ -1184,7 +1187,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 termination, converged = "tolerance", True
                 flag = False
 
-            elif niter == max_iter:
+            elif niter >= max_iter:
                 termination = "max_iter"
                 warnings.warn(
                     "The EM algorithm reached max_iter={} without meeting "
@@ -1625,6 +1628,34 @@ class LRStateSpaceModel(StateSpaceModel):
                 fcov.rescale = ksi
 
         return new_params
+
+    def _check_params0(self, params0: ModelParams):
+        """
+        Validate the values given in `params0` (fixed or starting values):
+        shapes -- `beta` (b,), `s2e` (nvar,), `f` and `ks` (nlat,), `A`
+        (nvar, nlat), `x0` (q,), `Sigma0` (q, q)
+        -- finite values, `s2e > 0`, `ks > 0` and `|f| < 1`.
+        """
+        nvar, nlat = int(self.nvar), int(self.nlat)
+        q = int(self.block_q[-1])
+        b = int(self.Xbeta.shape[1])
+        shapes = {"beta": (b,), "s2e": (nvar,), "f": (nlat,), "ks": (nlat,), "A": (nvar, nlat),
+                  "x0": (q,), "Sigma0": (q, q)}
+        for name, shape in shapes.items():
+            value = getattr(params0, name).value
+            if value is None:
+                continue
+            v = np.asarray(value)
+            if v.shape != shape:
+                raise ValueError(f"params0.{name} has shape {v.shape}; expected {shape}.")
+            if not np.all(np.isfinite(v)):
+                raise ValueError(f"params0.{name} has non-finite values.")
+        checks = (("s2e", lambda v: v > 0, "positive"), ("ks", lambda v: v > 0, "positive"),
+                  ("f", lambda v: np.abs(v) < 1, "in (-1, 1) (stationary dynamics)"))
+        for name, ok, what in checks:
+            value = getattr(params0, name).value
+            if value is not None and not np.all(ok(np.asarray(value))):
+                raise ValueError(f"params0.{name} = {np.asarray(value).tolist()} must be {what}.")
 
     def _updateParams0(self, params0: ModelParams, updates: ModelParams) -> ModelParams:
         """
