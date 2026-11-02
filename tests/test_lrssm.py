@@ -75,10 +75,15 @@ class TestModelConstruction:
         assert q == int(model.cov_function[0].fem_solver.n_inner_points)
         assert model.Xbeta.shape == (p, 2, T)
 
-    @known_bug("F11", "formulas=None (documented 'empty model') raises AttributeError",
-               raises=AttributeError)
-    def test_empty_model_without_formulas(self, gdf):
-        LRStateSpaceModel(gdf, None, None, verbose=False, backend="cpu")
+    def test_empty_model_without_formulas(self, gdf, mesh):
+        # F11: documented "empty" model, for sim(formulas=...) only
+        model = LRStateSpaceModel(gdf, None, None, verbose=False, backend="cpu")
+        model.setup([SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)])
+        with pytest.raises(ValueError, match="needs the observations"):
+            model.fit(options=_options())
+        params = ModelParams(beta=[1.0, 0.5], A=[[1.0]], s2e=[0.1], ks=[1.0], f=[0.8])
+        y = model.sim(["y ~ 1 + x"], params=params, verbose=False)[0]
+        assert np.all(np.isfinite(np.asarray(y)))
 
     def test_float64_without_x64_raises(self, gdf):
         # F03: the constructor must not switch on the process-wide x64 flag.

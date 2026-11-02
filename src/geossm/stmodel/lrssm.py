@@ -256,6 +256,9 @@ class LRStateSpaceModel(StateSpaceModel):
         else:
             self._log("Formulas not provided. The model will be initialized without them")
 
+            # an "empty" model (e.g. for `sim(formulas=...)`): no observation grid
+            self.nvar = self.points = self.gridList = self.ndim = self.pdim = self.block_p = None
+            self.builders = self.y_train = self.y_train_list = self.Xbeta_list = None
             Xbeta = None
             xbeta_names = None
             y_name = None
@@ -265,7 +268,8 @@ class LRStateSpaceModel(StateSpaceModel):
         # domain=None defaults to the convex hull of each group's observed
         # points.
         self.domain = domain
-        self._log(f"{len(self._domain)} valid domain(s) set.")
+        if self._domain is not None:
+            self._log(f"{len(self._domain)} valid domain(s) set.")
 
         self._cov_matern = None
         # Latent dimensions and supported sites: set by setup() (None before, Section D)
@@ -446,6 +450,7 @@ class LRStateSpaceModel(StateSpaceModel):
             Stacked response, one row per observation (same row order as
             `Xbeta`), evaluated from `df` with the training `y_design_info`.
         """
+        self._require_data("get_design_matrix")
         verbose = self.verbose if verbose is None else verbose
         return prediction_design(df, self.builders, self.domain, verbose=verbose, include_response=True,
                                  log=self._log)
@@ -816,6 +821,15 @@ class LRStateSpaceModel(StateSpaceModel):
                     "the meshes and their domains cover the observation sites (same CRS)."
                 )
 
+    def _require_data(self, method):
+        """Raise a clear error if the model was built without formulas
+        (no observations, see `__init__`) before `method`."""
+        if self.y_train is None:
+            raise ValueError(
+                f"{method}() needs the observations: build the model with formulas "
+                "(a model without formulas only supports sim(formulas=...))."
+            )
+
     def _require_setup(self, method):
         """Raise a clear error if `setup()` (the latent covariance functions)
         has not been called before `method`."""
@@ -935,6 +949,7 @@ class LRStateSpaceModel(StateSpaceModel):
             `|f| < 1`).
         """
         self._require_setup("fit")
+        self._require_data("fit")
         # `options.verbose` applies to this call only; the model's own
         # `verbose` is restored afterwards (F17).
         verbose_before = self.verbose
@@ -1726,6 +1741,8 @@ class LRStateSpaceModel(StateSpaceModel):
             equation's own observed points (`self.points`).
         """
         if polygon is None:
+            if self.points is None:  # empty model, no sites
+                return None
             return [MultiPoint(pts).convex_hull for pts in self.points]
 
         return list(polygon)

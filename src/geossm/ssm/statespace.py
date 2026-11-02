@@ -943,8 +943,10 @@ class StateSpaceModel:
         if Sigma0 is None and F is not None and Q is not None:
             Sigma0 = jnp.eye(F.shape[0])
 
-        # Set default Xbeta and beta if not provided
-        if Xbeta is None and H is not None:
+        # Set default Xbeta and beta if not provided: no covariates (one zero
+        # column), resized to the number of time steps of the data (see `set`)
+        xbeta_default = Xbeta is None and H is not None
+        if xbeta_default:
             Xbeta = jnp.zeros((H.shape[0], 1, 1))
         if beta is None and Xbeta is not None:
             beta = jnp.zeros(Xbeta.shape[1])
@@ -961,6 +963,7 @@ class StateSpaceModel:
             beta=beta,
             xbeta_names=xbeta_names,
         )
+        self._Xbeta_default = xbeta_default
 
         # Check parameters only if the key parameters are set (allow for partial initialization)
         if (
@@ -1106,6 +1109,7 @@ class StateSpaceModel:
         if Xbeta is not None:
             Xbeta_arr = self._prepare_array(Xbeta)
             self._Xbeta = Xbeta_arr
+            self._Xbeta_default = False
 
             # infer (p, b, T) when possible
             if Xbeta_arr.ndim >= 3:
@@ -1163,8 +1167,11 @@ class StateSpaceModel:
 
         if y_t is not None:
             self._y_t = self._prepare_array(y_t)
-            self._p = self._y_t.shape[0]
+            if self._p is None:  # otherwise set by H; `_check_y_t` validates y_t against it
+                self._p = self._y_t.shape[0]
             self._T = self._y_t.shape[1]
+            if getattr(self, "_Xbeta_default", False) and self._Xbeta.shape[2] != self._T:
+                self._Xbeta = self._prepare_array(jnp.zeros((self._Xbeta.shape[0], self._Xbeta.shape[1], self._T)))
 
         if y_name is not None:
             self._y_name = y_name
@@ -1316,21 +1323,13 @@ class StateSpaceModel:
         #         flag = False
 
         # Xbeta: (p, b, T)
-        if self.Xbeta is None:
-            messages.append("Set Xbeta to a default zero array of shape (p, b, T) before checking.")
-            self._Xbeta = self._prepare_array(jnp.zeros((p, b, T)))
-
-        Xbeta_shape = shape_str(self.Xbeta)
+        Xbeta_shape = shape_str(self.Xbeta) if self.Xbeta is not None else None
         if Xbeta_shape != (p, b, T):
             messages.append(f"Xbeta must be shape ({p},{b},{T}), got {Xbeta_shape}.")
             flag = False
 
         # beta: (b,)
-        if self.beta is None:
-            messages.append("Set beta to a default zero array of shape (b,) before checking.")
-            self._beta = self._prepare_array(jnp.zeros((b,)))
-
-        beta_shape = shape_str(self.beta)
+        beta_shape = shape_str(self.beta) if self.beta is not None else None
         if beta_shape != (b,):
             messages.append(f"beta must be shape ({b},), got {beta_shape}.")
             flag = False
@@ -1339,16 +1338,19 @@ class StateSpaceModel:
 
     def _check_y_t(self, y_t):
         """
-        Check the shape of the observed data y_t.
+        Check the shape of the observed data `y_t` (p, T) against `H` (p
+        rows) and, unless it is the default, `Xbeta` (T time steps).
         """
-        flag = True
-        y_t_shape = y_t.shape
-
-        expected_shape = (self.p, self.T)
-        msg = ""
-        if y_t_shape != expected_shape:
-            msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."
-        return flag, msg
+        shape = tuple(jnp.shape(y_t))
+        if len(shape) != 2:
+            return False, f"y_t must be 2-D, shape (p, T), got {shape}."
+        if self.p is not None and shape[0] != self.p:
+            return False, (f"y_t has {shape[0]} rows, but the model has p = {self.p} observed "
+                           "variables (rows of H).")
+        if (self.Xbeta is not None and not getattr(self, "_Xbeta_default", False)
+                and self.Xbeta.ndim == 3 and shape[1] != self.Xbeta.shape[2]):
+            return False, f"y_t has {shape[1]} time steps, but Xbeta has {self.Xbeta.shape[2]}."
+        return True, ""
 
     @_on_device
     def estimate(
@@ -1496,20 +1498,19 @@ class StateSpaceModel:
             Q=Q,
             x0=x0,
             Sigma0=Sigma0,
-            y_t=y_t,
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            y_name=y_name,
         )
+
+        # Check y_t against the model before it is set (an error names y_t)
+        flag, msg = self._check_y_t(y_t)
+        if not flag:
+            raise ValueError(msg)
+        self.set(y_t=y_t, y_name=y_name)
 
         # Check parameters
         flag, msg = self._check_parameters()
-        if not flag:
-            raise ValueError(msg)
-
-        # check y_t
-        flag, msg = self._check_y_t(y_t)
         if not flag:
             raise ValueError(msg)
 
@@ -2234,6 +2235,7 @@ class StateSpaceModel:
             "x0": to_np(self._x0),
             "Sigma0": to_np(self._Sigma0),
             "Xbeta": to_np(self._Xbeta),
+            "Xbeta_default": getattr(self, "_Xbeta_default", False),
             "beta": to_np(self._beta),
             "T": self._T,
             "p": self._p,
@@ -2299,6 +2301,7 @@ class StateSpaceModel:
         self._beta = to_jax(state.get("beta", None))
 
         self._T = state.get("T", None)
+        self._Xbeta_default = state.get("Xbeta_default", False)
         self._p = state.get("p", None)
         self._q = state.get("q", None)
         self._b = state.get("b", None)
