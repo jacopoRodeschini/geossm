@@ -19,7 +19,7 @@ def diag_variance(Sigma):
 
 
 def build_geo_dataframe(y_names, points_list, timestamps_list, y_list, var_list, crs,
-                        prefix, y_back_list=None, var_back_list=None):
+                        prefix, y_back_list=None, var_back_list=None, support_list=None):
     """
     Build one GeoDataFrame, one row per (point, timestamp), from per-variable
     means `y_list` (each `(n, T)`) and point-wise variances `var_list` (each
@@ -27,7 +27,8 @@ def build_geo_dataframe(y_names, points_list, timestamps_list, y_list, var_list,
     `timestamps_list[i]` must be the same across `i`). `prefix` (`"hat"` or
     `"pred"`) names the value columns: `y_<prefix>_<var>`/`std_<prefix>_<var>`,
     plus `y_<prefix>_back_<var>`/`std_<prefix>_back_<var>` when
-    `y_back_list`/`var_back_list` are given.
+    `y_back_list`/`var_back_list` are given, and `in_support_<var>` (sites
+    the latent field enters) when `support_list` is given.
     """
     import geopandas as geopd
     from shapely.geometry import Point
@@ -64,6 +65,9 @@ def build_geo_dataframe(y_names, points_list, timestamps_list, y_list, var_list,
     add_columns(y_names, y_list, var_list, prefix)
     if y_back_list is not None:
         add_columns(y_names, y_back_list, var_back_list, f"{prefix}_back")
+    if support_list is not None:
+        for name, support in zip(y_names, support_list):
+            data[f"in_support_{name}"] = np.tile(np.asarray(support, dtype=bool), T)
 
     geoms = [Point(xy) for xy in points]
 
@@ -136,14 +140,15 @@ def as_polygon_gdf(polys, crs):
     return gdf.reset_index(drop=True)
 
 
-def areal_weights(points, polygons):
+def areal_weights(points, polygons, keep=None):
     """
     Sparse averaging matrix `W` (shape `(m, n)`) mapping the `n`
     prediction points to the `m` polygons: `W[k, j] = 1 / n_k` if point
     `j` falls in polygon `k` (boundary included), else 0, with `n_k`
     the number of points in polygon `k`. A point on a boundary shared
     by two polygons contributes to both. Rows of polygons containing
-    no point are all-zero; `n_k` (returned alongside) flags them.
+    no point are all-zero; `n_k` (returned alongside) flags them. Points
+    with `keep` False (boolean `(n,)`, optional) are left out.
     """
     import geopandas as geopd
     from scipy import sparse
@@ -152,6 +157,9 @@ def areal_weights(points, polygons):
     pts = geopd.points_from_xy(points[:, 0], points[:, 1], crs=polygons.crs)
     # (2, k) positional pairs: row 0 -> point, row 1 -> polygon
     pt_idx, poly_idx = polygons.sindex.query(pts, predicate="intersects")
+    if keep is not None:
+        kept = np.asarray(keep, dtype=bool)[pt_idx]
+        pt_idx, poly_idx = pt_idx[kept], poly_idx[kept]
 
     m, n = len(polygons), points.shape[0]
     counts = np.bincount(poly_idx, minlength=m)

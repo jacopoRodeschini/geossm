@@ -36,7 +36,8 @@ from geossm.stmodel.param import Param, FitOptions, ModelParams
 
 from .stmodel_results import LRStateSpaceResults
 from geossm.stmodel._fitted import (FittedState, _read_only_copy, _spde_marginal_precision, mesh_arrays,
-                                    latent_basis, build_H, build_RF, observed_loglik, cov_sizes)
+                                    latent_basis, latent_support, support_message, build_H, build_RF,
+                                    observed_loglik, cov_sizes)
 from geossm.stmodel._design import prediction_design, split_design, stack_design
 from geossm.stmodel._em import (_compute_initial_values_jax_kernel, _compute_beta_jax_kernel,
                                _compute_s2e_jax_kernel, _compute_A2_jax_kernel, _ks_value_and_grad)
@@ -250,8 +251,8 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log(f"{len(self._domain)} valid domain(s) set.")
 
         self._cov_matern = None
-        # Latent dimensions: set by setup() (None before, Section D)
-        self.qdim = self.block_q = self.nlat = None
+        # Latent dimensions and supported sites: set by setup() (None before, Section D)
+        self.qdim = self.block_q = self.nlat = self.in_support = None
 
         # Initialise the StateSpaceModel as a null model (we will set the parameters later)
         # y_train will be used later for estimation and for the results
@@ -279,6 +280,15 @@ class LRStateSpaceModel(StateSpaceModel):
             `latlon` flag that disagrees with that CRS (geographic vs
             projected) gives a warning (`latlon` only affects `distance()`
             and the inherited `Matern` diagnostics).
+
+        Training sites the latent field does not enter -- outside the union
+        of the latent domains of `cov_fun`, or with an empty latent basis
+        (outside every mesh, or in elements whose nodes are all outer) --
+        are reported with a warning and flagged in `self.in_support`
+        (boolean, one entry per stacked site); `fit()` treats their
+        observations as missing, so they do not enter the likelihood or the
+        diagnostics of the results. A response variable with no site in
+        support raises `ValueError`.
         """
         if cov_fun is None:
             raise ValueError("cov_fun must be provided")
@@ -312,6 +322,17 @@ class LRStateSpaceModel(StateSpaceModel):
 
         # set the number of latent factors (i.e. the number of covariance functions)
         self.nlat = len(self._cov_matern)
+
+        # Sites the latent field enters (F51); the others are missing data for fit()
+        if getattr(self, "points", None) is not None:
+            basis = latent_basis(self._cov_matern, self.points, self.dtype)
+            support, counts = latent_support(self._cov_matern, self.points, basis)
+            self._require_support(support)
+            msg = support_message(self.y_name, counts, "training sites",
+                                  "their observations are treated as missing in fit().")
+            if msg:
+                warnings.warn(msg, UserWarning, stacklevel=3)
+            self.in_support = np.concatenate(support)
 
         return self
 
@@ -734,7 +755,7 @@ class LRStateSpaceModel(StateSpaceModel):
         return y_hat_full, Sigma_y_hat_full, tdelta
 
     def _get_fitted_state(self, x_smoothed=None, P_smoothed=None, P_pred_smoothed=None,
-                          S11=None, S10=None, S00=None):
+                          S11=None, S10=None, S00=None, in_support=None):
         """
         The state that fitted results need later (a frozen `FittedState`,
         F09): the model configuration (covariance functions, observation
@@ -764,7 +785,19 @@ class LRStateSpaceModel(StateSpaceModel):
             S11=S11,
             S10=S10,
             S00=S00,
+            in_support=in_support,
         )
+
+    def _require_support(self, support):
+        """Raise if a response variable has no site in the support of the
+        latent field (see `latent_support`)."""
+        for name, s in zip(self.y_name, support):
+            if not s.any():
+                raise ValueError(
+                    f"No site of '{name}' is in the support of the latent field (inside the latent "
+                    "domains, with a non-empty basis, and a non-zero loading if A is fixed): check that "
+                    "the meshes and their domains cover the observation sites (same CRS)."
+                )
 
     def _require_setup(self, method):
         """Raise a clear error if `setup()` (the latent covariance functions)
@@ -926,6 +959,25 @@ class LRStateSpaceModel(StateSpaceModel):
 
         points = self.points
         p, T = y_obs.shape
+
+        # Compute the basis matrix (just one) - no boundary
+        self._log("Computing the basis matrix...")
+        basis = latent_basis(self.cov_function, points, self.dtype)
+
+        # Sites without a latent term (F51) are missing data for the fit: their
+        # observations do not enter the likelihood or the diagnostics.
+        A0 = params0.A
+        A_fixed = (np.asarray(A0.value).reshape(nvar, nlat)
+                   if A0.fixed and A0.value is not None else None)
+        support, counts = latent_support(self.cov_function, points, basis, A=A_fixed)
+        self._require_support(support)
+        in_support = np.concatenate(support)
+        if A_fixed is not None:
+            msg = support_message(self.y_name, counts, "training sites",
+                                  "with the fixed loadings A, their observations are treated as missing.")
+            if msg:
+                warnings.warn(msg, UserWarning, stacklevel=3)
+        y_obs = jnp.where(jnp.asarray(in_support)[:, None], y_obs, jnp.nan)
         # Observed entries: the stopping rule uses the log-likelihood change
         # per observation, which (unlike a change relative to |llf|) does not
         # depend on additive constants in the log-likelihood.
@@ -946,10 +998,6 @@ class LRStateSpaceModel(StateSpaceModel):
         self._log("Updating the initial parameter values...")
         est_params = self._updateParams0(params0, est_params)
 
-        # Compute the basis matrix (just one) - no boundary
-        
-        self._log("Computing the basis matrix...")
-        basis = latent_basis(self.cov_function, points, self.dtype)
         Phi = build_H(jnp.ones((nvar, nlat), dtype=self.dtype), basis)
 
         # Build the M-step's ks (Matern rescale) objective once - JIT
@@ -1182,7 +1230,8 @@ class LRStateSpaceModel(StateSpaceModel):
             termination=termination,
             llf=logL_cur,
             fitted_state=self._get_fitted_state(x_smoothed=x_T, P_smoothed=P_T, P_pred_smoothed=None,
-                                                S11=S11, S10=S10, S00=S00),
+                                                S11=S11, S10=S10, S00=S00, in_support=in_support),
+            y_obs=y_obs,
             # main arrays (stacked across all variables -- feeds the
             # generic, model-agnostic uncertainty machinery in the base
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)

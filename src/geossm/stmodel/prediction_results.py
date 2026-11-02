@@ -41,6 +41,11 @@ class LRPredictionResults:
         CRS of the prediction sites.
     tdelta : float
         Wall-clock time of the prediction kernels (seconds).
+    in_support : numpy.ndarray of bool, shape (p,), or None
+        Prediction sites the latent field enters (inside the latent
+        domains, with a non-empty basis). At the others the mean is
+        `X beta` and the state-driven variance 0 (a warning is given when
+        the predictions are computed): mask them with `in_support`.
     y_pred_back_list, Sigma_y_pred_back_list : list of numpy.ndarray or None
         Original-scale predictions (delta method), set by `back_transform`.
 
@@ -53,7 +58,7 @@ class LRPredictionResults:
     """
 
     def __init__(self, fitted_state, y_pred, Sigma_y_pred=None, var_pred=None, points=None, block_p=None,
-                 timestamps=None, crs=None, tdelta=None):
+                 timestamps=None, crs=None, tdelta=None, in_support=None):
         dtype = fitted_state.dtype
         self._fitted_state = fitted_state
         self.y_pred = _read_only_array(y_pred, dtype)
@@ -66,6 +71,7 @@ class LRPredictionResults:
         self.timestamps = list(timestamps)
         self.crs = crs
         self.tdelta = tdelta
+        self.in_support = _read_only_array(in_support, bool)
         self.y_pred_back_list = None
         self.Sigma_y_pred_back_list = None
 
@@ -149,15 +155,20 @@ class LRPredictionResults:
         Columns: `point_id`, `timestamp`, then `y_pred_<var>`/`std_pred_<var>`
         for every response variable (plus `y_pred_back_<var>`/
         `std_pred_back_<var>` after `back_transform`), in the dtype of the
-        fit. `std_*` is the standard deviation of the latent mean (no
-        measurement error).
+        fit, and `in_support_<var>` (see `in_support`). `std_*` is the
+        standard deviation of the latent mean (no measurement error).
         """
         back_var = (None if self.Sigma_y_pred_back_list is None
                     else [diag_variance(S) for S in self.Sigma_y_pred_back_list])
         return build_geo_dataframe(
             self._y_names, self.points, self.timestamps, self.y_pred_list, self.var_pred_list, self.crs,
             prefix="pred", y_back_list=self.y_pred_back_list, var_back_list=back_var,
+            support_list=self._support_list(),
         )
+
+    def _support_list(self):
+        """Per-response-variable view of `in_support` (or `None`)."""
+        return None if self.in_support is None else np.split(self.in_support, self.block_p[1:-1])
 
     def to_poly(self, polys, back_transform=False, std=False):
         """
@@ -234,7 +245,8 @@ class LRPredictionResults:
             One row per (polygon, timestamp), with columns `poly_id`,
             `timestamp`, the input polygon attributes, then, per response
             variable `<var>` in `y_name`: `n_points_<var>`
-            (prediction points in the polygon), `<var>` (areal mean), and
+            (prediction points in support in the polygon), `<var>` (areal
+            mean over them), and
             `std_<var>` (if `std=True`) -- the last two suffixed
             `_back` if `back_transform=True` -- and `geometry` last.
         """
@@ -276,14 +288,15 @@ class LRPredictionResults:
         out.insert(0, "poly_id", rows)
         out.insert(1, "timestamp", np.repeat(ts, m))
 
-        for name, points, y, Sigma in zip(y_names, self.points, y_list, Sigma_list):
+        support_list = self._support_list() or [None] * len(y_names)
+        for name, points, y, Sigma, keep in zip(y_names, self.points, y_list, Sigma_list, support_list):
             col = f"{name}{suffix}"
-            W, counts = areal_weights(points, polygons)
+            W, counts = areal_weights(points, polygons, keep=keep)
             empty = counts == 0
             if empty.any():
                 warnings.warn(
                     f"to_poly(): {int(empty.sum())} of {m} polygon(s) contain no "
-                    f"prediction point for '{name}'; their values are set to NaN. "
+                    f"prediction point in support for '{name}'; their values are set to NaN. "
                     f"Use a denser prediction grid.",
                     RuntimeWarning,
                     stacklevel=2,

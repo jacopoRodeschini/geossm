@@ -7,6 +7,7 @@ function of it, so results never call back into the model (Section B, P1).
 """
 
 import time
+import warnings
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Optional
@@ -108,6 +109,10 @@ class FittedState:
     y_hat, Sigma_y_hat : numpy.ndarray or None
         In-sample fitted mean ``(p, T)`` and state-driven covariance
         ``(p, p, T)`` (`None` when `fit` ran with ``std=False``).
+    in_support : numpy.ndarray of bool or None
+        Training sites ``(p,)`` the latent field enters (see
+        `latent_support`); the observations of the others are missing
+        (``NaN``) in `y_obs`, so they do not enter the fit.
 
     A `FittedState` can be pickled, but without the formula builders (patsy
     does not support pickling): an unpickled state supports inference and
@@ -144,6 +149,7 @@ class FittedState:
     Xbeta: Optional[np.ndarray] = None
     y_hat: Optional[np.ndarray] = None
     Sigma_y_hat: Optional[np.ndarray] = None
+    in_support: Optional[np.ndarray] = None
 
     #: Arrays of the fit held here and exposed by `LRStateSpaceResults`.
     ARRAY_FIELDS = ("x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00",
@@ -152,6 +158,7 @@ class FittedState:
     def __post_init__(self):
         for name in self.ARRAY_FIELDS:
             object.__setattr__(self, name, _read_only_array(getattr(self, name), self.dtype))
+        object.__setattr__(self, "in_support", _read_only_array(self.in_support, bool))
 
     def __getstate__(self):
         # The formula builders hold patsy design infos, which patsy refuses to
@@ -249,6 +256,47 @@ def latent_basis(cov_function, points, dtype):
             for pts in points]
 
 
+def latent_support(cov_function, points, basis, A=None):
+    """
+    Sites the latent field enters (F51). Site `s` of response variable `i`
+    is in support if it lies in the union `G` of the latent domains of all
+    covariance functions (boundary included) and the latent basis of at
+    least one factor `j` is non-empty at `s` (with ``A[i, j] != 0`` when
+    `A` is given, i.e. when the loadings are fixed). The rule is the same
+    for any number of response variables and latent factors, since the
+    latent term of `s` is ``sum_j A[i, j] basis[i][j](s) x_j``.
+
+    `basis` is `latent_basis(cov_function, points, ...)`. Returns the list of
+    ``(n_i,)`` boolean arrays and, per response variable, the number of
+    sites outside `G` and of sites in `G` with an empty basis (outside every
+    mesh, or in elements whose nodes are all outer).
+    """
+    import shapely
+    G = shapely.union_all([poly for cov in cov_function for poly in cov.domain])
+    shapely.prepare(G)
+    support, counts = [], []
+    for i, pts in enumerate(points):
+        in_G = shapely.covers(G, shapely.points(np.asarray(pts, dtype=np.float64)))
+        has_basis = np.zeros(len(in_G), dtype=bool)
+        for j, b in enumerate(basis[i]):
+            if A is None or A[i, j] != 0:
+                has_basis |= np.asarray(jnp.any(b != 0, axis=1))
+        support.append(in_G & has_basis)
+        counts.append((int((~in_G).sum()), int((in_G & ~has_basis).sum())))
+    return support, counts
+
+
+def support_message(y_name, counts, what, effect):
+    """Warning text for the out-of-support sites of `latent_support`
+    (`counts`), or `None` when every site is in support."""
+    parts = [f"'{name}': {out_G} outside the latent domains, {empty} with no latent basis"
+             for name, (out_G, empty) in zip(y_name, counts) if out_G or empty]
+    if not parts:
+        return None
+    return (f"Some {what} are outside the support of the latent field ({'; '.join(parts)}): "
+            f"{effect} See `in_support`.")
+
+
 def build_H(A, basis):
     """Dense measurement matrix `H`: each (variable, latent factor) basis
     block of `latent_basis` scaled by the loading `A[p, q]`, stacked into one
@@ -332,7 +380,10 @@ def predict_from_fit(state, df, verbose=True, cov="full", log=None):
     the covariance) or `None`. `verbose` is passed to the design-matrix
     builders; `log(msg)` receives progress messages. Returns a dict with
     `points`, `block_p`, `y_pred`, `Sigma_y_pred`, `var_pred` (NumPy,
-    `state.dtype`; `None` when not computed), `tdelta`, `timestamps`, `crs`.
+    `state.dtype`; `None` when not computed), `tdelta`, `timestamps`, `crs`,
+    `in_support` (sites the latent field enters, see `latent_support`; at
+    the others the mean is `X beta` and the state-driven variance 0, with a
+    warning).
     """
     if cov not in ("full", "diag", None):
         raise ValueError("cov must be 'full', 'diag' or None")
@@ -384,6 +435,13 @@ def predict_from_fit(state, df, verbose=True, cov="full", log=None):
     H = build_H(A, basis)
     log("Computing the H {} matrix... Done.".format(H.shape))
 
+    A_fixed = np.asarray(A).reshape(state.nvar, state.nlat) if state.params.A.fixed else None
+    support, counts = latent_support(state.cov_function, points, basis, A=A_fixed)
+    msg = support_message(state.y_name, counts, "prediction sites",
+                          "their mean is X beta and their state-driven variance 0.")
+    if msg:
+        warnings.warn(msg, UserWarning, stacklevel=4)
+
     # In the dtype of the fit (the design matrix is not cast, F45)
     dtype = np.dtype(state.dtype)
     Xbeta_predict = jnp.asarray(Xbeta_predict, dtype=dtype)
@@ -408,4 +466,5 @@ def predict_from_fit(state, df, verbose=True, cov="full", log=None):
         # enforces it matches the training CRS for each formula)
         "timestamps": [grid.timestamps for grid in grids],
         "crs": grids[0].crs,
+        "in_support": np.concatenate(support),
     }

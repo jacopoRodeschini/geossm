@@ -505,6 +505,10 @@ class LRStateSpaceResults(StateSpaceResults):
     _DELEGATED_FIELDS = frozenset(FittedState.ARRAY_FIELDS)
     y_obs = _state_property("y_obs", "ndarray, shape (p, T): Training observations (NaN where missing); see `fitted_state`.")
     Xbeta = _state_property("Xbeta", "ndarray, shape (p, b, T): Training design matrix; see `fitted_state`.")
+    in_support = _state_property(
+        "in_support", "ndarray of bool, shape (p,): Training sites the latent field enters; the "
+        "observations of the others are missing (NaN) in `y_obs` and do not enter the fit or its "
+        "diagnostics. See `fitted_state`.")
     y_hat = _state_property("y_hat", "ndarray, shape (p, T): In-sample fitted mean; see `fitted_state`.")
     Sigma_y_hat = _state_property(
         "Sigma_y_hat", "ndarray, shape (p, p, T), or None: In-sample state-driven covariance; see `fitted_state`.")
@@ -963,7 +967,7 @@ class LRStateSpaceResults(StateSpaceResults):
         return LRPredictionResults(
             state, pred["y_pred"], Sigma_y_pred=pred["Sigma_y_pred"], var_pred=pred["var_pred"],
             points=pred["points"], block_p=pred["block_p"], timestamps=pred["timestamps"],
-            crs=pred["crs"], tdelta=pred["tdelta"],
+            crs=pred["crs"], tdelta=pred["tdelta"], in_support=pred["in_support"],
         )
 
     # ---- Per-variable ("_list") views -----------------------------------
@@ -1034,6 +1038,8 @@ class LRStateSpaceResults(StateSpaceResults):
         (`sqrt(diag(H P H'))`, plug-in parameters), without the measurement
         error: for a prediction interval of a new observation, add `s2e` to
         its square (as `conf_int_y(prediction=True)` does).
+        `in_support_<var>` flags the sites the latent field enters (see
+        `in_support`).
 
         Returns
         -------
@@ -1045,6 +1051,7 @@ class LRStateSpaceResults(StateSpaceResults):
         return build_geo_dataframe(
             self._y_names, self.points_hat, self.timestamps_hat, self.y_hat_list, var_list, self.crs_hat,
             prefix="hat", y_back_list=self.y_hat_back_list, var_back_list=back_var,
+            support_list=None if self.in_support is None else np.split(self.in_support, self.block_p[1:-1]),
         )
 
     def back_transform(self, g_invs):

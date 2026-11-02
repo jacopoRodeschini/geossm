@@ -978,3 +978,74 @@ def test_to_poly_std_with_two_responses():
     # sqrt(w' Sigma w), w = 1/4: a -> sqrt(4/16) = 0.5; b -> sqrt((4 + 12 * 0.5)/16)
     np.testing.assert_allclose(out["std_a"], 0.5)
     np.testing.assert_allclose(out["std_b"], np.sqrt(10 / 16))
+
+
+# --- Latent support (F51, Section M) ----------------------------------------
+
+LEFT = Polygon([(0, 0), (5, 0), (5, 10), (0, 10)])  # latent domain covering part of the sites
+
+
+def _model_with_latent_domain(gdf, mesh, latent_domain, dtype=jnp.float64):
+    model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu", dtype=dtype)
+    cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[latent_domain], stats=False)
+    return model, cov
+
+
+@pytest.mark.usefixtures("x64")
+class TestLatentSupport:
+    def test_sites_outside_the_latent_domain_are_missing_in_the_fit(self, gdf, mesh):
+        model, cov = _model_with_latent_domain(gdf, mesh, LEFT)
+        with pytest.warns(UserWarning, match="outside the support of the latent field"):
+            model.setup([cov])
+        out = ~model.in_support
+        assert out.any() and not out.all()
+        assert np.all(np.asarray(model.points[0])[out, 0] > 5)
+        res = model.fit(options=_options())
+        np.testing.assert_array_equal(res.in_support, model.in_support)
+        assert np.all(np.isnan(res.y_obs[out])) and not np.isnan(res.y_obs[~out]).all()
+        assert res.nobs == int(np.sum(~np.isnan(np.asarray(model.y_train)[~out])))
+        assert np.isfinite(res.mse()) and 0 <= res.coverage_probability() <= 1
+        geo = res.to_geo()
+        assert geo["in_support_y"].sum() == model.in_support.sum() * res.ntime
+
+    def test_masking_equals_dropping_the_sites(self, gdf, mesh):
+        # Missing observations are integrated out of the likelihood: at the
+        # same parameters, the observed log-likelihood with masked sites
+        # equals the one on the supported sites only.
+        from geossm.stmodel._fitted import observed_loglik
+        model, cov = _model_with_latent_domain(gdf, mesh, LEFT)
+        with pytest.warns(UserWarning):
+            model.setup([cov])
+        res = model.fit(options=_options())
+        pts = np.asarray(model.points[0])
+        kept = {tuple(xy) for xy in pts[model.in_support]}
+        sub = gdf[[(g.x, g.y) in kept for g in gdf.geometry]]
+        model2, cov2 = _model_with_latent_domain(sub, mesh, LEFT)
+        res2 = model2.setup([cov2]).fit(options=_options(max_iter=1))
+        params = res._inference_params()
+        x0, Sigma0 = params.x0.value, params.Sigma0.value
+        llf_masked = observed_loglik(res.fitted_state, res.y_obs, res.Xbeta, x0, Sigma0)(params)
+        llf_dropped = observed_loglik(res2.fitted_state, res2.y_obs, res2.Xbeta, x0, Sigma0)(params)
+        assert float(llf_masked) == pytest.approx(float(llf_dropped), rel=1e-10)
+        assert float(llf_masked) == pytest.approx(res.llf, rel=1e-8)
+
+    def test_no_site_in_support_raises(self, gdf, mesh):
+        far = Polygon([(20, 20), (30, 20), (30, 30), (20, 30)])
+        model, cov = _model_with_latent_domain(gdf, mesh, far)
+        with pytest.raises(ValueError, match="No site of 'y' is in the support"):
+            model.setup([cov])
+
+    def test_prediction_outside_the_support_is_flagged(self, gdf, mesh):
+        model = _build_model(gdf, mesh, dtype=jnp.float64)
+        res = model.fit(options=_options())
+        new = make_panel_gdf(n_sites=3, n_times=N_TIMES, missing_frac=0.0, seed=1,
+                             xy=np.array([[5.0, 5.0], [50.0, 50.0], [-20.0, 4.0]]))
+        with pytest.warns(UserWarning, match="prediction sites are outside the support"):
+            pred = res.get_prediction(new, verbose=False)
+        np.testing.assert_array_equal(pred.in_support, [True, False, False])
+        assert np.all(pred.var_pred[~pred.in_support] == 0)
+        assert list(pred.to_geo()["in_support_y"][:3]) == [True, False, False]
+        whole = Polygon([(-30, -30), (60, -30), (60, 60), (-30, 60)])
+        poly = pred.to_poly([whole])
+        assert int(poly["n_points_y"].iloc[0]) == 1
+        np.testing.assert_allclose(poly["y"].to_numpy(), pred.y_pred[0], rtol=1e-12)
