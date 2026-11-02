@@ -51,13 +51,12 @@ def _highest_matmul_precision(f):
     On GPU, JAX's default (unset) matmul precision can route float32 `@`/dot
     ops through reduced-precision tensor-core kernels (e.g. TensorFloat32,
     ~10-bit mantissa vs float32's 23-bit). That's usually an acceptable
-    tradeoff, but the Kalman covariance update here (P_upd = P_pred - K @ H @
-    P_pred) subtracts two similar-magnitude matrices, and reduced-precision
-    matmul error gets amplified by that cancellation into an outright
-    indefinite P_pred at the next step (eigenvalues off by ~1e-1, not
-    ~1e-7) -- far too large for any reasonable Cholesky jitter to absorb.
-    Forcing "highest" precision here matches CPU's (always full-precision)
-    behavior and is what actually fixes it, not a bigger jitter.
+    tradeoff, but the Kalman recursions here are sensitive to it: with the
+    former covariance-form update (P_upd = P_pred - K @ H @ P_pred, two
+    similar-magnitude matrices subtracted) reduced-precision matmul error was
+    amplified into an outright indefinite P_pred at the next step
+    (eigenvalues off by ~1e-1, not ~1e-7). Forcing "highest" precision here
+    matches CPU's (always full-precision) behavior.
 
     Applied as the innermost decorator (below @jit) so the precision is baked
     into the compiled kernel at trace time, regardless of whatever ambient
@@ -221,6 +220,18 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         \\Sigma_{e,t}^{-1} &= R^{-1} - R^{-1} H\\, M^{-1} H^T R^{-1} \\\\
         |\\Sigma_{e,t}| &= |M|\\, |P_{t|t-1}|\\, |R|
 
+    The update uses the information form of the same quantities,
+
+    .. math::
+        P_{t|t} = M^{-1}, \\qquad K_t = M^{-1} H^T R^{-1},
+
+    equal to the expressions above (Woodbury and push-through identities)
+    but without the subtraction :math:`P_{t|t-1} - K_t H P_{t|t-1}`, which
+    cancels catastrophically when ``R`` is small relative to the state
+    variance (indefinite or NaN covariances, finding F34). ``M^{-1}`` comes
+    from the Cholesky factor of ``M``, so :math:`P_{t|t}` is symmetric
+    positive definite by construction.
+
     This is what lets ``p`` (the number of observed locations, the
     dimension a low-rank spatial model is meant to scale in) stay out of
     any matrix inversion, while ``q`` (the latent rank) stays small.
@@ -342,20 +353,13 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
 
-        # KALMAN GAIN
-        # K = P_pred @ H.T @ invSigmaE, where (Woodbury identity)
-        #   invSigmaE = invR - invR @ H @ invM @ H.T @ invR
-        # Expanded and regrouped in terms of HtinvR/HtinvRH so the dense
-        # (p, p) invSigmaE is never formed:
-        #   K = P_pred @ (HtinvR - HtinvRH @ invM @ HtinvR)
-        K = P_pred @ (HtinvR - HtinvRH @ (invM @ HtinvR))
-
-        # UPDATE STATE
+        # KALMAN GAIN and UPDATE, information form (F34):
+        # K = P_pred H' S^-1 = M^-1 H' R^-1 and P_upd = P_pred - K H P_pred
+        # = M^-1 (push-through / Woodbury identities), without the
+        # cancelling subtraction; symmetrised against rounding
+        K = invM @ HtinvR
         x_upd = x_pred + K @ e
-        P_upd = P_pred - K @ Hna_dense @ P_pred
-        # Joseph form for P_upd keep the update symmetric and PD
-        # IKH = (Iq - K @ Hna_dense)
-        # P_upd =  IKH @ P_pred @ IKH.T + K @ R @ K.T
+        P_upd = 0.5 * (invM + invM.T)
 
 
         # LOG-LIKELIHOOD

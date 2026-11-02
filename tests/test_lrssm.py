@@ -7,7 +7,6 @@ import dataclasses
 import gc
 import inspect
 import types
-import warnings
 import weakref
 
 import jax
@@ -23,7 +22,6 @@ from geossm.stmodel import (FitOptions, LRPredictionResults, LRStateSpaceModel, 
                             ModelParams, Param)
 from geossm.stmodel.lrssm import _ks_value_and_grad, _spde_marginal_precision
 from geossm.stmodel.stmodel_results import FittedState, _pack_params, _unpack_params
-from tests._known_bugs import known_bug
 from tests._printing import assert_printing_is_side_effect_free
 from tests._reference import SSMProblem, kalman_filter
 from tests._synthetic import DOMAIN, make_panel_gdf, make_square_mesh
@@ -558,17 +556,18 @@ class TestStandardErrors:
         _, _, wald = res._stats_from_arrays([1.02, -1.0], [0.05, 0.05])
         np.testing.assert_array_equal(ci, wald)
 
-    def test_indefinite_hessian_gives_nan_standard_errors(self, gdf, mesh):
+    def test_indefinite_hessian_is_inverted_as_is(self, gdf, mesh):
         # After 3 EM iterations this estimate is not at a maximum: the Hessian
-        # has a positive eigenvalue, so -H^-1 is not a covariance matrix.
+        # has a positive eigenvalue, so -H^-1 is not a covariance matrix. No
+        # check is made (user decision, Section I): cov_params is -H^-1 and
+        # the standard errors of its negative diagonal entries are NaN.
         _, res = self._fit(gdf, mesh, max_iter=3)
-        with pytest.warns(RuntimeWarning, match="not negative definite"):
-            res.compute_cov_params()
-        # Warned once, by compute_cov_params; not again on every access.
-        with warnings.catch_warnings():
-            warnings.simplefilter("error")
-            assert np.all(np.isnan(np.asarray(res.bse_vector)))
-            assert np.all(np.isnan(res.conf_int()))
+        H = np.asarray(res.get_hessian()[0])
+        assert np.linalg.eigvalsh(0.5 * (H + H.T)).max() > 0
+        cov = np.asarray(res.compute_cov_params())
+        np.testing.assert_allclose(cov, -np.linalg.inv(0.5 * (H + H.T)), rtol=1e-6, atol=1e-12)
+        bse = np.asarray(res.bse_vector)
+        assert np.array_equal(np.isnan(bse), np.diag(cov) < 0)
 
 
 @pytest.mark.usefixtures("x64")

@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from tests._reference import SSMProblem, kalman_filter, rts_smoother, sufficient_statistics
+from tests._reference import SSMProblem, dense_gaussian, kalman_filter, make_problem, rts_smoother, sufficient_statistics
 from geossm.ssm.statespace import (
     _compute_expected_values_kernelJAX,
     _filter_kernelJAX,
@@ -169,3 +169,55 @@ def test_float32_kernel_close_to_float64_reference(problem_missing):
     np.testing.assert_allclose(np.asarray(f["x_filt"])[:, 1:], ref["x_filt"][:, 1:], atol=1e-3)
     np.testing.assert_allclose(np.asarray(f["P_filt"])[..., 1:], ref["P_filt"][..., 1:], atol=1e-3)
     assert float(f["llf"]) == pytest.approx(ref["llf"], rel=1e-4)
+
+
+
+# --- Section I -----------------------------------------------------------------
+
+@pytest.mark.usefixtures("x64")
+@pytest.mark.parametrize("seed, missing", [(0, 0.0), (1, 0.2)])
+def test_filter_and_smoother_match_dense_gaussian_conditioning(seed, missing):
+    # Independent of any Kalman recursion: the likelihood and E[x_t | y] from
+    # the explicit joint Gaussian of all states and observations.
+    prob = make_problem(seed=seed, p=6, q=3, T=8)
+    prob = prob.with_missing(np.random.default_rng(seed).random(prob.y.shape) < missing)
+    ref = dense_gaussian(prob)
+    f = _filter(prob)
+    s = _smooth(prob, f)
+    np.testing.assert_allclose(float(f["llf"]), ref["llf"], rtol=1e-10)
+    np.testing.assert_allclose(np.asarray(s["x_smooth"]), ref["x_smooth"], atol=1e-10)
+
+
+def _small_noise_problem(nugget, p=60, q=30, T=60, seed=1):
+    """LRSSM-like problem (smooth Q on a 1D grid, hat basis, F = 0.9) with
+    observation noise `nugget`, tiny relative to the state variance."""
+    rng = np.random.default_rng(seed)
+    g = np.arange(q, dtype=float)
+    Q = 0.3 * np.exp(-np.abs(g[:, None] - g[None, :]) / 10.0)
+    H = np.maximum(0, 1 - np.abs(rng.uniform(0, q - 1, size=p)[:, None] - g[None, :]))
+    F = np.full(q, 0.9)
+    Sigma0 = Q / (1 - 0.81)
+    Xbeta = np.ones((p, 1, T))
+    beta = np.array([2.0])
+    x = np.linalg.cholesky(Sigma0) @ rng.normal(size=q)
+    y = np.empty((p, T))
+    for t in range(T):
+        x = F * x + np.linalg.cholesky(Q) @ rng.normal(size=q)
+        y[:, t] = H @ x + 2.0 + np.sqrt(nugget) * rng.normal(size=p)
+    y[rng.random((p, T)) < 0.05] = np.nan
+    return SSMProblem(H, np.full(p, nugget), F, Q, np.zeros(q), Sigma0, Xbeta, beta, y)
+
+
+@pytest.mark.parametrize("nugget", [1e-3, 1e-5])
+def test_float32_filter_with_small_observation_noise(nugget):
+    # F34: the covariance-form update P - K H P cancelled catastrophically in
+    # float32 (indefinite P from nugget 1e-3, NaN at 1e-5); the information
+    # form P = M^-1 stays positive definite and accurate.
+    prob = _small_noise_problem(nugget)
+    ref = kalman_filter(prob)
+    f = _filter(prob, dtype=jnp.float32)
+    P = np.asarray(f["P_filt"], dtype=float)
+    assert np.all(np.isfinite(P)) and np.isfinite(float(f["llf"]))
+    assert min(np.linalg.eigvalsh(P[:, :, t]).min() for t in range(P.shape[2])) > 0
+    scale = np.max(np.abs(ref["x_filt"]))
+    np.testing.assert_allclose(np.asarray(f["x_filt"], dtype=float), ref["x_filt"], atol=1e-3 * scale)

@@ -145,3 +145,41 @@ def sufficient_statistics(prob, smooth):
     S10 = sum(np.outer(xs[:, t], xs[:, t - 1]) + Pl[:, :, t] for t in range(1, T + 1))
     y_hat = np.einsum("pbt,b->pt", prob.Xbeta, prob.beta) + prob.H @ xs[:, 1:]
     return dict(S11=S11, S10=S10, S00=S00, y_hat=y_hat)
+
+
+def dense_gaussian(prob):
+    """Observed-data log-likelihood and smoothed means ``E[x_t | y]`` (t = 0..T)
+    by dense Gaussian conditioning on the observed entries of ``vec(y)``:
+    the joint covariance of all states and observations is built explicitly,
+    so this shares no recursion with any Kalman filter or smoother (small
+    problems only: the matrices are ``(pT, pT)``).
+
+    Returns ``dict(llf, x_smooth)``, ``x_smooth`` of shape (q, T+1).
+    """
+    from scipy.stats import multivariate_normal
+
+    p, q, T = prob.p, prob.q, prob.T
+    Fm = np.diag(prob.F)
+    mean = [prob.x0]
+    var = [prob.Sigma0]
+    for _ in range(T):
+        mean.append(Fm @ mean[-1])
+        var.append(Fm @ var[-1] @ Fm.T + prob.Q)
+    mean = np.concatenate(mean)
+    C = np.zeros(((T + 1) * q, (T + 1) * q))
+    for t in range(T + 1):
+        for u in range(t, T + 1):
+            B = np.linalg.matrix_power(Fm, u - t) @ var[t]  # Cov(x_u, x_t)
+            C[u * q:(u + 1) * q, t * q:(t + 1) * q] = B
+            C[t * q:(t + 1) * q, u * q:(u + 1) * q] = B.T
+    G = np.zeros((p * T, (T + 1) * q))  # vec(y) = G z + X beta + e, time-major
+    for t in range(T):
+        G[t * p:(t + 1) * p, (t + 1) * q:(t + 2) * q] = prob.H
+    mu = G @ mean + np.einsum("pbt,b->tp", prob.Xbeta, prob.beta).ravel()
+    S = G @ C @ G.T + np.diag(np.tile(prob.R, T))
+    y = prob.y.T.ravel()
+    o = ~np.isnan(y)
+    S_oo = S[np.ix_(o, o)]
+    llf = multivariate_normal(mu[o], S_oo).logpdf(y[o])
+    z = mean + C @ G[o].T @ np.linalg.solve(S_oo, y[o] - mu[o])
+    return dict(llf=float(llf), x_smooth=z.reshape(T + 1, q).T)
