@@ -41,6 +41,12 @@ def _build_model(gdf, mesh, dtype=jnp.float32):
     return model.setup([cov])
 
 
+def _model_with_formula(gdf, mesh, formula, dtype=jnp.float32):
+    model = LRStateSpaceModel(gdf, [formula], domain=[DOMAIN], verbose=False, backend="cpu", dtype=dtype)
+    cov = SPDEApproxCov(latlon=False, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+    return model.setup([cov])
+
+
 def _options(**kw):
     kw = {"max_iter": MAX_ITER, "tol_relat": 1e-12, "verbose": False, **kw}
     return FitOptions(**kw)
@@ -84,6 +90,24 @@ class TestModelConstruction:
         params = ModelParams(beta=[1.0, 0.5], A=[[1.0]], s2e=[0.1], ks=[1.0], f=[0.8])
         y = model.sim(["y ~ 1 + x"], params=params, verbose=False)[0]
         assert np.all(np.isfinite(np.asarray(y)))
+        # without formulas: one response with an intercept ("~ 1")
+        params = ModelParams(beta=[1.0], A=[[1.0]], s2e=[0.1], ks=[1.0], f=[0.8])
+        y, _, info = model.sim(params=params, verbose=False)[:3]
+        assert info["formulas"] == ["~ 1"] and np.all(np.isfinite(np.asarray(y)))
+
+    def test_response_name_means_intercept_formula(self, gdf):
+        named = LRStateSpaceModel(gdf, ["y"], domain=[DOMAIN], verbose=False, backend="cpu")
+        full = LRStateSpaceModel(gdf, ["y ~ 1"], domain=[DOMAIN], verbose=False, backend="cpu")
+        assert named.formulas == ["y ~ 1"] and named.xbeta_names == [["Intercept"]]
+        np.testing.assert_array_equal(np.asarray(named.Xbeta), np.asarray(full.Xbeta))
+
+    def test_formula_without_intercept_keeps_only_the_latent_field(self, gdf, mesh):
+        model = _model_with_formula(gdf, mesh, "y ~ -1")
+        assert model.Xbeta.shape[1] == 0
+        res = model.fit(options=_options(max_iter=2))
+        assert np.isfinite(res.llf) and res.params.beta.value.size == 0
+        y_pred, _ = res.predict(gdf, verbose=False)
+        assert np.all(np.isfinite(y_pred))
 
     def test_float64_without_x64_raises(self, gdf):
         # F03: the constructor must not switch on the process-wide x64 flag.

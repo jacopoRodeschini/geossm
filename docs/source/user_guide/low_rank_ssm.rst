@@ -53,6 +53,20 @@ fix specific parameters instead of estimating them (see
 and
 `example_LRSSM_estimate_3.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_LRSSM_estimate_3.py>`_).
 
+Formulas
+------------
+
+As in Patsy, every formula includes an intercept unless it is removed:
+
+- ``"AQ_pm10"`` (a response name alone) means ``"AQ_pm10 ~ 1"``: an
+  intercept plus the latent spatial field;
+- ``"AQ_pm10 ~ 1 + WE_temp_2m"`` adds covariates;
+- ``"AQ_pm10 ~ -1"`` removes the intercept: no fixed effects, only the
+  latent field.
+
+With ``formulas=None`` the model has no observations and only supports
+``sim()``, which then uses ``"~ 1"`` unless formulas are passed to it.
+
 Multiple response variables / domains
 -----------------------------------------
 

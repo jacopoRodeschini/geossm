@@ -46,6 +46,15 @@ from geossm.stmodel._em import (_compute_initial_values_jax_kernel, _compute_bet
 # %% Low Rank State-Space Model adapter to statsmodels MLEModel API
 
 
+def _default_formulas(formulas):
+    """`formulas` with each entry without ``~`` read as a response name:
+    ``"AQ_pm10"`` becomes ``"AQ_pm10 ~ 1"`` (intercept plus the latent
+    field); `None` passes through."""
+    if formulas is None:
+        return None
+    return [f if "~" in f else f"{f.strip()} ~ 1" for f in formulas]
+
+
 def _continuous_dividers(text, labels):
     """Redraw section-divider rows (e.g. "Grid ...", "Latent. ...") as a
     single unbroken dashed line spanning the full row width.
@@ -157,9 +166,11 @@ class LRStateSpaceModel(StateSpaceModel):
             `"np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m)"`). Each formula
             is turned into a design matrix by its own
             `geossm.data_preparation.DesignMatricesBuilder`
-            (`self.builders`). May be `None` to build an "empty" model
-            (e.g. only for simulation, where `formulas` is instead passed
-            directly to `sim`).
+            (`self.builders`). As in Patsy, the intercept is included unless
+            removed (`"AQ_pm10 ~ -1"`: no fixed effects, the latent field
+            only). An entry without ``~`` is a response name and means
+            `"<name> ~ 1"` (intercept plus the latent field). May be `None`
+            to build an "empty" model, for simulation only (see `sim`).
         domain : list of shapely Polygon/MultiPolygon
             One spatial domain per formula/response variable, used to keep
             only the observed sites that fall inside it (see
@@ -199,6 +210,7 @@ class LRStateSpaceModel(StateSpaceModel):
         _check_x64_for_dtype(self.dtype)
 
         self.df = df.copy()
+        formulas = _default_formulas(formulas)
         self.formulas = formulas
         self.verbose = verbose
 
@@ -509,8 +521,10 @@ class LRStateSpaceModel(StateSpaceModel):
             `Xbeta`, e.g. `"1 + temperature"`), one per response variable,
             used to build a fresh observation grid/design matrix for the
             simulation. If `None`, reuses the design matrix/grid the model
-            was built with at `__init__` (`self.Xbeta`, `self.points`, ...).
-            `self.formulas` must not be `None` in that case.
+            was built with at `__init__` (`self.Xbeta`, `self.points`, ...),
+            or, for a model built without formulas, uses `["~ 1"]` (one
+            response with an intercept). An entry without ``~`` means
+            `"<name> ~ 1"`, as in `__init__`.
         seed : int, default 1234
             Random seed for the simulation, forwarded to
             `StateSpaceModel.sim`.
@@ -548,7 +562,7 @@ class LRStateSpaceModel(StateSpaceModel):
         Raises
         ------
         ValueError
-            If `formulas` and `self.formulas` are both `None`; if the
+            If the
             covariance functions have not been set via `setup`; or if the
             shapes of `beta`, `A`, or `ks` in `params` are inconsistent with
             the model (`Xbeta`'s width, `(nvar, nlat)`, and the number of
@@ -556,8 +570,9 @@ class LRStateSpaceModel(StateSpaceModel):
         """
 
         self._require_setup("sim")
+        formulas = _default_formulas(formulas)
         if formulas is None and self.formulas is None:
-            raise ValueError("Formulas must be provided for simulation")
+            formulas = ["~ 1"]  # model without formulas: one response, intercept only
         
         if formulas is None:
             formulas = self.formulas
