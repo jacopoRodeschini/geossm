@@ -78,6 +78,14 @@ domain, refined around the observation locations:
    cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
    model = model.setup(cov_fun=[cov_fun])
 
+.. note::
+
+   The mesh and the SPDE are planar in the units of the data CRS. With
+   the longitude/latitude data of this example they are in degrees (the
+   model warns about it); project the data first (e.g.
+   ``agri.to_crs(...)``, with the domain in the same CRS) for metric
+   distances.
+
 5. Fit the model
 -------------------
 

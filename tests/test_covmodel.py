@@ -73,6 +73,11 @@ class TestFEMSolver:
     def test_covers_domain(self, fem):
         assert fem.covers_domain()
 
+    def test_mesh_not_covering_the_domain_warns(self, mesh):
+        wider = Polygon([(-5, -5), (20, -5), (20, 20), (-5, 20)])
+        with pytest.warns(UserWarning, match="does not fully cover"):
+            FEMSolver(mesh, domain=[wider], verbose=False, stats=False)
+
 
 class TestSpdePrecision:
     def test_precision_symmetric_positive_definite(self, cov):

@@ -374,10 +374,13 @@ class DesignMatrices:
         Transformation/expression applied to each covariate term (e.g.
         ``"1"`` for a plain variable, or the full expression for
         ``I(...)``/function terms), as extracted from `formula`.
-    points : list of shapely.geometry.Point or numpy.ndarray
+    points : list of shapely geometries or numpy.ndarray
         The N unique site locations, in the CRS given by `crs`. Passed in
-        as `Point` geometries; converted in `__post_init__` to an
-        ``[N, 2]`` coordinate array of dtype `dtype`.
+        as geometries; converted in `__post_init__` to the ``[N, 2]``
+        float64 array of their centroids (the point itself for a `Point`;
+        planar centroid in CRS units otherwise; any z is ignored). Kept in
+        float64 whatever `dtype`: projected coordinates (e.g. northings
+        around 5e6 m) lose about 0.5 m in float32.
     formula : str
         The Patsy/R-style model formula (e.g.
         ``"AQ_pm10 ~ 1 + WE_temp_2m"``) that `X` (and `y`, if present)
@@ -473,8 +476,9 @@ class DesignMatrices:
     def __post_init__(self):
         """Validate and normalize the fields set by the dataclass constructor.
 
-        Coerces `dtype`, casts `X`/`y`/`points` to it, validates array
-        shapes, and derives `N`, `b`, `T` and `terms`.
+        Coerces `dtype`, casts `X`/`y` to it, converts `points` to float64
+        centroid coordinates, validates array shapes, and derives `N`, `b`,
+        `T` and `terms`.
         """
 
         # Validate dtype
@@ -490,7 +494,7 @@ class DesignMatrices:
         self.type = np.unique(self.geometry).astype(str)
         # shapely.get_coordinates is a vectorized (C-level) ufunc -- ~35x
         # faster than a per-point Python loop at N in the millions.
-        self.points = shapely.get_coordinates(np.asarray(self.points)).astype(self.dtype)
+        self.points = shapely.get_coordinates(shapely.centroid(np.asarray(self.points))).astype(np.float64)
 
         # Validate shapes
         if self.y is not None and self.y.ndim != 2:
@@ -527,7 +531,8 @@ class DesignMatrices:
 
     def astype(self, dtype) -> "DesignMatrices":
         """
-        Cast `X`, `y` and `points` to a new numeric dtype, in place.
+        Cast `X` and `y` to a new numeric dtype, in place (`points` stay
+        float64).
 
         Lets an already-built DesignMatrices be realigned with a model's
         dtype (e.g. LRStateSpaceModel.dtype) without re-running formula
@@ -545,7 +550,7 @@ class DesignMatrices:
         Returns
         -------
         DesignMatrices
-            `self`, with `X`, `y`, `points` and `dtype` updated. Returned
+            `self`, with `X`, `y` and `dtype` updated. Returned
             unchanged (no copy/cast) if `dtype` already matches
             `self.dtype`.
         """
@@ -558,7 +563,6 @@ class DesignMatrices:
         self.dtype = dtype
         self.X = jnp.asarray(self.X, dtype=dtype)
         self.y = jnp.asarray(self.y, dtype=dtype) if self.y is not None else None
-        self.points = np.asarray(self.points, dtype=dtype)
 
         return self
 
@@ -722,6 +726,11 @@ class DesignMatricesBuilder:
             Spatio-temporal dataset in long format: one row per
             (site, timestamp) observation, with a ``geometry`` column
             (a single geometry type, e.g. all `Point`) and a CRS set. A
+            site that is not a `Point` is represented by its centroid
+            (planar, in CRS units; a warning says so). The model is planar
+            in CRS units: a geographic CRS (lon/lat degrees) is accepted
+            with a warning, project the data first (``geodf.to_crs(...)``)
+            for metric distances. A
             time column named ``"Time"`` is used if present, otherwise
             the first datetime64 column found. All rows for a given
             site must share exactly one geometry per site, and after any
@@ -739,8 +748,8 @@ class DesignMatricesBuilder:
             Every column referenced by `formula` must exist in `geodf`.
         dtype : numpy.dtype, default numpy.float32
             Numeric precision used when casting `geodf`'s numeric columns
-            and when building the resulting `DesignMatrices` (`X`, `y`,
-            `points`).
+            and when building the resulting `DesignMatrices` (`X`, `y`;
+            `points` are float64).
         verbose : bool, default True
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.
@@ -754,7 +763,8 @@ class DesignMatricesBuilder:
             design matrices are built.
         domain : shapely Polygon/MultiPolygon, optional
             The scientific interest domain, in the same CRS as `geodf`. When
-            given, every site (unique geometry) outside `domain` is dropped
+            given, every site (unique geometry) whose centroid is outside
+            `domain` is dropped
             -- together with all of its timestamps -- before the design
             matrices are built, so training never sees observations outside
             the domain. Contrast with `build_predict`'s own `domain`
@@ -789,6 +799,13 @@ class DesignMatricesBuilder:
             self.geodf, self.geometry_id, self.time_col_name,
             self.crs, self.box, self.geometry, self.delta, self.unit,
         ) = self._prepare_geodf(geodf, tmin, tmax, domain=domain)
+        if self.crs.is_geographic:
+            warnings.warn(
+                f"The data CRS ({self.crs.name}) is geographic: the mesh, the SPDE operator and the "
+                "range parameter are then in degrees (a planar approximation, anisotropic away "
+                "from the equator). Project the data (e.g. geodf.to_crs(...)) for metric distances.",
+                UserWarning, stacklevel=2,
+            )
         self._log(f"Spatial check passed using geometry id column '{self.geometry_id}'")
         self._log(f"Time column detected: '{self.time_col_name}'")
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
@@ -814,6 +831,12 @@ class DesignMatricesBuilder:
 
         geometry_id = self._check_spatial_dataset(geodf)
         geometry = pd.unique(geodf.geom_type)
+        if geometry[0] != "Point":
+            warnings.warn(
+                f"Site geometries are {geometry[0]}: each site is represented by its centroid "
+                "(planar, in CRS units).",
+                UserWarning, stacklevel=4,
+            )
 
         time_col_name = self._check_time_dataset(geodf)
         self._coerce_time_column(geodf, time_col_name)
@@ -845,7 +868,7 @@ class DesignMatricesBuilder:
         sites = geodf.drop_duplicates(subset=[geometry_id])
 
         shapely.prepare(domain)
-        inside = shapely.covers(domain, np.asarray(sites.geometry))
+        inside = shapely.covers(domain, shapely.centroid(np.asarray(sites.geometry)))
         outside_ids = sites.loc[~inside, geometry_id]
 
         n_out = len(outside_ids)
@@ -933,15 +956,17 @@ class DesignMatricesBuilder:
         Parameters
         ----------
         df : geopandas.GeoDataFrame
-            New (prediction) spatio-temporal dataset, in the same format,
-            CRS and time step as the GeoDataFrame `build` was trained on.
+            New (prediction) spatio-temporal dataset, in the same format
+            and time step as the GeoDataFrame `build` was trained on. A
+            different CRS is reprojected to the training CRS, with a
+            warning; the result is in the training CRS.
             It only needs to supply the covariate columns referenced by
             `formula` (plus the response column if `include_response=True`).
         verbose : bool, optional
             Temporarily override `self.verbose` for this call only. If
             `None` (default), `self.verbose` (set in `__init__`) is used.
         domain : shapely Polygon/MultiPolygon, optional
-            The scientific interest domain, in the same CRS as `df`. When
+            The scientific interest domain, in the training CRS. When
             given, every prediction point is checked against it and the
             result is stored as the boolean array `self.mask` (True where
             the point falls inside `domain`), aligned with `points`/the N
@@ -968,8 +993,8 @@ class DesignMatricesBuilder:
         ------
         ValueError
             If `build()` has not been called yet, if `df` fails the same
-            validation as the training data, or if `df`'s CRS or time
-            step does not match the training data's.
+            validation as the training data, or if `df`'s time step does
+            not match the training data's.
         """
         if not hasattr(self, "design_matrices"):
             raise ValueError("build() must be called before build_predict()")
@@ -982,6 +1007,13 @@ class DesignMatricesBuilder:
             # whatever timestamps the training data actually had.
             train_tmin = self.design_matrices.timestamps.min()
             train_tmax = self.design_matrices.timestamps.max()
+            if isinstance(df, geopd.GeoDataFrame) and df.crs is not None and df.crs != self.crs:
+                warnings.warn(
+                    f"The prediction data CRS ({df.crs.name}) differs from the training CRS "
+                    f"({self.crs.name}): reprojecting the prediction data to the training CRS.",
+                    UserWarning, stacklevel=3,
+                )
+                df = df.to_crs(self.crs)
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
                 self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response)
             )
@@ -1437,20 +1469,6 @@ class DesignMatricesBuilder:
     # ------------------------------------------------------------------
     # Misc helpers (not currently wired into build(), kept for reuse)
     # ------------------------------------------------------------------
-
-    def _getPoints(self, geodf, geometry_id):
-        """Return unique geometry centroids as an `[N, 2]` coordinate array (computed in a metric UTM CRS)."""
-        self._log("Computing centroid coordinates for geometry points")
-
-        if "geometry" not in geodf:
-            raise ValueError("Geometry column not found in the dataset")
-
-        gdf_metric = geodf.to_crs(geodf.estimate_utm_crs())
-        centroids = gdf_metric.geometry.drop_duplicates().centroid.to_crs(geodf.crs)
-        points = np.column_stack([centroids.x, centroids.y])
-
-        self._log(f"Computed {points.shape[0]} point coordinates")
-        return points
 
     def _computeDistance(self, points, pt=None, distance="euclidean"):
         """Return the (cross-)distance matrix between `points` and `pt` (or `points` itself if `pt` is None), via `scipy.spatial.distance.cdist`."""

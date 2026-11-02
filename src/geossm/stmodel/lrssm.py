@@ -275,6 +275,10 @@ class LRStateSpaceModel(StateSpaceModel):
             `_validate_domain`) -- generally a *different*, usually smaller
             list than `self.domain` (the measurement-equation domain, one
             entry per formula); it is not defaulted from `self.domain`.
+            The meshes are in the CRS of the data (planar in CRS units); a
+            `latlon` flag that disagrees with that CRS (geographic vs
+            projected) gives a warning (`latlon` only affects `distance()`
+            and the inherited `Matern` diagnostics).
         """
         if cov_fun is None:
             raise ValueError("cov_fun must be provided")
@@ -283,10 +287,19 @@ class LRStateSpaceModel(StateSpaceModel):
 
         self._log(f"Checking {len(cov_fun)} covariance functions...")
 
+        crs = self.gridList[0].crs if getattr(self, "gridList", None) else None
         for i, covi in enumerate(cov_fun):
             if not isinstance(covi, SPDEApproxCov):
                 raise ValueError(
                     "Covariance function must be an instance of SPDEApproxCov"
+                )
+            if crs is not None and bool(covi.latlon) != crs.is_geographic:
+                warnings.warn(
+                    f"Covariance function {i} has latlon={covi.latlon} but the data CRS "
+                    f"({crs.name}) is {'geographic' if crs.is_geographic else 'projected'}. "
+                    "latlon only affects distance() and the inherited Matern diagnostics; "
+                    "the FEM is planar in CRS units.",
+                    UserWarning, stacklevel=3,
                 )
             self._log(f"Cov.Fun.-{i}: rescale = {covi.rescale}, nu = {covi.nu}, var = {covi.var}")
             self._cov_matern.append(covi)

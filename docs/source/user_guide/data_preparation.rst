@@ -25,6 +25,11 @@ The workflow
    The constructor validates the input (CRS/geometry, time column,
    regular time spacing, formula columns) and optionally restricts the
    data to a time window (``tmin``/``tmax``) or spatial ``domain``.
+   Coordinates are used as they are, in the units of the data CRS (no
+   reprojection); a geographic CRS gives a warning. A site that is not a
+   ``Point`` is represented by its centroid (with a warning). Prediction
+   data in another CRS are reprojected to the training CRS, with a
+   warning.
 #. Call :meth:`~geossm.data_preparation.DesignMatricesBuilder.build` to
    obtain a :class:`~geossm.data_preparation.DesignMatrices` instance.
 

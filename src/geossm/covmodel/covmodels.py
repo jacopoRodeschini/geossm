@@ -4,6 +4,8 @@
 @author: jacopo
 """
 
+import warnings
+
 import mfem.ser as mfem
 import numpy as np
 import scipy.sparse as sp
@@ -245,11 +247,12 @@ class FEMSolver:
         # (see `covers_domain`); this signals outer vertices may be missing
         # near the region of interest, biasing the Neumann boundary approx.
         if not self.covers_domain():
-            self._log(
+            warnings.warn(
                 "Mesh does not fully cover convex_hull(unary_union(domain)) "
                 "(see `covers_domain()`/`domain_hull`). Outer vertices needed "
                 "to push boundary effects away from the domain of interest "
-                "may be missing; consider rebuilding the mesh over `domain_hull`."
+                "may be missing; consider rebuilding the mesh over `domain_hull`.",
+                UserWarning, stacklevel=3,
             )
 
         # compute matrices now
@@ -1110,7 +1113,10 @@ class SPDEApproxCov(Matern):
         Parameters
         ----------
         latlon, geo_scale, rescale : see `gstools.covmodel.Matern`
-            (`rescale` is :math:`\\kappa`).
+            (`rescale` is :math:`\\kappa`). `latlon` only affects
+            `distance()` and the inherited `Matern` methods: the FEM is
+            planar in the units of the mesh (the data CRS), so on a
+            lon/lat mesh `rescale` is in 1/degrees.
         nu : float, default 1
             Matérn smoothness; must be 1 (the SPDE implemented by
             `precision()`).

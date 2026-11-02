@@ -4,6 +4,8 @@ GeoDataFrame export, polygons and areal weights for the change of support,
 and the delta-method back-transformation.
 """
 
+import warnings
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -92,9 +94,9 @@ def as_polygon_gdf(polys, crs):
     (Multi)Polygons, a single (Multi)Polygon, a GeoSeries/GeoDataFrame,
     or a path to a vector file (e.g. a shapefile) -- into a
     GeoDataFrame with a 0..m-1 index, reprojected to `crs` (the
-    prediction grid's CRS). Geometries without a CRS (plain shapely
-    objects, or a file/frame with no CRS set) are assumed to already
-    be in `crs`.
+    prediction grid's CRS) with a warning when their CRS differs.
+    Geometries without a CRS (plain shapely objects, or a file/frame with
+    no CRS set) are assumed to already be in `crs`.
     """
     import geopandas as geopd
     from os import PathLike
@@ -124,6 +126,11 @@ def as_polygon_gdf(polys, crs):
     if gdf.crs is None:
         gdf = gdf.set_crs(crs) if crs is not None else gdf
     elif crs is not None and gdf.crs != crs:
+        warnings.warn(
+            f"The polygons' CRS ({gdf.crs.name}) differs from the data CRS: "
+            "reprojecting the polygons to the data CRS.",
+            UserWarning, stacklevel=3,
+        )
         gdf = gdf.to_crs(crs)
 
     return gdf.reset_index(drop=True)

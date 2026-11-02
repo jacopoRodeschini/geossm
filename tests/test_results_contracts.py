@@ -307,3 +307,35 @@ def test_lr_results_satisfy_the_base_results_contract(problem, lr_fit):
         assert isinstance(str(res.summary()), str)
     lo, hi = lr.conf_int_y(prediction=True)
     assert lo.shape == hi.shape == lr.y_hat.shape and 0.0 <= lr.coverage_probability() <= 1.0
+
+
+def test_prediction_in_another_crs_is_reprojected(gdf, lr_fit):
+    # Section M: prediction data in another CRS are reprojected to the
+    # training CRS (warning), and the results are in the training CRS.
+    _, res = lr_fit
+    ref = res.get_prediction(gdf, verbose=False)
+    with pytest.warns(UserWarning, match="reprojecting the prediction data"):
+        other = res.get_prediction(gdf.to_crs("EPSG:4326"), verbose=False)
+    assert other.crs == ref.crs and other.to_geo().crs == gdf.crs
+    np.testing.assert_allclose(other.y_pred_list[0], ref.y_pred_list[0], rtol=1e-5, atol=1e-5)
+
+
+def test_to_poly_reprojects_polygons_with_a_warning(gdf, lr_fit):
+    from tests._synthetic import DOMAIN
+    _, res = lr_fit
+    pred = res.get_prediction(gdf, verbose=False)
+    ref = pred.to_poly([DOMAIN])
+    with pytest.warns(UserWarning, match="reprojecting the polygons"):
+        out = pred.to_poly(gpd.GeoSeries([DOMAIN], crs=gdf.crs).to_crs("EPSG:4326"))
+    assert out.crs == gdf.crs
+    np.testing.assert_allclose(out["y"].to_numpy(), ref["y"].to_numpy(), rtol=1e-6)
+
+
+def test_latlon_disagreeing_with_the_data_crs_warns(gdf, mesh):
+    from geossm.covmodel import SPDEApproxCov
+    from geossm.stmodel import LRStateSpaceModel
+    from tests._synthetic import DOMAIN
+    model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
+    cov = SPDEApproxCov(latlon=True, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+    with pytest.warns(UserWarning, match="latlon=True"):
+        model.setup([cov])

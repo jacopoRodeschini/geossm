@@ -135,11 +135,35 @@ def test_build_predict_reuses_training_standardization(gdf):
     assert train.X.shape[1] == pred.X.shape[1]
 
 
-def test_build_predict_rejects_other_crs(gdf):
+def test_build_predict_reprojects_other_crs_with_a_warning(gdf):
     builder = DesignMatricesBuilder(gdf, "y ~ 1 + x", verbose=False)
     builder.build()
-    with pytest.raises(ValueError, match="CRS"):
-        builder.build_predict(gdf.to_crs("EPSG:4326"), verbose=False)
+    same = builder.build_predict(gdf, verbose=False)
+    with pytest.warns(UserWarning, match="reprojecting the prediction data"):
+        other = builder.build_predict(gdf.to_crs("EPSG:4326"), verbose=False)
+    assert other.crs == builder.crs
+    np.testing.assert_allclose(other.points, same.points, atol=1e-6)
+    np.testing.assert_array_equal(np.asarray(other.X), np.asarray(same.X))
+
+
+def test_geographic_crs_warns(gdf):
+    with pytest.warns(UserWarning, match="geographic"):
+        DesignMatricesBuilder(gdf.to_crs("EPSG:4326"), "y ~ 1 + x", verbose=False)
+
+
+def test_polygon_sites_use_their_centroids(gdf):
+    polys = gdf.copy()
+    polys["geometry"] = gdf.geometry.buffer(0.1)
+    with pytest.warns(UserWarning, match="centroid"):
+        dm = _build(polys)
+    np.testing.assert_allclose(dm.points, _build(gdf).points, atol=1e-9)
+
+
+def test_site_coordinates_are_float64(gdf):
+    # projected northings around 5e6 m: float32 resolution is 0.5 m
+    xy = np.array([[5.0e5, 5.0e6], [5.0e5, 5.0e6 + 0.2], [5.0e5 + 100, 5.0e6 + 100]])
+    dm = _build(make_panel_gdf(n_sites=3, n_times=4, missing_frac=0.0, seed=2, xy=xy), dtype=np.float32)
+    assert dm.points.dtype == np.float64 and len(np.unique(dm.points, axis=0)) == 3
 
 
 def test_build_predict_requires_build(gdf):

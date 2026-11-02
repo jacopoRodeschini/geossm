@@ -73,8 +73,16 @@ constructing a mesh (see above), then calling ``setup()``:
 - ``rescale`` acts as the SPDE's :math:`\kappa`, controlling the
   spatial correlation range.
 - ``var`` is the marginal variance of the field.
-- ``latlon=True`` treats coordinates as geographic (longitude/latitude)
-  rather than planar, so distances are computed accordingly.
+- ``latlon`` only changes ``distance()`` (great-circle when ``True``)
+  and the Matérn methods inherited from GSTools. The FEM matrices behind
+  ``precision()`` are always assembled on the raw mesh coordinates with
+  a planar metric, so the mesh, :math:`\kappa` and the range are in the
+  units of the data CRS. With longitude/latitude data they are in
+  degrees, and the field is anisotropic in metric terms away from the
+  equator; project the data first (e.g. ``geodf.to_crs(...)``) for
+  metric distances. A geographic CRS gives a warning when the model is
+  built, and a ``latlon`` that disagrees with the data CRS gives one in
+  ``LRStateSpaceModel.setup``.
 
 Methods inherited unchanged from :class:`gstools.covmodel.Matern` (e.g.
 ``variogram``, ``covariance``, ``correlation``) describe the *nominal*,
