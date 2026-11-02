@@ -1207,3 +1207,27 @@ class TestMStepConditionalMaximisers:
         llf = np.asarray(res.llf_path[1:])
         assert np.all(np.diff(llf) >= -1e-9 * np.abs(llf[1:]))
         np.testing.assert_allclose(np.asarray(getattr(res.params, name).value), np.asarray(value))
+
+
+@pytest.mark.usefixtures("x64")
+class TestKsStep:
+    """The ks M-step stops on the relative gradient tolerance `FitOptions.ks_tol` (F54)."""
+
+    @staticmethod
+    def _rel_grad(bound, new):
+        S11, S10, S00 = (jnp.asarray(bound[k]) for k in ("S11", "S10", "S00"))
+        f = jnp.repeat(jnp.asarray(new.f.value), np.diff(np.asarray(bound["block_q"])))
+        Omega = S11 - S10 * f[None, :] - f[:, None] * S10.T + jnp.outer(f, f) * S00
+        T = bound["y_t"].shape[1]
+        val, grad = bound["ks_value_and_grad"](jnp.log(jnp.asarray(new.ks.value)), T, Omega)
+        return float(np.max(np.abs(np.asarray(grad))) / abs(float(val)))
+
+    def test_ks_is_the_conditional_maximiser(self, gdf, mesh):
+        _, bound, new = _m_step_spy(gdf, mesh)
+        assert self._rel_grad(bound, new) <= 1e-6
+
+    def test_ks_tol_is_used(self, gdf, mesh):
+        # A tolerance above the starting gradient stops before any step.
+        res = _build_model(gdf, mesh, dtype=jnp.float64).fit(options=_options(max_iter=1, ks_tol=1e3))
+        ks0 = float(np.ravel(res.nstats[0]["ks"])[0])  # starting value
+        assert float(np.ravel(res.params.ks.value)[0]) == pytest.approx(ks0, rel=1e-12)

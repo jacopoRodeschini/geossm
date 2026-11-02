@@ -148,7 +148,8 @@ def test_fit_options_are_immutable():
 # --- Section N: FitOptions validation ----------------------------------------
 
 @pytest.mark.parametrize("kw", [dict(max_iter=0), dict(max_iter=-1), dict(max_iter=2.5), dict(max_iter=True),
-                                dict(tol_relat=-1.0), dict(tol_relat=float("nan"))])
+                                dict(tol_relat=-1.0), dict(tol_relat=float("nan")),
+                                dict(ks_tol=0.0), dict(ks_tol=-1e-6), dict(ks_tol=float("inf"))])
 def test_fit_options_reject_invalid_values(kw):
     with pytest.raises(ValueError):
         FitOptions(**kw)

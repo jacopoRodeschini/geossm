@@ -46,7 +46,8 @@ This is the same workflow used in :doc:`../quickstart`:
 observation noise variance, and the spatial covariance parameters) with
 an EM-type procedure built on the parent class's Kalman filter/smoother;
 :class:`~geossm.stmodel.FitOptions` controls the stopping rule
-(``max_iter``, ``tol_relat``), and :class:`~geossm.stmodel.ModelParams`
+(``max_iter``, ``tol_relat``) and the tolerance of the inner ``ks``
+optimisation (``ks_tol``), and :class:`~geossm.stmodel.ModelParams`
 / :class:`~geossm.stmodel.Param` let you pass custom initial values or
 fix specific parameters instead of estimating them (see
 `examples/example_LRSSM_estimate_2.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_LRSSM_estimate_2.py>`_

@@ -989,6 +989,7 @@ class LRStateSpaceModel(StateSpaceModel):
         tol_relat = options.tol_relat if options is not None else 1e-3
         force_iter = options.force_iter if options is not None else False
         std = options.std if options is not None else False
+        ks_tol = (options if options is not None else FitOptions()).ks_tol
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1136,6 +1137,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 Phi,
                 ks_value_and_grad,
                 params=est_params,
+                ks_tol=ks_tol,
             )
 
             # Log-likelihood change, absolute and per observation
@@ -1372,6 +1374,7 @@ class LRStateSpaceModel(StateSpaceModel):
         Phi,
         ks_value_and_grad,
         params=None,
+        ks_tol=1e-6,
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1388,7 +1391,8 @@ class LRStateSpaceModel(StateSpaceModel):
         then `A` given the new `beta`. A parameter fixed in `params` (the
         current `ModelParams`) keeps its current value, and the later steps
         use that value (F42; with a fixed `beta`, `A` used the discarded
-        estimate before).
+        estimate before). `ks_tol` is the relative gradient tolerance of the
+        `ks` step (see `FitOptions.ks_tol`).
         """
         def fixed(name):
             return params is not None and getattr(params, name).fixed
@@ -1507,13 +1511,25 @@ class LRStateSpaceModel(StateSpaceModel):
         if fixed("ks"):
             opt = OptimizeResult(x=np.asarray(par0, dtype=np.float64), success=True)
         else:
+            # Relative stopping rule (F54): the objective is normalised by its
+            # magnitude at the start, so `ks_tol` bounds the gradient relative
+            # to the objective whatever the problem size; the function-change
+            # stop is left at a few rounding errors so it cannot end the
+            # search before the gradient criterion (as `tol=1e-3` did).
+            x0_ks = np.asarray(par0, dtype=np.float64)
+            scale = max(abs(_fun_and_grad(x0_ks)[0]), np.finfo(np.float64).tiny)
+
+            def _fun_and_grad_rel(params_np):
+                val, grad = _fun_and_grad(params_np)
+                return val / scale, grad / scale
+
             opt = minimize(
-                _fun_and_grad,
-                np.asarray(par0, dtype=np.float64),
+                _fun_and_grad_rel,
+                x0_ks,
                 method="L-BFGS-B",
                 jac=True,
-                tol=1e-3,
-                options={"maxiter": 50},
+                options={"maxiter": 50, "gtol": ks_tol,
+                         "ftol": 10 * float(np.finfo(np.dtype(self.dtype)).eps)},
             )
 
         tdelta_ks = time.time() - tStart

@@ -98,6 +98,12 @@ class FitOptions:
         ``(p, p, T)`` array does not fit in device memory. ``std``
         switches the whole covariance (the standard deviations are the
         square roots of its diagonal).
+    ks_tol : float, default 1e-6
+        Tolerance of the `ks` M-step (L-BFGS-B over ``log(ks)``): it stops
+        when the gradient of its objective (the `ks`-dependent part of the
+        expected complete-data log-likelihood) is below `ks_tol` times the
+        objective's magnitude at the start of the M-step, so the tolerance
+        does not depend on the size of the problem.
     """
 
     max_iter: int = 20
@@ -105,6 +111,7 @@ class FitOptions:
     verbose: bool = True
     force_iter: bool = False
     std: bool = True
+    ks_tol: float = 1e-6
 
     def __post_init__(self):
         if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
@@ -113,6 +120,9 @@ class FitOptions:
         if not (isinstance(self.tol_relat, (int, float, np.number)) and np.isfinite(self.tol_relat)
                 and self.tol_relat >= 0):
             raise ValueError(f"tol_relat must be a finite number >= 0, got {self.tol_relat!r}.")
+        if not (isinstance(self.ks_tol, (int, float, np.number)) and np.isfinite(self.ks_tol)
+                and self.ks_tol > 0):
+            raise ValueError(f"ks_tol must be a finite number > 0, got {self.ks_tol!r}.")
 
     def __str__(self):
         lines = ["FitOptions:"]
