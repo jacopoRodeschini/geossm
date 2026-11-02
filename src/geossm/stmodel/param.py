@@ -10,6 +10,8 @@ configures the EM stopping rule used by `fit`.
 """
 
 from dataclasses import dataclass, replace
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -81,9 +83,10 @@ class FitOptions:
         decrease of that size (iterates oscillating on the plateau). Unlike
         a change relative to ``|llf|``, it does not depend on additive
         constants in the log-likelihood.
-    verbose : bool, default True
-        If `True`, log per-iteration progress during `fit` (for that call
-        only: the model's own `verbose` is not changed).
+    verbose : bool or None, default None
+        If `True`, print the model summary and the per-iteration progress
+        during `fit`, if `False` nothing; `None` uses the model's `verbose`.
+        For that call only: the model's own `verbose` is not changed.
     force_iter : bool, default False
         How a log-likelihood decrease larger than `tol_relat` is handled.
         If `False`, `fit` stops at the first one and returns the
@@ -108,7 +111,7 @@ class FitOptions:
 
     max_iter: int = 20
     tol_relat: float = 1e-3
-    verbose: bool = True
+    verbose: Optional[bool] = None
     force_iter: bool = False
     std: bool = True
     ks_tol: float = 1e-6

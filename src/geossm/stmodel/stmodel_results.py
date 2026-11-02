@@ -566,9 +566,10 @@ class LRStateSpaceResults(StateSpaceResults):
         `theta_hat`. Cached on `self._hessian` after the first call.
         """
         if self._hessian is None:
-            _print_info("Computing Hessian")
+            _, log = self._verbosity(None)
+            log("Computing Hessian")
             H, tdelta = self._compute_hessian()
-            _print_info(f"Hessian computed in {tdelta:.3f} seconds")
+            log(f"Hessian computed in {tdelta:.3f} seconds")
         else:
             H, tdelta = self._hessian, 0.0
 
@@ -639,8 +640,7 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         if self._cov_params is not None:
             return self._cov_params
-        else:
-            _print_info("Computing standard errors of the parameters")
+        self._verbosity(None)[1]("Computing standard errors of the parameters")
 
         # H, tdelta = self._compute_hessian()
         # _print_info(f"Hessian computed in {tdelta:.3f} seconds")
@@ -896,8 +896,16 @@ class LRStateSpaceResults(StateSpaceResults):
         self._bic = np.log(n) * k - 2 * llf
         return self._bic
 
+    def _verbosity(self, verbose):
+        """`(verbose, log)` for a call: `verbose` resolved against the model's
+        verbosity at the end of the fit (`fitted_state.verbose`) when `None`,
+        and `log(msg)` printing a timestamped line only when verbose."""
+        state = self._fitted_state
+        verbose = bool(getattr(state, "verbose", False) if verbose is None else verbose)
+        return verbose, (_print_info if verbose else (lambda msg: None))
+
     @_on_device
-    def predict(self, df, variance=True, verbose=True):
+    def predict(self, df, variance=True, verbose=None):
         """
         Predicted mean and point-wise variance of the response at new
         locations/times, as arrays (see `get_prediction` for an object with
@@ -919,9 +927,10 @@ class LRStateSpaceResults(StateSpaceResults):
             formula to predict each response variable at its own sites.
         variance : bool, default True
             Also compute the point-wise variance.
-        verbose : bool, default True
-            Verbosity of the design-matrix builders. Progress messages follow
-            the model's verbosity at the end of the fit.
+        verbose : bool, optional
+            Print progress messages (of the prediction and of the
+            design-matrix builders). `None` (default): the model's verbosity
+            at the end of the fit (`fitted_state.verbose`).
 
         Returns
         -------
@@ -931,12 +940,12 @@ class LRStateSpaceResults(StateSpaceResults):
             Point-wise predictive variance (`None` if `variance=False`).
         """
         state = self._fitted_state
-        log = _print_info if state.verbose else None
+        verbose, log = self._verbosity(verbose)
         pred = predict_from_fit(state, df, verbose=verbose, cov="diag" if variance else None, log=log)
         return pred["y_pred"], pred["var_pred"]
 
     @_on_device
-    def get_prediction(self, df, std=True, verbose=True):
+    def get_prediction(self, df, std=True, verbose=None):
         """
         Out-of-sample prediction at new locations/times, as an
         `LRPredictionResults` object: predicted mean, full predictive
@@ -954,15 +963,15 @@ class LRStateSpaceResults(StateSpaceResults):
             covariance). If `False`, only the mean is computed -- useful when
             the covariance does not fit in memory (`predict` gives the
             point-wise variance without it).
-        verbose : bool, default True
-            Verbosity of the design-matrix builders.
+        verbose : bool, optional
+            See `predict`.
 
         Returns
         -------
         LRPredictionResults
         """
         state = self._fitted_state
-        log = _print_info if state.verbose else None
+        verbose, log = self._verbosity(verbose)
         pred = predict_from_fit(state, df, verbose=verbose, cov="full" if std else None, log=log)
         return LRPredictionResults(
             state, pred["y_pred"], Sigma_y_pred=pred["Sigma_y_pred"], var_pred=pred["var_pred"],

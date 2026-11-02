@@ -215,7 +215,7 @@ class TestPresentation:
         from geossm import DesignMatricesBuilder
         from geossm.stmodel import LRStateSpaceModel
         printers = [fem.print_info, cov.print_info, DesignMatricesBuilder.print_info,
-                    lambda m: LRStateSpaceModel.print_info(None, m)]
+                    LRStateSpaceModel.print_info]  # one shared helper (utils._Verbose, Section O)
         for p in printers:
             p("hello")
         lines = capsys.readouterr().out.splitlines()

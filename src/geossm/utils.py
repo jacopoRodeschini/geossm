@@ -106,6 +106,36 @@ def _print_info(msg):
     print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
 
 
+class _Verbose:
+    """Progress messages of the models, covariance functions and formula
+    builders (Section O): `self.verbose` (default `False` everywhere) and a
+    per-call `verbose` override, `None` meaning `self.verbose`. Messages are
+    printed to stdout with a UTC timestamp (`print_info`); problems are
+    reported with `warnings.warn`, whatever the verbosity."""
+
+    def _is_verbose(self, verbose=None) -> bool:
+        """Resolve an optional per-call `verbose` override against `self.verbose`."""
+        return bool(self.verbose if verbose is None else verbose)
+
+    def _log(self, msg: str, verbose=None) -> None:
+        """Print `msg` via `print_info` if verbose (see `_is_verbose`)."""
+        if self._is_verbose(verbose):
+            _print_info(msg)
+
+    @staticmethod
+    def print_info(msg):
+        """
+        Print a UTC-timestamped log line.
+
+        Parameters
+        ----------
+        msg : str
+            Message to print, prefixed with the current UTC timestamp
+            (``YYYY-MM-DD HH:MM:SS``).
+        """
+        _print_info(msg)
+
+
 # %% [Utils] Select the device for JAX computations
 
 def _select_device(backend):

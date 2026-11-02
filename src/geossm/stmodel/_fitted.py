@@ -367,7 +367,7 @@ def observed_loglik(state, y_obs, Xbeta, x0, Sigma0):
 
 # %% Prediction
 
-def predict_from_fit(state, df, verbose=True, cov="full", log=None):
+def predict_from_fit(state, df, verbose=False, cov="full", log=None):
     """
     Out-of-sample prediction from a fitted state (`state.params`,
     `state.x_smoothed`/`P_smoothed`): design matrix at `df` with the fitted

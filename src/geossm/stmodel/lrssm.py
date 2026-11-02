@@ -27,7 +27,7 @@ from scipy.optimize import OptimizeResult, minimize
 
 from geossm.data_preparation import DesignMatricesBuilder
 from geossm.utils import _select_device, _to_backend, _on_device, _on_backend_arg, split_by_block, format_info_table, _summary_table_source
-from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull, _print_info
+from geossm.utils import block_diag_3D, _check_x64_for_dtype, _validate_domain, _domain_hull, _Verbose
 
 
 from shapely.geometry import MultiPoint
@@ -90,7 +90,7 @@ def _continuous_dividers(text, labels):
     return "\n".join(out)
 
 
-class LRStateSpaceModel(StateSpaceModel):
+class LRStateSpaceModel(_Verbose, StateSpaceModel):
     """
     Low-Rank State-Space Model (LRSSM) for large-scale spatio-temporal data.
 
@@ -153,7 +153,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
     @_on_backend_arg
     def __init__(self, df, formulas:list, domain:list,
-        verbose=True, backend="auto", dtype=jnp.float32):
+        verbose=False, backend="auto", dtype=jnp.float32):
         """
         Parameters
         ----------
@@ -180,10 +180,11 @@ class LRStateSpaceModel(StateSpaceModel):
             covariance function set in `setup()`. Must have the same length
             as `formulas`. If `None`, each formula's domain defaults to the
             convex hull of its own observed sites (see `_setDomain`).
-        verbose : bool, default True
-            Default verbosity for this model's logging (`self._log`);
-            individual calls can override it via their own `verbose`
-            argument.
+        verbose : bool, default False
+            Print progress messages (UTC-timestamped lines on stdout) of the
+            model's methods; each method's own `verbose` (`None`: this
+            value) overrides it for that call. Problems are reported with
+            `warnings.warn` whatever the verbosity.
         backend : {"auto", "cpu", "gpu", ...}, default "auto"
             Compute device passed to the parent `StateSpaceModel`; JAX
             arrays created while running the model's public methods are
@@ -570,6 +571,7 @@ class LRStateSpaceModel(StateSpaceModel):
         """
 
         self._require_setup("sim")
+        verbose = self._is_verbose(verbose)
         formulas = _default_formulas(formulas)
         if formulas is None and self.formulas is None:
             formulas = ["~ 1"]  # model without formulas: one response, intercept only
@@ -722,7 +724,7 @@ class LRStateSpaceModel(StateSpaceModel):
 
         return y_sim, x_sim, info, tdelta    
     
-    def predict(self, df, modelresults: LRStateSpaceResults, variance=True, verbose=True):
+    def predict(self, df, modelresults: LRStateSpaceResults, variance=True, verbose=None):
         """
         Predicted mean and point-wise variance of the response variable(s)
         at new locations/times, from an already-fitted model (overrides
@@ -749,8 +751,9 @@ class LRStateSpaceModel(StateSpaceModel):
             Results of a previous `fit()` call.
         variance : bool, default True
             Also compute the point-wise variance.
-        verbose : bool, default True
-            Verbosity of the design-matrix builders.
+        verbose : bool, optional
+            See `LRStateSpaceResults.predict` (`None`: the verbosity at the
+            end of the fit).
 
         Returns
         -------
@@ -930,13 +933,11 @@ class LRStateSpaceModel(StateSpaceModel):
             EM stopping-rule and logging options: `max_iter` caps the
             number of EM iterations, `tol_relat` is the tolerance on the
             log-likelihood change per observation below which EM is
-            considered converged, and `verbose` overrides `self.verbose`
-            for this call only, including the per-iteration log printed via
-            `logger` (the model's `verbose` is restored afterwards). Defaults
-            to `max_iter=100`, `tol_relat=1e-3` if not
-            given (note this differs from `FitOptions`'s own dataclass
-            defaults, which are only used if `options` itself is `None`
-            -- passing an explicit `FitOptions()` uses its `max_iter=20`).
+            considered converged, and `verbose` (if not `None`) overrides
+            `self.verbose` for this call only, including the per-iteration
+            log printed via `logger` (the model's `verbose` is not changed).
+            `None` (default) means `FitOptions()`: `fit()` and
+            `fit(options=FitOptions())` are the same fit (F17).
 
         Returns
         -------
@@ -967,9 +968,10 @@ class LRStateSpaceModel(StateSpaceModel):
         self._require_data("fit")
         # `options.verbose` applies to this call only; the model's own
         # `verbose` is restored afterwards (F17).
+        options = FitOptions() if options is None else options
         verbose_before = self.verbose
-        if options is not None:
-            self.verbose = options.verbose
+        if options.verbose is not None:
+            self.verbose = bool(options.verbose)
         try:
             return self._fit(params0, options)
         finally:
@@ -985,11 +987,11 @@ class LRStateSpaceModel(StateSpaceModel):
         
         self._log("Parsing the fit options (FitOptions|None)...")
 
-        max_iter = options.max_iter if options is not None else 100
-        tol_relat = options.tol_relat if options is not None else 1e-3
-        force_iter = options.force_iter if options is not None else False
-        std = options.std if options is not None else False
-        ks_tol = (options if options is not None else FitOptions()).ks_tol
+        max_iter = options.max_iter
+        tol_relat = options.tol_relat
+        force_iter = options.force_iter
+        std = options.std
+        ks_tol = options.ks_tol
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1870,7 +1872,7 @@ class LRStateSpaceModel(StateSpaceModel):
         """
         return _domain_hull(self._domain)
 
-    def _buildObservationGrid(self, df, formulas, verbose=True, tmin=None, tmax=None, domain=None):
+    def _buildObservationGrid(self, df, formulas, verbose=False, tmin=None, tmax=None, domain=None):
         """
         `domain`, if given, is a list with one entry per formula (already
         validated by the caller, see `_checkDomain`), forwarded to the
@@ -2244,15 +2246,3 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         """
         return self._get_summary_table()
 
-    def _is_verbose(self, verbose=None) -> bool:
-        """Resolve an optional per-call `verbose` override against `self.verbose`."""
-        return self.verbose if verbose is None else verbose
-
-    def _log(self, msg: str, verbose=None) -> None:
-        """Print `msg` via `print_info` if verbose (see `_is_verbose`)."""
-        if self._is_verbose(verbose):
-            self.print_info(msg)
-
-    def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
-        _print_info(msg)

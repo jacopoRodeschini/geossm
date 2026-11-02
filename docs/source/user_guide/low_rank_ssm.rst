@@ -54,6 +54,17 @@ fix specific parameters instead of estimating them (see
 and
 `example_LRSSM_estimate_3.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_LRSSM_estimate_3.py>`_).
 
+Progress messages
+--------------------
+
+geossm is quiet by default. ``verbose=True`` on the model, covariance
+function or formula builder prints timestamped progress lines; a method's
+own ``verbose`` (``None``: the object's setting; for predictions, the
+setting at the end of the fit) overrides it for that call, e.g.
+``model.fit(options=FitOptions(verbose=True))``. Problems (a decreasing or
+NaN log-likelihood, ``max_iter`` reached, sites outside the latent support,
+...) are always reported with :mod:`warnings`.
+
 Formulas
 ------------
 

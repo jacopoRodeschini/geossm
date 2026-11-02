@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
-from geossm.utils import _summary_table_source, _check_x64_for_dtype, _print_info
+from geossm.utils import _summary_table_source, _check_x64_for_dtype, _Verbose
 
 
 import jax.numpy as jnp
@@ -689,7 +689,7 @@ class DesignMatrices:
         )
 
 
-class DesignMatricesBuilder:
+class DesignMatricesBuilder(_Verbose):
     """
     Turn a spatio-temporal :class:`geopandas.GeoDataFrame` plus a
     Patsy/R-style model `formula` into a :class:`DesignMatrices` object
@@ -712,7 +712,7 @@ class DesignMatricesBuilder:
     >>> dm_new = builder.build_predict(new_geodf)
     """
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = True,
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = False,
                  tmin: datetime = None, tmax: datetime = None, domain=None):
         """
         Prepare the spatial-temporal dataset for modeling.
@@ -754,7 +754,7 @@ class DesignMatricesBuilder:
             Numeric precision of the resulting `DesignMatrices` (`X`, `y`;
             `points` are float64). The formula is evaluated on the columns
             as given, before the cast.
-        verbose : bool, default True
+        verbose : bool, default False
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.
         tmin : datetime, optional
@@ -888,11 +888,6 @@ class DesignMatricesBuilder:
             raise ValueError("No sites remain after filtering to the scientific interest domain")
 
         return geodf
-
-    def _log(self, msg: str) -> None:
-        """Print `msg` via `print_info` if `self.verbose` is True."""
-        if self.verbose:
-            self.print_info(msg)
 
     @contextmanager
     def _verbosity(self, verbose):
@@ -1510,15 +1505,3 @@ class DesignMatricesBuilder:
             self._log(f"Computed cross-distance matrix with shape {dist.shape}")
             return dist
 
-    @staticmethod
-    def print_info(msg):
-        """
-        Print a UTC-timestamped log line.
-
-        Parameters
-        ----------
-        msg : str
-            Message to print, prefixed with the current UTC timestamp
-            (``YYYY-MM-DD HH:MM:SS``; see `geossm.utils._print_info`).
-        """
-        _print_info(msg)

@@ -19,7 +19,7 @@ from gstools.covmodel import Matern
 from gstools.tools.geometric import latlon2pos, chordal_to_great_circle
 from statsmodels.iolib.summary import Summary
 
-from geossm.utils import format_info_table, _validate_domain, _domain_hull, _print_info
+from geossm.utils import format_info_table, _validate_domain, _domain_hull, _Verbose
 from geossm.covmodel._plotting import plot_mesh as _plot_mesh
 
 
@@ -124,7 +124,7 @@ def _normalize_rows(H):
 
 
 # % FEM solver class
-class FEMSolver:
+class FEMSolver(_Verbose):
     r"""Low-level finite-element engine behind `SPDEApproxCov`.
 
     Wraps a triangular mesh (e.g. built by `buildMesh2d`) in an MFEM
@@ -150,7 +150,7 @@ class FEMSolver:
     or optimisation performed by this class.
     """
 
-    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=True, stats=False):
+    def __init__(self, meshio_obj: meshio.Mesh, domain=None, verbose=False, stats=False):
         """
         Parameters
         ----------
@@ -164,8 +164,8 @@ class FEMSolver:
             vertices as inner/outer (`isinner`); see `_validate_domain` for
             the full contract. Defaults to the convex hull of the mesh
             vertices, i.e. every vertex is treated as inner.
-        verbose : bool, optional
-            Whether to log progress messages.
+        verbose : bool, default False
+            Print progress messages (timestamped lines on stdout).
         stats : bool, default False
             If True, compute the mesh quality statistics (triangle angles
             and areas) now and log them, with a note when the mesh has small
@@ -962,16 +962,6 @@ class FEMSolver:
             gen_top_left + gen_top_right, indent=2
         )
 
-    def _is_verbose(self, verbose=None) -> bool:
-        return self.verbose if verbose is None else verbose
-
-    def _log(self, msg: str, verbose=None) -> None:
-        if self._is_verbose(verbose):
-            self.print_info(msg)
-
-    def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
-        _print_info(msg)
 
 
 # % Heat kernel
@@ -1068,7 +1058,7 @@ class FEMSolver:
 
 
 # % SPDE Approximation of the Matern covariance model
-class SPDEApproxCov(Matern):
+class SPDEApproxCov(_Verbose, Matern):
     r"""The SPDE approximation of the Matérn covariance model.
 
     See [Rasmussen2003]_ for background on the Matérn family of
@@ -1107,7 +1097,7 @@ class SPDEApproxCov(Matern):
     """
 
     def __init__(
-        self, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose = True
+        self, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose=False
     ):
         """
         Parameters
@@ -1124,8 +1114,9 @@ class SPDEApproxCov(Matern):
             Marginal variance; must be 1 (`precision()` is the unit-variance
             SPDE; the scale of the latent field is carried by the loadings
             `A` of `LRStateSpaceModel`).
-        verbose : bool, optional
-            Whether to log progress messages.
+        verbose : bool, default False
+            Print progress messages (timestamped lines on stdout), also by
+            `setup` unless overridden there.
 
         Raises
         ------
@@ -1568,16 +1559,6 @@ class SPDEApproxCov(Matern):
         return smry
 
 
-    def _is_verbose(self, verbose=None) -> bool:
-        return self.verbose if verbose is None else verbose
-
-    def _log(self, msg: str, verbose=None) -> None:
-        if self._is_verbose(verbose):
-            self.print_info(msg)
-
-    def print_info(self, msg):
-        """Print `msg` prefixed with a UTC timestamp (see `geossm.utils._print_info`)."""
-        _print_info(msg)
 
     def __getstate__(self):
         # Create a dictionary of the object's state excluding non-picklable attributes

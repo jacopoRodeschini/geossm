@@ -1902,7 +1902,7 @@ class StateSpaceModel:
 
 
     @_on_device
-    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=True) -> dict:
+    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=False) -> dict:
         """Compute (and optionally print) a compact summary comparing
         theoretical (model-implied) and empirical (simulation-based)
         variances of the latent effect, observation noise and response.
@@ -1935,8 +1935,9 @@ class StateSpaceModel:
             Block boundaries along the latent dimension ``q``.
         decimals : int, default 4
             Currently unused by this implementation.
-        verbose : bool, default True
-            If True, print a formatted summary table.
+        verbose : bool, default False
+            If True, also print a formatted summary table (the values are
+            returned either way).
 
         Returns
         -------

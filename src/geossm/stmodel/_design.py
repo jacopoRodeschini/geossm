@@ -32,7 +32,7 @@ def as_prediction_dataframes(df, builders):
     return [df] * len(builders)
 
 
-def prediction_grid(df, builders, domain, verbose=True, include_response=False):
+def prediction_grid(df, builders, domain, verbose=False, include_response=False):
     """
     Build the design matrices for new (prediction) locations/times, one per
     formula, reusing each formula's fitted `DesignMatricesBuilder` so
@@ -88,7 +88,7 @@ def missing_covariates(Xbeta):
     return ~np.all(np.isfinite(np.asarray(Xbeta)), axis=1)
 
 
-def prediction_design(df, builders, domain, verbose=True, include_response=False, log=None):
+def prediction_design(df, builders, domain, verbose=False, include_response=False, log=None):
     """
     Design matrix for new (out-of-sample) locations/times, reusing each
     formula's fitted `DesignMatricesBuilder` and the measurement-equation
