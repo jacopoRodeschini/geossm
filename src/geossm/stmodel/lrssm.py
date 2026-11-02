@@ -23,7 +23,7 @@ import time
 import warnings
 from jax.scipy.linalg import block_diag
 import jax
-from scipy.optimize import minimize
+from scipy.optimize import OptimizeResult, minimize
 
 from geossm.data_preparation import DesignMatricesBuilder
 from geossm.utils import _select_device, _to_backend, _on_device, _on_backend_arg, split_by_block, format_info_table, _summary_table_source
@@ -1135,7 +1135,7 @@ class LRStateSpaceModel(StateSpaceModel):
                 invQ,
                 Phi,
                 ks_value_and_grad,
-                f_fixed=est_params.f.fixed,
+                params=est_params,
             )
 
             # Log-likelihood change, absolute and per observation
@@ -1371,7 +1371,7 @@ class LRStateSpaceModel(StateSpaceModel):
         invQ,
         Phi,
         ks_value_and_grad,
-        f_fixed=False,
+        params=None,
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1380,11 +1380,18 @@ class LRStateSpaceModel(StateSpaceModel):
         `ks` (L-BFGS-B against `ks_value_and_grad`), and package them into a
         new `ModelParams` via `_createParams`.
 
-        The state parameters are updated in ECM order (F40): `f` maximises
-        the expected complete-data log-likelihood given the current `ks`
-        (`invQ`, the precision `Q^-1` of the E-step), then `ks` maximises it
-        given the new `f` (the current `F` if `f_fixed`).
+        Each update is a conditional maximisation (ECM) of the expected
+        complete-data log-likelihood given the latest values of the others:
+        `f` given the current `ks` (`invQ`, the precision `Q^-1` of the
+        E-step), then `ks` given the new `f` (F40); `s2e` given the current
+        `beta` and `A` (the E-step residuals), `beta` given the current `A`,
+        then `A` given the new `beta`. A parameter fixed in `params` (the
+        current `ModelParams`) keeps its current value, and the later steps
+        use that value (F42; with a fixed `beta`, `A` used the discarded
+        estimate before).
         """
+        def fixed(name):
+            return params is not None and getattr(params, name).fixed
 
         # convert all input to save memory
         p, T = y_t.shape
@@ -1398,7 +1405,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # Update f (Eq 3a)
         est_f = jnp.zeros((nlat), dtype=self.dtype)
         tStart = time.time()
-        for q in range(nlat):
+        for q in range(0 if fixed("f") else nlat):
             s = slice(block_q[q], block_q[q + 1])
 
             # Added the fix for the f update (Eq 3a)
@@ -1410,14 +1417,19 @@ class LRStateSpaceModel(StateSpaceModel):
             # print(q, num, den)
             est_f = est_f.at[q].set(num / den)
 
+        if fixed("f"):
+            est_f = jnp.asarray(params.f.value, dtype=self.dtype)
         tdelta_f = time.time() - tStart
 
         # beta (the same as Eq.5 Calculli)
         err = y_t - y_hat  # compute the prediction error
 
         tStart = time.time()
-        beta = _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta)
-        jax.block_until_ready(beta)
+        if fixed("beta"):
+            beta = jnp.asarray(params.beta.value, dtype=self.dtype)
+        else:
+            beta = _compute_beta_jax_kernel(b, y_t, x_T, H, Xbeta)
+            jax.block_until_ready(beta)
         tdelta_beta = time.time() - tStart
 
         # s2 (see Eq, 14c)
@@ -1428,8 +1440,11 @@ class LRStateSpaceModel(StateSpaceModel):
         # tdelta_s2e = time.time() - tStart
 
         tStart = time.time()
-        s2e = _compute_s2e_jax_kernel(err, H, P_T, tuple(block_p.tolist()))
-        jax.block_until_ready(s2e)
+        if fixed("s2e"):
+            s2e = jnp.asarray(params.s2e.value, dtype=self.dtype)
+        else:
+            s2e = _compute_s2e_jax_kernel(err, H, P_T, tuple(block_p.tolist()))
+            jax.block_until_ready(s2e)
         tdelta_s2e = time.time() - tStart
 
         # update A
@@ -1438,7 +1453,8 @@ class LRStateSpaceModel(StateSpaceModel):
 
         tStart = time.time()
 
-        est_A = _compute_A2_jax_kernel(
+        # given `beta` as kept (the current value if fixed, F42)
+        est_A = jnp.asarray(params.A.value, dtype=self.dtype) if fixed("A") else _compute_A2_jax_kernel(
             y_t,
             Xbeta,
             beta,
@@ -1466,7 +1482,7 @@ class LRStateSpaceModel(StateSpaceModel):
         # rows, and F @ S00 @ F.T scales S00 by outer(f_diag, f_diag) -- the
         # same pattern already used for `FF` in `_filter_kernelJAX`.
         # ECM: Omega at the new f (F40), or at the current F if f is fixed.
-        f_diag = F if f_fixed else jnp.repeat(est_f, ldim, total_repeat_length=int(block_q[-1]))
+        f_diag = F if fixed("f") else jnp.repeat(est_f, ldim, total_repeat_length=int(block_q[-1]))
         Omega = (
             S11
             - S10 * f_diag[None, :]
@@ -1488,14 +1504,17 @@ class LRStateSpaceModel(StateSpaceModel):
             val, grad = ks_value_and_grad(jnp.asarray(params_np, dtype=self.dtype), T, Omega)
             return float(val), np.asarray(grad, dtype=np.float64)
 
-        opt = minimize(
-            _fun_and_grad,
-            np.asarray(par0, dtype=np.float64),
-            method="L-BFGS-B",
-            jac=True,
-            tol=1e-3,
-            options={"maxiter": 50},
-        )
+        if fixed("ks"):
+            opt = OptimizeResult(x=np.asarray(par0, dtype=np.float64), success=True)
+        else:
+            opt = minimize(
+                _fun_and_grad,
+                np.asarray(par0, dtype=np.float64),
+                method="L-BFGS-B",
+                jac=True,
+                tol=1e-3,
+                options={"maxiter": 50},
+            )
 
         tdelta_ks = time.time() - tStart
 

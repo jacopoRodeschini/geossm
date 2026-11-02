@@ -665,7 +665,8 @@ class TestMStepF40:
         covs = c["bound"]["est_covList"]
         for cov, k in zip(covs, c["ks_cur"]):
             cov.rescale = k
-        ks_old_order = np.asarray(c["orig"](**{**c["bound"], "f_fixed": True})[0].ks.value)
+        params_f_fixed = dataclasses.replace(c["bound"]["params"], f=c["bound"]["params"].f.freeze())
+        ks_old_order = np.asarray(c["orig"](**{**c["bound"], "params": params_f_fixed})[0].ks.value)
         assert not np.allclose(ks_old_order, ks_new, rtol=1e-6)
         assert G(f_new, ks_new) > G(f_new, ks_old_order)
 
@@ -1131,3 +1132,78 @@ def test_initial_values_ignore_missing_observations(gdf, mesh):
     dropped = _compute_initial_values_jax_kernel(y[keep], X[keep], (0, int(keep.sum())), bq)
     for a, b in zip(masked, dropped):
         np.testing.assert_allclose(a, b, rtol=1e-10)
+
+
+# --- M-step: conditional maximisers and fixed parameters (Section I, F42) ----
+
+def _m_step_spy(gdf, mesh, params0=None, max_iter=3):
+    """Arguments and result of the last M-step of a float64 fit."""
+    model = _build_model(gdf, mesh, dtype=jnp.float64)
+    orig, calls = model._M_step, []
+
+    def spy(*args, **kwargs):
+        bound = inspect.signature(orig).bind(*args, **kwargs).arguments
+        out = orig(*args, **kwargs)
+        calls.append((dict(bound), out[0]))
+        return out
+
+    model._M_step = spy
+    model.fit(params0=params0, options=_options(max_iter=max_iter))
+    return model, *calls[-1]
+
+
+def _expected_obs_loglik(model, bound):
+    """Observation part of the expected complete-data log-likelihood as a
+    function of (beta, A, s2e), from the E-step moments in `bound` -- built
+    directly from its definition, not from the M-step kernels."""
+    from geossm.stmodel._fitted import build_H, latent_basis
+    y, X, xT, PT = (jnp.asarray(bound[k]) for k in ("y_t", "Xbeta", "x_T", "P_T"))
+    basis = latent_basis(model.cov_function, model.points, jnp.float64)
+    obs = ~jnp.isnan(y)
+    bp = np.asarray(bound["block_p"])
+    blk = np.repeat(np.arange(len(bp) - 1), np.diff(bp))
+
+    def Q(beta, A, s2e):
+        H = build_H(A, basis)
+        e2 = jnp.where(obs, y - jnp.einsum("pbt,b->pt", X, beta) - H @ xT[:, 1:], 0.0) ** 2
+        tr = jnp.einsum("pq,qrt,pr->pt", H, PT[:, :, 1:], H)
+        s = s2e[blk][:, None]
+        return -0.5 * jnp.sum(jnp.where(obs, jnp.log(s) + (e2 + tr) / s, 0.0))
+    return Q
+
+
+@pytest.mark.usefixtures("x64")
+class TestMStepConditionalMaximisers:
+    def test_free_updates_maximise_the_expected_loglik(self, gdf, mesh):
+        # ECM order: s2e given the current beta, A (E-step residuals); beta
+        # given the current A; A given the new beta.
+        model, bound, new = _m_step_spy(gdf, mesh)
+        Q = _expected_obs_loglik(model, bound)
+        cur = bound["params"]
+        b0, A0 = jnp.asarray(cur.beta.value), jnp.asarray(cur.A.value)
+        b1, A1, s1 = (jnp.asarray(v) for v in (new.beta.value, new.A.value, new.s2e.value))
+        scale = abs(float(Q(b1, A1, s1)))
+        for g in (jax.grad(Q, 2)(b0, A0, s1), jax.grad(Q, 0)(b1, A0, s1), jax.grad(Q, 1)(b1, A1, s1)):
+            assert np.max(np.abs(np.asarray(g))) < 1e-8 * scale
+
+    def test_loadings_use_the_fixed_beta(self, gdf, mesh):
+        # F42: with beta fixed, A must maximise given the fixed beta, not given
+        # the beta estimate that is then discarded.
+        params0 = ModelParams(beta=Param("beta", [1.0, 0.3], fixed=True))
+        model, bound, new = _m_step_spy(gdf, mesh, params0=params0)
+        Q = _expected_obs_loglik(model, bound)
+        beta = jnp.asarray([1.0, 0.3])
+        np.testing.assert_allclose(new.beta.value, beta)
+        g = jax.grad(Q, 1)(beta, jnp.asarray(new.A.value), jnp.asarray(new.s2e.value))
+        assert np.max(np.abs(np.asarray(g))) < 1e-8 * abs(float(Q(beta, jnp.asarray(new.A.value),
+                                                                   jnp.asarray(new.s2e.value))))
+
+    @pytest.mark.parametrize("name, value", [("beta", [1.0, 0.3]), ("A", [[1.0]]), ("s2e", [0.2]),
+                                             ("f", [0.7]), ("ks", [1.0])])
+    def test_em_with_a_fixed_parameter_is_monotone(self, gdf, mesh, name, value):
+        params0 = ModelParams(**{name: Param(name, value, fixed=True)})
+        res = _build_model(gdf, mesh, dtype=jnp.float64).fit(
+            params0=params0, options=_options(max_iter=12, tol_relat=0.0, force_iter=True))
+        llf = np.asarray(res.llf_path[1:])
+        assert np.all(np.diff(llf) >= -1e-9 * np.abs(llf[1:]))
+        np.testing.assert_allclose(np.asarray(getattr(res.params, name).value), np.asarray(value))
