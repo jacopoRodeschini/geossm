@@ -755,6 +755,8 @@ def buildMeshGrid2d(
             "min_degree."
         )
 
+    # keep the mesh closest to the target (lattice counts jump with nx, ny,
+    # so the last bisection step is not necessarily the closest)
     best = mesh
     for _ in range(max_iter):
         mid = 0.5 * (lo + hi)
@@ -763,7 +765,8 @@ def buildMeshGrid2d(
             lo = mid
             continue
         n = len(mesh.points)
-        best = mesh
+        if abs(n - target_n) < abs(len(best.points) - target_n):
+            best = mesh
         if abs(n - target_n) <= max(1, tol * target_n):
             break
         if n > target_n:
@@ -771,4 +774,11 @@ def buildMeshGrid2d(
         else:
             lo = mid
 
+    n_best = len(best.points)
+    if abs(n_best - target_n) > max(1, tol * target_n):
+        warnings.warn(
+            f"buildMeshGrid2d: the closest regular lattice has {n_best} vertices "
+            f"(target {target_n}, tol={tol}); a regular grid cannot match every count.",
+            UserWarning, stacklevel=2,
+        )
     return best, convex_hull
