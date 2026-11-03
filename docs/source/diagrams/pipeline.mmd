@@ -1,0 +1,55 @@
+%% geossm: the LRSSM pipeline (user documentation).
+%% Source of docs/source/_static/pipeline.svg. After editing, re-render with
+%%   npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/source/diagrams/pipeline.mmd \
+%%       -o docs/source/_static/pipeline.svg -t neutral -b white
+%% (add -p puppeteer.json with {"args": ["--no-sandbox"]} where Chrome needs it).
+flowchart TD
+    classDef data fill:#eef4fb,stroke:#3b6ea5,color:#1b2a3a
+    classDef step fill:#ffffff,stroke:#5b6b7b,color:#1b2a3a
+    classDef loop fill:#fff7e6,stroke:#b7791f,color:#3a2a10
+    classDef out fill:#eefaf1,stroke:#2f855a,color:#13321f
+
+    subgraph IN["1 · Data"]
+        GDF["GeoDataFrame<br/>one row per (site, time), CRS, time column"]:::data
+        FORM["formulas, one per response<br/>e.g. np.log(AQ_pm10) ~ 1 + WE_temp_2m"]:::data
+        DOM["measurement domains<br/>one per response"]:::data
+    end
+
+    subgraph DESIGN["2 · Design matrices — LRStateSpaceModel(df, formulas, domain)"]
+        DMB["DesignMatricesBuilder, per formula<br/>sites in the domain, regular time steps,<br/>patsy formula, missing values kept as NaN"]:::step
+        YX["y: (p, T) responses · Xβ: (p, b, T) covariates<br/>sites of each response"]:::data
+    end
+
+    subgraph SPACE["3 · Latent spatial field"]
+        MESH["buildMesh2d / buildMeshGrid2d<br/>triangular mesh in CRS units"]:::step
+        SPDE["SPDEApproxCov(...).setup(mesh, latent domain)<br/>FEM: mass C, stiffness G, inner / outer nodes"]:::step
+        SETUP["model.setup(cov_fun=[...])<br/>basis Φ at the sites, latent support"]:::step
+    end
+
+    subgraph FIT["4 · Estimation — model.fit(params0, FitOptions)"]
+        INIT["initial values<br/>OLS β, s2e, A; f = 0.8; κ from the mesh"]:::step
+        SYS["system matrices<br/>H = A ⊗ Φ, R = diag(s2e), F = diag(f), Q = Λ(κ)⁻¹"]:::loop
+        ESTEP["E-step: Kalman filter + RTS smoother<br/>log-likelihood ℓ, sufficient statistics S11, S10, S00"]:::loop
+        MSTEP["M-step (ECM)<br/>f, then κ (L-BFGS-B) · s2e, β, then A · x0, Σ0"]:::loop
+        STOP{"|Δℓ| / n_obs < tol_relat<br/>or max_iter?"}:::loop
+        FINAL["final E-step at the estimates"]:::step
+    end
+
+    subgraph POST["5 · Inference and prediction"]
+        RES["LRStateSpaceResults<br/>params, ℓ, AIC / BIC, fitted values, summary()"]:::out
+        INF["compute_cov_params()<br/>Hessian of ℓ (JAX) → standard errors, conf_int()"]:::out
+        PRED["get_prediction(new data) → LRPredictionResults<br/>mean H x + Xβ, covariance H P Hᵀ"]:::out
+        BACK["back_transform(g⁻¹) · to_geo() · to_poly(polygons)"]:::out
+    end
+
+    GDF --> DMB
+    FORM --> DMB
+    DOM --> DMB
+    DMB --> YX
+    YX -- sites --> MESH --> SPDE --> SETUP
+    YX --> SETUP
+    SETUP --> INIT --> SYS --> ESTEP --> MSTEP --> STOP
+    STOP -- no --> SYS
+    STOP -- yes --> FINAL --> RES
+    RES --> INF
+    RES --> PRED --> BACK

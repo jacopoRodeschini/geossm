@@ -13,6 +13,9 @@ builds them from:
   (:class:`~geossm.covmodel.SPDEApproxCov`, see :doc:`covariance_models`)
   giving a **low-rank basis** for the latent spatial field.
 
+The model equations, the EM algorithm and the formulas behind the
+reported quantities are in :doc:`model_formulation`.
+
 Representing the latent field through the low-rank, mesh-based SPDE
 basis (rather than one latent dimension per observed site) is what makes
 the model scale to a large number of spatial locations, per the
