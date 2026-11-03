@@ -74,8 +74,7 @@ def _highest_matmul_precision(f):
 @_highest_matmul_precision
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """Simulate a trajectory forward from the state-space model, using a
-    Python ``for`` loop over time (not ``jax.lax.scan``, despite the
-    docstring of the historical/commented-out ``@jit`` variant below).
+    Python ``for`` loop over time (not ``jax.lax.scan``).
 
     Draws :math:`x_0 \\sim N(x_0, \\Sigma_0)` and then, for
     :math:`t = 0, \\dots, T-1`, generates
@@ -154,43 +153,6 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     return final_y_t, final_x_t
 
-""" 
-@jit
-def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    ```Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly).```
-    T = Xbeta.shape[2]
-    p = R.shape[0]
-    q = F.shape[0]
-
-    chol_R = jnp.linalg.cholesky(R)
-    chol_Q = jnp.linalg.cholesky(Q)
-    chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
-
-    key0, key_obs, key_state = jax.random.split(keys, 3)
-    eps0 = jax.random.normal(key0, shape=(q,), dtype=jnp.float32)
-    obs_eps = jax.random.normal(key_obs, shape=(T, p), dtype=jnp.float32)
-    state_eps = jax.random.normal(key_state, shape=(T, q), dtype=jnp.float32)
-
-    x_init = x0 + chol_Sigma0 @ eps0
-    fixed_effect = jnp.einsum("pkt,k->pt", Xbeta, beta)
-
-    def step(x_curr, inputs):
-        obs_eps_t, state_eps_t, fe_t = inputs
-        y_t = fe_t + H @ x_curr + chol_R @ obs_eps_t
-        x_next = F @ x_curr + chol_Q @ state_eps_t
-        return x_next, (y_t, x_next)
-
-    _, (y_hist, x_next_hist) = jax.lax.scan(
-        step,
-        x_init,
-        (obs_eps, state_eps, fixed_effect.T),
-    )
-
-    y_t = y_hist.T
-    x_t = jnp.concatenate([x_init[:, None], x_next_hist.T], axis=1)
-
-    return y_t, x_t
-"""
 
 @jit
 @_highest_matmul_precision
@@ -334,7 +296,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # it used to also be stacked into the scan history for the smoother to
         # reuse, but that duplicated a full (q, q, T) array for something the
         # smoother can recompute inline from the (already stored) P_t_1.
-        #invP_pred = solve(P_pred, Iq)
         L_P = jnp.linalg.cholesky(P_pred)
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
@@ -363,12 +324,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
 
         # LOG-LIKELIHOOD
-        # logdetSigmaE = (
-        #     jnp.linalg.slogdet(M)[1]
-        #     + jnp.linalg.slogdet(P_pred)[1]
-        #     + jnp.sum(jnp.log(R_diag))
-        # )
-
         logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
         logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
         # With the missing rows of H zeroed, the innovation covariance is
@@ -426,8 +381,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         [jnp.zeros(Sigma0.shape, dtype=dtype)[:, :, None], P_t_1], axis=2
     )
     logL = -0.5 * final_logL
-
-    # jax.block_until_ready(x_t)
 
     return x_t, P_t, K, x_t_1, P_t_1, logL
 
@@ -1254,22 +1207,6 @@ class StateSpaceModel:
         if not flag:
             return flag, "\n".join(messages)
 
-        # Helper: check positive semidefinite (symmetric) with tolerance
-        def is_pos_semidef(mat):
-            A = jnp.asarray(mat)
-            if A.ndim != 2 or A.shape[0] != A.shape[1]:
-                return False
-            # symmetry check
-            if not jnp.allclose(A, A.T, atol=1e-8):
-                return False
-            # eigenvalues >= -tol
-            eigs = jnp.linalg.eigvalsh(A)
-            return jnp.all(eigs >= -1e-8)
-        # Sigma0: should be (q, q)
-        sigma0_shape = shape_str(self.Sigma0)
-        if sigma0_shape not in [(q, q), (q,), (q,)]:
-            messages.append(f"Sigma0 must be shape ({q},{q}), got {sigma0_shape}.")
-            flag = False
 
         # H: (p, q)
         H_shape = shape_str(self.H)
@@ -1303,10 +1240,6 @@ class StateSpaceModel:
         if Q_shape != (q, q):
             messages.append(f"Q must be shape ({q},{q}), got {Q_shape}.")
             flag = False
-        # else:
-        #    if not is_pos_semidef(self.Q):
-        #        messages.append("Q must be symmetric positive semidefinite.")
-        #        flag = False
 
         # x0: (q,)
         x0_shape = shape_str(self.x0)
@@ -1319,12 +1252,6 @@ class StateSpaceModel:
         if Sigma0_shape != (q, q):
             messages.append(f"Sigma0 must be shape ({q},{q}), got {Sigma0_shape}.")
             flag = False
-        # Check positive semidefinite
-        # else:
-        #     if not is_pos_semidef(self.Sigma0):
-        #         messages.append(
-        #             "Sigma0 must be symmetric positive semidefinite.")
-        #         flag = False
 
         # Xbeta: (p, b, T)
         Xbeta_shape = shape_str(self.Xbeta) if self.Xbeta is not None else None
@@ -1618,7 +1545,6 @@ class StateSpaceModel:
         )
 
         return results
-        # return (x_t, P_t, K, x_t_1, P_t_1, logL, tDelta)
 
     @_on_device
     def smoother(
@@ -1971,11 +1897,6 @@ class StateSpaceModel:
         # call (which would otherwise need a dense (q, q) F reconstructed just
         # for this one-off simulation-stats call).
         P = Q / (1.0 - jnp.outer(F, F))
-
-        # Theoretical latent variance
-        # temp = jnp.diag(H @ P @ H.T)
-        # temp = jnp.diag(P)
-        # var_z_t = jnp.array([float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)])
 
         # Theoretical variance of the latent effect (H @ x_t) is H P H^T
         temp = jnp.diag(H @ P @ H.T)

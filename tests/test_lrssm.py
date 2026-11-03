@@ -1252,3 +1252,19 @@ class TestKsStep:
         res = _build_model(gdf, mesh, dtype=jnp.float64).fit(options=_options(max_iter=1, ks_tol=1e3))
         ks0 = float(np.ravel(res.nstats[0]["ks"])[0])  # starting value
         assert float(np.ravel(res.params.ks.value)[0]) == pytest.approx(ks0, rel=1e-12)
+
+
+@pytest.mark.parametrize("kw, match", [
+    (dict(f=[1.5]), "params.f"),
+    (dict(s2e=[-0.1]), "params.s2e"),
+    (dict(ks=[0.0]), "params.ks"),
+    (dict(A=[[1.0, 2.0]]), "params.A has shape"),
+    (dict(beta=[1.0]), "params.beta has shape"),
+    (dict(A=None), "params.A must be given"),
+])
+def test_sim_validates_params_as_fit_does(gdf, mesh, kw, match):
+    # Section R: sim() used to check only the shapes of beta, A and ks.
+    base = dict(beta=[1.0, 0.5], A=[[1.0]], s2e=[0.1], ks=[1.0], f=[0.8])
+    params = ModelParams(**{k: v for k, v in {**base, **kw}.items() if v is not None})
+    with pytest.raises(ValueError, match=match):
+        _build_model(gdf, mesh).sim(params=params)

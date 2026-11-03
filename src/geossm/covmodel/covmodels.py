@@ -32,13 +32,11 @@ def meshio_to_mfem_mesh(meshio_mesh):
     """
     # 1. Determine dimension and prepare vertices
     if meshio_mesh.points.shape[1] == 2:
-        # dim = 2
         # MFEM internally works with 3D coordinates, so pad 2D points with zeros
         vertices_mfem = np.hstack(
             [meshio_mesh.points, np.zeros((meshio_mesh.points.shape[0], 1))]
         ).astype(np.float64)
     elif meshio_mesh.points.shape[1] == 3:
-        # dim = 3
         vertices_mfem = meshio_mesh.points.astype(np.float64)
     else:
         raise ValueError("meshio_mesh.points must have 2 or 3 columns.")
@@ -69,11 +67,7 @@ def meshio_to_mfem_mesh(meshio_mesh):
             "No supported 2D or 3D cells found in meshio_mesh (e.g., triangle, quad, tetra, hexa)."
         )
 
-    # 3. Create an empty MFEM mesh
-    # The default constructor mfem.Mesh(dim, num_vertices, num_elements, type, gen_edges=True)
-    # is generally for very simple, uniform meshes or when you're building elements later.
-    # We will use the mfem.Mesh() default constructor and add elements.
-    # mfem_mesh = mfem.Mesh()
+    # 3. Create an empty 2D MFEM mesh sized for the vertices and triangles
     mfem_mesh = mfem.Mesh(2, vertices_mfem.shape[0], cells_data.shape[0], 0, 2)
 
     # 4. Add vertices to the MFEM mesh
@@ -81,9 +75,6 @@ def meshio_to_mfem_mesh(meshio_mesh):
         mfem_mesh.AddVertex(vert_coord)
 
     # 5. Add elements to the MFEM mesh
-    # Assign element attributes (e.g., 1 for the domain)
-    # This assumes all domain elements get the same attribute for simplicity.
-    # element_attribute = 1  # Common attribute for domain cells
     all_triangles = cells_data
     for i in range(len(all_triangles)):
         mfem_mesh.AddTriangle(
@@ -466,9 +457,6 @@ class FEMSolver(_Verbose):
                 phys_point.Assign(phy_points[i, :])
                 tran = self.mesh.GetElementTransformation(ids)
 
-                # Compute the basis func in the pyhisical space
-                # CalcPhysShape(tran, phys_point)
-
                 # Map the point in the reference domain
                 tran._TransformBack(phys_point, ref_point)
 
@@ -494,14 +482,6 @@ class FEMSolver(_Verbose):
         # check the thr and put 0 (numerical stability)
         H[H <= 1e-8] = 0
         H = sp.csr_matrix(H)
-
-        # Check the "parition of unity" rule
-        # H.sum(axis=1)
-        # if len(notfindInx) != 0:
-        #     s = "The following point index need to be removed because can't be find in the latent domain \n"
-        #     s += "See the MFEM FindPoints function documentatios \n"
-        #     s += f"Index {notfindInx} \n"
-        #     warnings.warn(s)
 
         notfindInx = np.asarray(notfindInx)
 
@@ -997,99 +977,6 @@ class FEMSolver(_Verbose):
             gen_top_left + gen_top_right, indent=2
         )
 
-
-
-# % Heat kernel
-
-# Euclidean distance is wrong in a non-convex domain like PacMan.
-# hdist = cdist(points, points)
-
-# Graph shortest path that stays entirely inside the polygon
-# 1 - Compute distances on a FEM mesh graph (Dijkstra on barycentric graph)
-# 2 : Laplacian distance (encodes how information diffuses through geometry)
-
-
-# solve the hteat equation
-# def heat_geodesic_kernel(fem_solver, i):
-#     fes = femsolver._fespace
-#     mesh = femsolver._mesh
-
-#     # setup the mass and stiff matrix
-#     M = mfem.BilinearForm(fes)
-#     M.AddDomainIntegrator(mfem.MassIntegrator())
-#     M.Assemble()
-#     M.Finalize()
-#     Mmat = M.SpMat()
-
-#     K = mfem.BilinearForm(fes)
-#     K.AddDomainIntegrator(mfem.DiffusionIntegrator())
-#     K.Assemble()
-#     K.Finalize()
-#     Kmat = K.SpMat()
-
-#     # solve the heat equation
-#     t = mesh.GetElementSize(0)**2  # rule of thumb
-
-#     u = mfem.GridFunction(fes)
-#     rhs = mfem.GridFunction(fes)
-
-#     rhs.Assign(0.0)
-#     rhs[i] = 1.0  # source of the heat
-
-#     A = mfem.Add(1.0, Mmat, t, Kmat)
-
-#     solver = mfem.CGSolver()
-#     solver.SetOperator(A)
-#     solver.SetRelTol(1e-8)
-#     solver.Mult(rhs, u)
-
-#     # % Compute normalized gradient field
-#     dim = mesh.Dimension()
-#     vfes = mfem.FiniteElementSpace(mesh, fes.FEColl(), dim)
-
-#     #  Extract the gradient of the heat solution 'u'
-#     X = mfem.GridFunction(vfes)
-#     grad_u_coeff = mfem.GradientGridFunctionCoefficient(u)
-
-#     # Perform an L2 projection (averaging the gradients from neighboring elements)
-#     # This is actually okay for smoothing, but the normalization still has to happen point-by-point.
-#     X.ProjectCoefficient(grad_u_coeff)
-
-#     # Pointwise normalization
-#     data = X.GetDataArray()  # (this is a view, not a copy)
-#     data_reshaped = data.reshape(-1, dim)  # (num_nodes, dimension)
-
-#     # Normalize: -grad(u) / |grad(u)|
-#     norms = np.linalg.norm(data_reshaped, axis=1, keepdims=True) + 1e-12
-#     data_reshaped[:] = -data_reshaped / norms
-
-#     # # X is already normalized
-#     # print(np.max(np.abs(np.linalg.norm(X.GetDataArray().reshape(-1, vdim),
-#     #                                    axis=1) - 1.0)))
-
-#     # %Set up the final Poisson problem: \Delta d = \nabla \cdot (\phi)
-
-#     divX = mfem.GridFunction(fes)
-#     divX.ProjectCoefficient(mfem.DivergenceGridFunctionCoefficient(X))
-
-#     phi = mfem.GridFunction(fes)
-
-#     solver.SetOperator(Kmat)
-#     solver.Mult(divX, phi)
-
-#     return phi.GetDataArray()
-
-# Compute the laplacian godesis distance using the heat kernel
-
-# femsolver = cov_matern.setup(meshio).fem_solver
-
-# hdist = np.zeros((femsolver.nvertex, femsolver.nvertex))
-# for i, s in enumerate(points):
-#     hdist[i, :] = heat_geodesic_kernel(femsolver, i)
-
-# # cut on the inner points
-# hdist = hdist[:, femsolver.inner][femsolver.inner, :]
-# hdist = (hdist + hdist.T)/2
 
 
 # % SPDE Approximation of the Matern covariance model

@@ -676,36 +676,12 @@ class LRStateSpaceResults(StateSpaceResults):
             return self._cov_params
         self._verbosity(None)[1]("Computing standard errors of the parameters")
 
-        # H, tdelta = self._compute_hessian()
-        # _print_info(f"Hessian computed in {tdelta:.3f} seconds")
         H, tdelta = self.get_hessian()
 
-        # Compute the covariance matrix as the inverse of the Hessian (of the positive log-likelihood)
-        # Sigma = -jnp.linalg.pinv(H)
-        # cov_params = -jnp.linalg.inv(H)
+        # -H^-1, the inverse observed information. Not checked for negative
+        # definiteness (Section I decision): away from a maximum some
+        # variances are negative and their standard errors NaN.
         H = 0.5 * (H + H.T)
-        # eps = 1e-6
-        # H += eps * jnp.eye(H.shape[0], dtype=H.dtype)
-
-        # TODO: Check if the Hessian is negative definite before inverting it. 
-        # If not, return NaN for the covariance matrix.
-        
-        # At a maximum the Hessian of the log-likelihood is negative definite;
-        # otherwise -H^-1 is not a covariance matrix and no SE is reported.
-        # eig = np.asarray(jnp.linalg.eigvalsh(H))
-        # n_bad = int(np.sum(~(eig < 0)))
-        # if n_bad:
-        #     warnings.warn(
-        #         "The Hessian of the log-likelihood is not negative definite "
-        #         "({} of {} eigenvalues are non-negative or not finite; largest {:.3g}), "
-        #         "so the estimate is not at a strict maximum or the Hessian is "
-        #         "inaccurate. Standard errors are set to NaN.".format(
-        #             n_bad, eig.size, float(np.max(eig)) if eig.size else float("nan")),
-        #         RuntimeWarning,
-        #         stacklevel=2,
-        #     )
-        #     cov_params = jnp.full(H.shape, jnp.nan, dtype=H.dtype)
-        # else:
         cov_params = -jnp.linalg.solve(H, jnp.eye(H.shape[0], dtype=H.dtype))
 
         self._cov_params = cov_params

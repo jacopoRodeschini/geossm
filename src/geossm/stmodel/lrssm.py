@@ -605,11 +605,10 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         Raises
         ------
         ValueError
-            If the
-            covariance functions have not been set via `setup`; or if the
-            shapes of `beta`, `A`, or `ks` in `params` are inconsistent with
-            the model (`Xbeta`'s width, `(nvar, nlat)`, and the number of
-            covariance functions, respectively).
+            If the covariance functions have not been set via `setup`; or if
+            `params` misses `beta`, `A`, `s2e`, `f` or `ks`, or a value has
+            the wrong shape (for the simulated design), is not finite, or is
+            out of range (`s2e > 0`, `ks > 0`, `|f| < 1`), as in `fit`.
         """
 
         self._require_setup("sim")
@@ -649,11 +648,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             y_name = [g.y_name for g in gridList]
             xbeta_names = [g.x_names for g in gridList]
 
-
-            # get response name
-            # self.y_name = [g.y_name for g in self.gridList]
-            # self.xbeta_names = [g.x_names for g in self.gridList]
-
             self._log("Building the design matrix... Done.")
         
         qdim = self.qdim
@@ -665,6 +659,9 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         self._log("Parsing the parameters (ModelParams|None)...")
         
         params = self._parseParams(params)
+        # as in fit() (shapes for the simulated design, s2e > 0, ks > 0, |f| < 1)
+        self._check_params0(params, nvar=nvar, b=Xbeta.shape[1], label="params",
+                            required=("beta", "A", "s2e", "f", "ks"))
         params = self._cast_params(params)
         A = params.A.value
         s2e = params.s2e.value
@@ -672,20 +669,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         beta = params.beta.value
         ks = params.ks.value
 
-        # TODO: check if the parameters are valid (e.g. positive variance, etc.)
-        
-        # Chech the length of beta
-        if beta is not None and len(beta) != Xbeta.shape[1]:
-            raise ValueError(f"Length of beta ({len(beta)}) must match number of columns in Xbeta ({Xbeta.shape[1]})")
-        
-        # Check the length of A
-        if A is None or A.shape[0] != nvar or A.shape[1] != self.nlat:
-            raise ValueError(f"Shape of A ({A.shape}) must match (nvar, nlat) = ({nvar}, {self.nlat})")
-        
-         # Check the length of ks
-        if ks is None or len(ks) != len(self._cov_matern):
-            raise ValueError(f"Length of ks ({len(ks)}) must match number of covariance functions ({len(self._cov_matern)})")
-        
         # set the covarriance rescale paramiter to the value of ks (if provided, otherwise it will be set to 1)
         if ks is not None:
             for cov, ksi in zip(self.cov_function, ks):
@@ -705,7 +688,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         H = build_H(A, basis)  # dense
         self._log("Computing the H {} matrix... Done.".format(H.shape))
 
-        # R, F = buildRF(est_s2e, est_f, pdim, qdim)
         R, F = build_RF(s2e, f, pdim, qdim, self.dtype)
         self._log("Computing the R {} matrix... Done.".format(R.shape))
         self._log("Computing the F {} matrix... Done.".format(F.shape))
@@ -1044,7 +1026,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         # Get global constants
         nvar = self.nvar  # len(self.pdim)
         nlat = self.nlat
-        # cov_function = self.cov_function
         pdim = jnp.asarray(self.pdim, dtype=self.itype)
         block_p = jnp.asarray(self.block_p, dtype=self.itype)
 
@@ -1114,7 +1095,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         niter = 0
         logL_prev = jnp.nan  # no E-step before iteration 1 (F41)
         logL_cur = jnp.nan
-        delta_par = jnp.nan
         delta_lik = jnp.nan
         relat_lik = jnp.nan
         tdelta_iter = 0
@@ -1133,7 +1113,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             est_params,
             0,
             jnp.nan,  # iteration 0 has no log-likelihood value (F41)
-            delta_par,
             delta_lik,
             relat_lik,
             tdelta_iter,
@@ -1157,9 +1136,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             H, invQ = self._set_system_matrices(est_params, basis, pdim, qdim)
 
             # ---- E step
-            # y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(
-            #    y_obs, R, F, H, Q, est_params.x0.value, est_params.Sigma0.value, Xbeta, est_params.beta.value)
-
             y_hat, x_T, P_T, S11, S10, S00, logL_cur, tdelta_Edet = self._E_step(y_obs)
 
             # ---- M step, get the updated parameters
@@ -1241,7 +1217,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
                 est_params,
                 opt_success,
                 logL_cur,
-                delta_par,
                 delta_lik,
                 relat_lik,
                 tdelta_iter,
@@ -1384,7 +1359,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         y_hat = results.y_hat
         x_T = results.x_smoothed
         P_T = results.P_smoothed
-        # P_T_1 = results.P_pred_smoothed
         S11 = results.S11
         S10 = results.S10
         S00 = results.S00
@@ -1447,7 +1421,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         b = Xbeta.shape[1]
         nvar = len(block_p) - 1
         nlat = len(block_q) - 1
-        # ndim = block_p[1:] - block_p[:-1]  # observed dimensions
         ldim = block_q[1:] - block_q[:-1]  # latent dimensions
 
         # Update f (Eq 3a)
@@ -1461,8 +1434,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             # tr(A B) = sum(A * B'), without forming the product
             num = jnp.sum(invQ[s, s] * S10[s, s].T)
             den = jnp.sum(invQ[s, s] * S00[s, s].T)
-
-            # print(q, num, den)
             est_f = est_f.at[q].set(num / den)
 
         if fixed("f"):
@@ -1481,12 +1452,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         tdelta_beta = time.time() - tStart
 
         # s2 (see Eq, 14c)
-        # compute the s2e
-        # tStart = time.time()
-        # s2e = compute_s2e(
-        #     err, H, P_T, block_p, nvar, T, ndim)
-        # tdelta_s2e = time.time() - tStart
-
         tStart = time.time()
         if fixed("s2e"):
             s2e = jnp.asarray(params.s2e.value, dtype=self.dtype)
@@ -1496,9 +1461,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         tdelta_s2e = time.time() - tStart
 
         # update A
-        # est_A, tdelta_A = compute_A2(
-        #     y_t, Xbeta, est_beta, x_T, P_T, block_p, block_q, nvar, nlat, T, ldim, Phi)
-
         tStart = time.time()
 
         # given `beta` as kept (the current value if fixed, F42)
@@ -1589,7 +1551,6 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         # opt.x is NumPy float64: cast before exp, so that the result does not
         # depend on the global x64 flag (F03)
         est_ks = jnp.exp(jnp.asarray(opt.x, dtype=self.dtype))
-        # print("est_ks", est_ks)
 
         # Note that the Cov. function is updated in place with the new rescale parameter (i.e. the range parameter of the Matern covariance function)
         update_params = self._createParams(beta, s2e, est_f, x0, Sigma0, est_ks, est_A)
@@ -1738,16 +1699,22 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
 
         return new_params
 
-    def _check_params0(self, params0: ModelParams):
+    def _check_params0(self, params0: ModelParams, nvar=None, b=None, label="params0", required=()):
         """
-        Validate the values given in `params0` (fixed or starting values):
-        shapes -- `beta` (b,), `s2e` (nvar,), `f` and `ks` (nlat,), `A`
-        (nvar, nlat), `x0` (q,), `Sigma0` (q, q)
-        -- finite values, `s2e > 0`, `ks > 0` and `|f| < 1`.
+        Validate the values given in `params0` (fixed or starting values of
+        `fit`, or the parameters of `sim`): shapes -- `beta` (b,), `s2e`
+        (nvar,), `f` and `ks` (nlat,), `A` (nvar, nlat), `x0` (q,), `Sigma0`
+        (q, q) -- finite values, `s2e > 0`, `ks > 0` and `|f| < 1`. `nvar`
+        and `b` default to the model's (training) dimensions; the names in
+        `required` must have a value. `label` names the argument in errors.
         """
-        nvar, nlat = int(self.nvar), int(self.nlat)
+        nvar = int(self.nvar if nvar is None else nvar)
+        nlat = int(self.nlat)
         q = int(self.block_q[-1])
-        b = int(self.Xbeta.shape[1])
+        b = int(self.Xbeta.shape[1] if b is None else b)
+        for name in required:
+            if getattr(params0, name).value is None:
+                raise ValueError(f"{label}.{name} must be given.")
         shapes = {"beta": (b,), "s2e": (nvar,), "f": (nlat,), "ks": (nlat,), "A": (nvar, nlat),
                   "x0": (q,), "Sigma0": (q, q)}
         for name, shape in shapes.items():
@@ -1756,15 +1723,15 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
                 continue
             v = np.asarray(value)
             if v.shape != shape:
-                raise ValueError(f"params0.{name} has shape {v.shape}; expected {shape}.")
+                raise ValueError(f"{label}.{name} has shape {v.shape}; expected {shape}.")
             if not np.all(np.isfinite(v)):
-                raise ValueError(f"params0.{name} has non-finite values.")
+                raise ValueError(f"{label}.{name} has non-finite values.")
         checks = (("s2e", lambda v: v > 0, "positive"), ("ks", lambda v: v > 0, "positive"),
                   ("f", lambda v: np.abs(v) < 1, "in (-1, 1) (stationary dynamics)"))
         for name, ok, what in checks:
             value = getattr(params0, name).value
             if value is not None and not np.all(ok(np.asarray(value))):
-                raise ValueError(f"params0.{name} = {np.asarray(value).tolist()} must be {what}.")
+                raise ValueError(f"{label}.{name} = {np.asarray(value).tolist()} must be {what}.")
 
     def _updateParams0(self, params0: ModelParams, updates: ModelParams) -> ModelParams:
         """
@@ -2030,7 +1997,6 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
         params: ModelParams,
         opt_success: bool,
         logL_cur,
-        delta_par,
         delta_lik,
         relat_lik,
         tdelta_iter,
@@ -2052,7 +2018,6 @@ Run time  : Tot: {format_value(stats['time_tot'], scalar_decimals)}, Estep: {for
             "x0": params.x0.value.mean(),
             "Sigma0": jnp.diag(params.Sigma0.value).mean(),
             "logL": logL_cur,
-            "deltaP": delta_par,
             "deltaL": delta_lik,
             "relatL": relat_lik,
             "time_tot": tdelta_iter,
