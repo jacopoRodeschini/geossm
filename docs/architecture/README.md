@@ -28,16 +28,19 @@ npx -y @mermaid-js/mermaid-cli@11.4.2 -i docs/architecture/class_diagram.mmd -o 
 |---|---|---|---|
 | `StateSpaceModel` | `ssm.statespace` | Holds the matrices of a linear-Gaussian state-space model and runs the JIT filter, smoother, prediction and simulation kernels on them | public |
 | `StateSpaceResults` | `ssm.statespace_results` | Read-only container of filter/smoother outputs with residual metrics, intervals, coverage and a summary | public |
-| `LRStateSpaceModel` | `stmodel.lrssm` | Low-rank spatio-temporal model: builds the design matrices and the spatial system matrices, runs the EM fit, prediction and simulation (several responsibilities; see the plan, P1/P6) | public |
-| `LRStateSpaceResults` | `stmodel.stmodel_results` | Results of a fit: parameters, EM history, fitted values, likelihood-based inference, prediction storage and export (see P1/P2) | public |
-| `FittedState` | `stmodel.stmodel_results` | Frozen snapshot of the fit-time configuration needed after fitting (covariance objects, formula builders, sites, dtypes); the interface between a fitted model and its results | internal |
+| `LRStateSpaceModel` | `stmodel.lrssm` | Low-rank spatio-temporal model: builds the design matrices and the spatial system matrices, checks which sites the latent field enters (`in_support`), runs the EM fit and simulation | public |
+| `LRStateSpaceResults` | `stmodel.stmodel_results` | Results of a fit: parameters, EM history, fitted values (views of the fitted state), likelihood-based inference (Hessian compiled once per shape), prediction (`predict` arrays, `get_prediction` object) and export | public |
+| `LRPredictionResults` | `stmodel.prediction_results` | Out-of-sample predictions of a fit: mean, covariance/variance, `in_support`, back-transformation, export to points (`to_geo`) and polygons (`to_poly`) | public |
+| `FittedState` | `stmodel._fitted` | Frozen state of a fit: configuration (covariance objects, formula builders, sites, dtypes), estimates, the fitted arrays (`y_obs` as fitted, `y_hat`, smoothed states, sufficient statistics) and `in_support`; the interface between a fitted model and its results | public (via `fitted_state`) |
 | `ModelParams`, `Param` | `stmodel.param` | Typed parameter container and parameter (value, fixed flag, standard error), registered as JAX pytrees | public |
-| `FitOptions` | `stmodel.param` | EM stopping and logging options | public |
+| `FitOptions` | `stmodel.param` | EM stopping and logging options, tolerance of the `ks` step (`ks_tol`); validated on construction | public |
 | `DesignMatricesBuilder` | `data_preparation` | Validates a long-format GeoDataFrame and evaluates a formula into site × time design arrays, for training and prediction | public |
 | `DesignMatrices` | `data_preparation` | Design arrays and metadata of one formula | public |
 | `SPDEApproxCov` | `covmodel.covmodels` | SPDE (ν = 1) Matérn precision on a finite-element mesh, marginalised to the inner nodes | public |
 | `FEMSolver` | `covmodel.covmodels` | P1 finite elements on a mesh: mass and stiffness matrices, inner/outer nodes, basis evaluation, mesh statistics and plots | public (used through `SPDEApproxCov`) |
 | `KeyStream`, `_StaticArray`, `_FormulaInfo`, `_NAPassthrough` | various | PRNG key splitting; hashable pytree aux data; parsed formula; patsy NA action | internal |
 
-Kernels (filter, smoother, sufficient statistics, prediction, M-step updates, SPDE marginal precision, `ks` objective)
-are module-level JIT functions in `ssm.statespace` and `stmodel.lrssm`; the classes orchestrate them.
+Kernels are module-level JIT functions; the classes orchestrate them: filter, smoother, sufficient statistics,
+prediction and simulation in `ssm.statespace`; initial values, M-step updates and the `ks` objective in
+`stmodel._em`; spatial system matrices, latent basis and support, observed log-likelihood and prediction from a fit in
+`stmodel._fitted`; design helpers in `stmodel._design`; export and change of support in `stmodel._output`.

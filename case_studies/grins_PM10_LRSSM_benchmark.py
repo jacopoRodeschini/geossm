@@ -7,6 +7,8 @@ The example is run on a GPU and CPU device.
 """
 
 # %% Import the necessary libraries
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 msg = """
@@ -17,7 +19,6 @@ This study compares CPU and GPU, so none is set here; uncomment as needed:
 CPU only: JAX does not start its GPU backend (0 GB of GPU memory used).
 Without it, JAX reserves GPU memory even for backend="cpu" models.
 
-import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 
 GPU: allocate memory on demand instead of reserving 75 % of it upfront
@@ -26,6 +27,7 @@ errors, same speed), or cap the reserved fraction instead.
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".30"
 
+
 Reuse compiled kernels across runs (the first fit is mostly compilation).
 os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax")
 """
@@ -33,14 +35,13 @@ print(msg)
 
 import numpy as np
 import pandas as pd
-import geopandas as gpd
 import jax
-import jax.numpy as jnp
+jax.config.update("jax_enable_x64", True)
+
 
 # The models below use float64, which needs JAX's 64-bit mode enabled before
 # any JAX array is created (geossm does not switch it on itself).
-jax.config.update("jax_enable_x64", True)
-
+import jax.numpy as jnp
 from shapely import ops
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -51,7 +52,6 @@ from geossm.covmodel import SPDEApproxCov as matern_spde
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
 from geossm.covmodel import buildMesh2d
-
 
 # Assert the presence of a GPU device
 try:
@@ -167,10 +167,12 @@ for cov_fun, lr in zip(cov_funcs, lowrank):
         @backend: string to specify the backend to use for the fitting procedure (cpu or gpu)
         @dtype: data type to use for the fitting procedure (float32 or float64)
         """
+        # from a list of polygons to a multiploygon
+        union = ops.unary_union(polygons)
         model = lrssm(
             df=gdfpm10_train, 
             formulas=[formula], 
-            domain=polygons, 
+            domain=[union], 
             verbose=False, backend=backend, dtype=jnp.float32)
 
 

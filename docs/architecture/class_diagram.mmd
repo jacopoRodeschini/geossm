@@ -1,4 +1,4 @@
-%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (updated with Section D, 2026-10-27).
+%% geossm — class diagram of the code AS IMPLEMENTED on branch refactor (updated through Sections M, N, I, J, 2026-11-03).
 %% Only existing classes and module-level function groups are shown; nothing here is a proposal
 %% (proposals: Architecture_decisions.md in this folder).
 %% Notation: <|-- inheritance; *-- composition (owned, created by the owner); o-- aggregation (shared reference,
@@ -16,6 +16,7 @@ classDiagram
         +H, R, F, Q, Xbeta, beta : property, setter
         +x0, Sigma0, y_t : property
         +p, q, T, b, shape, backend : property
+        +y_name : property, str (a list on LRStateSpaceModel)
         +set(H, R, F, Q, x0, Sigma0, y_t, Xbeta, beta) None
         +filter(y_t, ...) StateSpaceResults
         +smoother(y_t, ..., light) StateSpaceResults
@@ -25,7 +26,8 @@ classDiagram
         +compute_expected_values(x_T, P_T, P_T_1) tuple
         +summary() Summary
         -_H, _R, _F, _Q, _x0, _Sigma0, _Xbeta, _beta, _y_t : Array
-        -_update_parameters() / _check_parameters()
+        -_update_parameters() / _check_parameters() reports only
+        -_check_y_t(y_t) rows vs H, steps vs an explicit Xbeta
         -_run_filter_kernel(y_t, ...) tuple
     }
     class StateSpaceResults {
@@ -34,7 +36,8 @@ classDiagram
         +x_smoothed, P_smoothed, P_pred_smoothed : ndarray or None
         +S11, S10, S00 : ndarray
         +llf : float
-        +nobs, missing : int
+        +nobs, missing : int, observed values only
+        +y_name : str or tuple
         +residuals : property
         +mse(which) / rmse(which)
         +conf_int_state(which, alpha) tuple
@@ -44,7 +47,7 @@ classDiagram
         +update(**kw) StateSpaceResults
         +as_dict() dict
         +summary() Summary
-        -_R, _model_shape, _model_y_name, _model_label : snapshot, no model reference
+        -_R, _model_shape, _model_label : snapshot, no model reference
         -_DELEGATED_FIELDS : names a subclass keeps elsewhere
         -_after_update(keys)
     }
@@ -75,6 +78,7 @@ classDiagram
         +points, pdim, block_p, nvar, y_name, xbeta_names
         +y_train : p x T, y_train_list, Xbeta_list
         +qdim, block_q, nlat : set by setup
+        +in_support : bool ndarray, set by setup (sites the latent field enters)
         +cov_function, domain_hull, shape : property
         +setup(cov_fun) self
         +fit(params0, options) LRStateSpaceResults
@@ -86,7 +90,9 @@ classDiagram
         -_cov_matern : list~SPDEApproxCov~
         -_get_fitted_state() FittedState
         -_set_system_matrices(params, basis, pdim, qdim) tuple
-        -_E_step(y) / _M_step(..., invQ, f_fixed)
+        -_E_step(y_t) / _M_step(..., invQ, params, ks_tol)
+        -_check_params0(params0) / _require_setup() / _require_data()
+        -_x_missing : bool p x T, entries with a missing covariate
         -_observed_logL(y_obs, Xbeta, x0, Sigma0, fitted_state) callable
         -_spde_mesh_arrays() tuple
         -_predict(H, x_T, P_T, Xbeta, beta, std) tuple
@@ -123,16 +129,19 @@ classDiagram
         +fitted_state : FittedState, read-only property
         +y_obs, Xbeta, y_hat, Sigma_y_hat : property, views of fitted_state
         +x_smoothed, P_smoothed, P_pred_smoothed, S11, S10, S00 : property, views of fitted_state
+        +in_support : property, view of fitted_state
+        +get_hessian() tuple
         +summary(alpha) Summary
         -_fitted_state : FittedState
         -_hessian, _cov_params, _n_params, ... : lazy caches
-        -_compute_hessian() / _inference_params()
+        -_compute_hessian() / _inference_params() : module-level jit _loglik_hessian, compiled once per shape
     }
     class LRPredictionResults {
         +y_pred : ndarray p x T, read-only
         +Sigma_y_pred : ndarray p x p x T or None
         +var_pred : ndarray p x T or None
         +points, block_p, timestamps, crs, tdelta
+        +in_support : bool ndarray, prediction sites the latent field enters
         +y_pred_back_list, Sigma_y_pred_back_list : set by back_transform
         +y_pred_list, var_pred_list, Sigma_y_pred_list : property
         +fitted_state, y_name : property
@@ -144,7 +153,7 @@ classDiagram
     class output_functions {
         <<module functions: stmodel._output>>
         build_geo_dataframe() / diag_variance()
-        as_polygon_gdf() / areal_weights()
+        as_polygon_gdf() / areal_weights(points, polygons, keep)
         delta_method() / direct_transform() / normalize_g_invs()
     }
     class FittedState {
@@ -164,7 +173,8 @@ classDiagram
         +params : ModelParams
         +timestamps_hat : tuple~ndarray~
         +cov_sizes : tuple, checked before use
-        +y_obs, Xbeta, y_hat, Sigma_y_hat : ndarray, read-only
+        +y_obs, Xbeta, y_hat, Sigma_y_hat : ndarray, read-only (y_obs as fitted: NaN where masked)
+        +in_support : bool ndarray, read-only
         +ARRAY_FIELDS : the arrays exposed by the results
     }
     class fitted_functions {
@@ -172,6 +182,7 @@ classDiagram
         observed_loglik(state, y_obs, Xbeta, x0, Sigma0) callable
         predict_from_fit(state, df, verbose, cov, log) dict
         latent_basis(cov_function, points, dtype) list
+        latent_support(cov_function, points, basis, A) / support_message()
         build_H(A, basis) / build_RF(s2e, f, pdim, qdim, dtype)
         mesh_arrays(cov_function, dtype, itype) tuple
         _spde_marginal_precision(ks, ...)
@@ -180,6 +191,7 @@ classDiagram
         <<module functions: stmodel._design>>
         prediction_design(df, builders, domain, verbose, include_response, log)
         prediction_grid() / split_design() / stack_design()
+        missing_covariates(Xbeta) bool p x T
     }
     class ModelParams {
         <<dataclass, JAX pytree>>
@@ -192,18 +204,19 @@ classDiagram
         +value : Array or None
         +fixed : bool
         +bse : Array or None
-        +set(v) / freeze() / unfreeze() Param
+        +set(new_value) / freeze() / unfreeze() Param
     }
     class _StaticArray {
         <<internal: hashable pytree aux data>>
     }
     class FitOptions {
         <<frozen dataclass>>
-        +max_iter = 20
-        +tol_relat = 1e-3
-        +verbose = True
+        +max_iter = 20 : int >= 1
+        +tol_relat = 1e-3 : float >= 0
+        +verbose = None
         +force_iter = False
         +std = True
+        +ks_tol = 1e-6 : relative gradient tolerance of the ks step
     }
 
     %% ================= data_preparation =================
@@ -220,7 +233,7 @@ classDiagram
         <<dataclass>>
         +X : jax Array N x b x T
         +y : jax Array N x T or None
-        +points : ndarray N x 2
+        +points : ndarray N x 2, float64 (centroids of the site geometries)
         +y_name : str
         +x_names, timestamps, crs, delta, unit
         +N, b, T
@@ -260,12 +273,12 @@ classDiagram
         +inner : bool ndarray
         +n_inner_points, box, vertex, ... : 30 properties
         +angles, areas : property, computed on first access
-        +eval_basis(points)
+        +eval_basis(phy_points)
         +isinner(points) / covers_domain()
         +plot_mesh(...) delegates to plotting_functions
         +compute_stats() / summary()
         -_mesh : mfem.Mesh
-        -_compute_basis(points)
+        -_compute_basis(phy_points)
     }
     class plotting_functions {
         <<module functions: covmodel._plotting>>
