@@ -2059,7 +2059,7 @@ class StateSpaceModel:
 
     @property
     def y_t(self):
-        """jax.numpy.ndarray, shape (p, T): Currently-set observed data
+        """jax.numpy.ndarray: Shape ``(p, T)``. Currently-set observed data
         (may contain ``NaN`` for missing entries)."""
         return self._y_t
 
@@ -2139,7 +2139,7 @@ class StateSpaceModel:
 
     @property
     def Xbeta(self):
-        """jax.numpy.ndarray, shape (p, b, T): Exogenous regressors
+        """jax.numpy.ndarray: Shape ``(p, b, T)``. Exogenous regressors
         entering the observation equation as ``X_t @ beta``."""
         return self._Xbeta
 
@@ -2150,7 +2150,7 @@ class StateSpaceModel:
 
     @property
     def beta(self):
-        """jax.numpy.ndarray, shape (b,): Regression coefficients for
+        """jax.numpy.ndarray: Shape ``(b,)``. Regression coefficients for
         `Xbeta`."""
         return self._beta
 
@@ -2161,7 +2161,7 @@ class StateSpaceModel:
 
     @property
     def H(self):
-        """jax.numpy.ndarray, shape (p, q): Observation/design matrix
+        """jax.numpy.ndarray: Shape ``(p, q)``. Observation/design matrix
         mapping the latent state to the mean of ``y_t``."""
         return self._H
 
@@ -2172,7 +2172,7 @@ class StateSpaceModel:
 
     @property
     def R(self):
-        """jax.numpy.ndarray, shape (p,): Diagonal of the observation
+        """jax.numpy.ndarray: Shape ``(p,)``. Diagonal of the observation
         noise covariance matrix ``R`` (variance of ``e_t`` per observed
         location/variable)."""
         return self._R
@@ -2184,7 +2184,7 @@ class StateSpaceModel:
 
     @property
     def F(self):
-        """jax.numpy.ndarray, shape (q,): Diagonal of the state
+        """jax.numpy.ndarray: Shape ``(q,)``. Diagonal of the state
         transition matrix ``F``."""
         return self._F
 
@@ -2195,7 +2195,7 @@ class StateSpaceModel:
 
     @property
     def Q(self):
-        """jax.numpy.ndarray, shape (q, q): Process noise covariance
+        """jax.numpy.ndarray: Shape ``(q, q)``. Process noise covariance
         matrix (covariance of ``eta_t`` in the state equation)."""
         return self._Q
 
@@ -2206,13 +2206,13 @@ class StateSpaceModel:
 
     @property
     def x0(self):
-        """jax.numpy.ndarray, shape (q,): Mean of the initial state
+        """jax.numpy.ndarray: Shape ``(q,)``. Mean of the initial state
         :math:`x_0`."""
         return self._x0
 
     @property
     def Sigma0(self):
-        """jax.numpy.ndarray, shape (q, q): Covariance of the initial
+        """jax.numpy.ndarray: Shape ``(q, q)``. Covariance of the initial
         state :math:`x_0`."""
         return self._Sigma0
 

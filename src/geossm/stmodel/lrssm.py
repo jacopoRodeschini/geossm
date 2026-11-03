@@ -315,14 +315,27 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             projected) gives a warning (`latlon` only affects `distance()`
             and the inherited `Matern` diagnostics).
 
+        Returns
+        -------
+        LRStateSpaceModel
+            `self`.
+
+        Raises
+        ------
+        ValueError
+            If `cov_fun` is `None` or not a list of `SPDEApproxCov`, or a
+            response variable has no site in the support of the latent
+            field.
+
+        Notes
+        -----
         Training sites the latent field does not enter -- outside the union
         of the latent domains of `cov_fun`, or with an empty latent basis
         (outside every mesh, or in elements whose nodes are all outer) --
         are reported with a warning and flagged in `self.in_support`
         (boolean, one entry per stacked site); `fit()` treats their
         observations as missing, so they do not enter the likelihood or the
-        diagnostics of the results. A response variable with no site in
-        support raises `ValueError`.
+        diagnostics of the results.
         """
         if cov_fun is None:
             raise ValueError("cov_fun must be provided")
@@ -371,6 +384,35 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         return self
 
     def build_design_matrix(self, df, formulas, verbose=None, domain=None):
+        """
+        Build the observation grid and the stacked design of `formulas` on
+        `df` (as `__init__` does): one `DesignMatricesBuilder` per formula,
+        sites outside its `domain` dropped.
+
+        Parameters
+        ----------
+        df : geopandas.GeoDataFrame
+            Long-format data (see `__init__`).
+        formulas : list of str
+            One formula per response variable (see `__init__`).
+        verbose : bool, optional
+            Progress messages; `None`: `self.verbose`.
+        domain : list of shapely Polygon/MultiPolygon, optional
+            One measurement domain per formula.
+
+        Returns
+        -------
+        tuple
+            ``(nvar, points, gridList, ndim, pdim, block_p, T, builders,
+            y_train, Xbeta, y_name, xbeta_names, y_list, Xbeta_list)``: the
+            number of response variables, their sites, `DesignMatrices` and
+            builders, the total and per-variable site counts with their
+            block boundaries, the per-variable time lengths, the stacked
+            response ``(p, T)`` and block-diagonal design ``(p, b, T)``,
+            the response and covariate names, and the per-variable
+            responses and designs.
+        """
+        verbose = self._is_verbose(verbose)
         # Compute the design matrices
         self._log("Building observation grid...")
 

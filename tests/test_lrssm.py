@@ -685,6 +685,27 @@ class TestCompilation:
         model.fit(options=_options(max_iter=2))
         assert _ks_value_and_grad._cache_size() == before > 0
 
+    def test_hessian_is_compiled_once_per_shape(self, gdf, mesh):
+        # J2: the Hessian was compiled again for every results object (a new
+        # jitted closure); now one program per problem shape and dtype.
+        from geossm.stmodel.stmodel_results import _loglik_hessian
+        res1 = _build_model(gdf, mesh).fit(options=_options(max_iter=2))
+        res1.compute_cov_params()
+        before = _loglik_hessian._cache_size()
+        res2 = _build_model(gdf, mesh).fit(options=_options(max_iter=3))  # other estimates, same shapes
+        res2.compute_cov_params()
+        assert _loglik_hessian._cache_size() == before > 0
+
+    @pytest.mark.usefixtures("x64")
+    def test_cached_hessian_equals_the_direct_hessian(self, gdf, mesh):
+        from geossm.stmodel._fitted import observed_loglik
+        res = _build_model(gdf, mesh, dtype=jnp.float64).fit(options=_options(max_iter=2))
+        params = res._inference_params()
+        logL = observed_loglik(res.fitted_state, res.y_obs, res.Xbeta, params.x0.value, params.Sigma0.value)
+        vec0, meta = _pack_params(params, dtype=jnp.float64)
+        direct = jax.hessian(lambda v: logL(_unpack_params(v, params, meta)))(vec0)
+        np.testing.assert_allclose(np.asarray(res.get_hessian()[0]), np.asarray(direct), rtol=1e-10, atol=1e-8)
+
 
 class TestResultsLifecycle:
     """Each results object is a snapshot of its own fit (F09, F27)."""

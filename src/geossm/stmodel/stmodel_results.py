@@ -8,12 +8,14 @@ from types import SimpleNamespace
 from scipy import stats
 import time
 import warnings
+from functools import partial
 import jax
 import jax.numpy as jnp
 from dataclasses import dataclass, replace, fields
 from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
 from geossm.utils import _print_info
-from geossm.stmodel._fitted import FittedState, _read_only_copy, observed_loglik, predict_from_fit
+from geossm.stmodel._fitted import (FittedState, _observed_loglik_value, _read_only_copy, observed_loglik,
+                                    predict_from_fit)
 from geossm.stmodel._output import build_geo_dataframe, delta_method, diag_variance, direct_transform, normalize_g_invs
 from geossm.stmodel.prediction_results import LRPredictionResults
 
@@ -70,6 +72,40 @@ def _unpack_params(vec, template_params, meta):
         updated[f.name] = replace(updated[f.name], fixed=fixed)
 
     return ModelParams(**updated)
+
+
+@partial(jax.jit, static_argnames=("meta", "pdim", "qdim", "n_inner", "nvar", "nlat", "dtype"))
+@_highest_matmul_precision
+def _loglik_hessian(vec, template, data, mesh, *, meta, pdim, qdim, n_inner, nvar, nlat, dtype):
+    """Hessian of the observed log-likelihood with respect to the flat vector
+    of free parameters `vec` (see `_pack_params`), at full matmul precision.
+    Module-level and jitted once per problem shape and dtype (J2): `data`
+    (`y_t`, `Xbeta`, `basis`, `x0`, `Sigma0`) and `mesh` (mass, stiffness,
+    permutations) are traced arguments; the block sizes and `meta` are static."""
+    def fun_flat(v):
+        return _observed_loglik_value(
+            _unpack_params(v, template, meta), mesh=(*mesh, n_inner), pdim=np.asarray(pdim),
+            qdim=np.asarray(qdim), nvar=nvar, nlat=nlat, dtype=dtype, **data)
+    return jax.hessian(fun_flat)(vec)
+
+
+def _loglik_hessian_of(logL, vec0, params, meta):
+    """`_loglik_hessian` for the log-likelihood `logL` of `observed_loglik`
+    (a `functools.partial` of `_observed_loglik_value`) at `vec0`.
+
+    The template is `params` without the values of `x0` and `Sigma0`: they
+    are passed through `data`, and as fixed parameters their values would
+    otherwise be static (part of the jit cache key) and force a new
+    compilation for every fit."""
+    kw = logL.keywords
+    template = replace(params, x0=replace(params.x0, value=None), Sigma0=replace(params.Sigma0, value=None))
+    mass, stiff, perm, n_inner = kw["mesh"]
+    data = {k: kw[k] for k in ("y_t", "Xbeta", "basis", "x0", "Sigma0")}
+    return _loglik_hessian(
+        vec0, template, data, (mass, stiff, perm),
+        meta=tuple(tuple(m) for m in meta), pdim=tuple(int(v) for v in np.ravel(kw["pdim"])),
+        qdim=tuple(int(v) for v in np.ravel(kw["qdim"])), n_inner=tuple(n_inner),
+        nvar=int(kw["nvar"]), nlat=int(kw["nlat"]), dtype=np.dtype(kw["dtype"]))
 
 
 def _vector_to_bse_params(vec, template_params, meta):
@@ -503,24 +539,24 @@ class LRStateSpaceResults(StateSpaceResults):
     # The arrays of the fit live in the fitted state; these read-only
     # properties keep the results' attribute API (`results.y_hat`, ...).
     _DELEGATED_FIELDS = frozenset(FittedState.ARRAY_FIELDS)
-    y_obs = _state_property("y_obs", "ndarray, shape (p, T): Training observations (NaN where missing); see `fitted_state`.")
-    Xbeta = _state_property("Xbeta", "ndarray, shape (p, b, T): Training design matrix; see `fitted_state`.")
+    y_obs = _state_property("y_obs", "ndarray: Shape ``(p, T)``. Training observations (NaN where missing); see `fitted_state`.")
+    Xbeta = _state_property("Xbeta", "ndarray: Shape ``(p, b, T)``. Training design matrix; see `fitted_state`.")
     in_support = _state_property(
-        "in_support", "ndarray of bool, shape (p,): Training sites the latent field enters; the "
+        "in_support", "ndarray of bool: Shape ``(p,)``. Training sites the latent field enters; the "
         "observations of the others are missing (NaN) in `y_obs` and do not enter the fit or its "
         "diagnostics. See `fitted_state`.")
-    y_hat = _state_property("y_hat", "ndarray, shape (p, T): In-sample fitted mean; see `fitted_state`.")
+    y_hat = _state_property("y_hat", "ndarray: Shape ``(p, T)``. In-sample fitted mean; see `fitted_state`.")
     Sigma_y_hat = _state_property(
-        "Sigma_y_hat", "ndarray, shape (p, p, T), or None: In-sample state-driven covariance; see `fitted_state`.")
+        "Sigma_y_hat", "ndarray or None: Shape ``(p, p, T)``. In-sample state-driven covariance; see `fitted_state`.")
     x_smoothed = _state_property(
-        "x_smoothed", "ndarray, shape (q, T+1): Smoothed state means (index 0: initial state); see `fitted_state`.")
+        "x_smoothed", "ndarray: Shape ``(q, T+1)``. Smoothed state means (index 0: initial state); see `fitted_state`.")
     P_smoothed = _state_property(
-        "P_smoothed", "ndarray, shape (q, q, T+1): Smoothed state covariances; see `fitted_state`.")
+        "P_smoothed", "ndarray: Shape ``(q, q, T+1)``. Smoothed state covariances; see `fitted_state`.")
     P_pred_smoothed = _state_property(
         "P_pred_smoothed", "ndarray or None: Smoothed lag-one state covariances; see `fitted_state`.")
-    S11 = _state_property("S11", "ndarray, shape (q, q): EM sufficient statistic S11; see `fitted_state`.")
-    S10 = _state_property("S10", "ndarray, shape (q, q): EM sufficient statistic S10; see `fitted_state`.")
-    S00 = _state_property("S00", "ndarray, shape (q, q): EM sufficient statistic S00; see `fitted_state`.")
+    S11 = _state_property("S11", "ndarray: Shape ``(q, q)``. EM sufficient statistic S11; see `fitted_state`.")
+    S10 = _state_property("S10", "ndarray: Shape ``(q, q)``. EM sufficient statistic S10; see `fitted_state`.")
+    S00 = _state_property("S00", "ndarray: Shape ``(q, q)``. EM sufficient statistic S00; see `fitted_state`.")
 
     @property
     def _y_names(self):
@@ -561,9 +597,15 @@ class LRStateSpaceResults(StateSpaceResults):
 
     def get_hessian(self):
         """
-        ndarray : Hessian matrix of the log-likelihood function at the
-        estimated parameters, in the flat order given by `_pack_params`/
-        `theta_hat`. Cached on `self._hessian` after the first call.
+        Hessian matrix of the observed log-likelihood at the estimated
+        parameters, in the flat order of `theta_hat` (free parameters, `x0`
+        and `Sigma0` excluded). Cached after the first call.
+
+        Returns
+        -------
+        H : jax.Array, shape (k, k)
+        tdelta : float
+            Seconds spent computing it (0 when cached).
         """
         if self._hessian is None:
             _, log = self._verbosity(None)
@@ -589,25 +631,17 @@ class LRStateSpaceResults(StateSpaceResults):
 
         # Get the scalar positive log-likelihood function
         logL = observed_loglik(self._fitted_state, self.y_obs, self.Xbeta, x0, Sigma0)
-        # fun(params)
 
         # Pack free params into a flat array
         vec0, meta = _pack_params(params, dtype=self.dtype)
         self._free_meta = meta
 
-        
-        # Wrap fun to accept a flat vector
-        def fun_flat(vec):
-            p = _unpack_params(vec, params, meta)
-            return logL(p)
-
         ts = time.time()
-        # Compute the Hessian using JAX, of the observed log-likelihood function at the argument 0 (params).
-        # Jitted as one program (instead of ~265 eagerly compiled operations),
-        # at full matmul precision like the other kernels (F21, F31).
-        hesfun = jax.jit(_highest_matmul_precision(jax.hessian(fun_flat)))
-        # Evaluate the Hessian at the estimated parameters
-        hessian = hesfun(vec0)
+        # One jitted program at full matmul precision (F21, F31), compiled once
+        # per problem shape and dtype (J2): the data are arguments and the
+        # block sizes static, instead of a new closure (and a new compilation)
+        # for every results object.
+        hessian = _loglik_hessian_of(logL, vec0, params, meta)
         jax.block_until_ready(hessian)
         tdelta = time.time() - ts
 
@@ -852,8 +886,16 @@ class LRStateSpaceResults(StateSpaceResults):
     # Compute AIC and BIC
     def compute_aic(self):
         """
-        Akaike Information Criterion: `2 * k - 2 * llf`, with `k = n_params`
-        (free parameters) and `llf` the fitted log-likelihood.
+        Akaike Information Criterion,
+
+        .. math:: \\mathrm{AIC} = 2k - 2\\ell(\\hat\\theta),
+
+        with :math:`k` = `n_params` (free parameters) and
+        :math:`\\ell(\\hat\\theta)` = `llf`.
+
+        Returns
+        -------
+        float
 
         Raises
         ------
@@ -874,9 +916,16 @@ class LRStateSpaceResults(StateSpaceResults):
 
     def compute_bic(self):
         """
-        Bayesian Information Criterion: `log(nobs) * k - 2 * llf`, with
-        `k = n_params` (free parameters), `nobs` the number of observed
-        values, and `llf` the fitted log-likelihood.
+        Bayesian Information Criterion,
+
+        .. math:: \\mathrm{BIC} = k \\log n - 2\\ell(\\hat\\theta),
+
+        with :math:`k` = `n_params` (free parameters), :math:`n` = `nobs`
+        (observed values) and :math:`\\ell(\\hat\\theta)` = `llf`.
+
+        Returns
+        -------
+        float
 
         Raises
         ------

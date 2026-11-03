@@ -207,11 +207,21 @@ class Param:
         return Param(name=self.name, value=new_value, fixed=self.fixed)
 
     def freeze(self):
-        """Return a copy of this parameter with `fixed=True`."""
+        """Return a copy of this parameter with `fixed=True`.
+
+        Returns
+        -------
+        Param
+        """
         return Param(self.name, self.value, True)
 
     def unfreeze(self):
-        """Return a copy of this parameter with `fixed=False`."""
+        """Return a copy of this parameter with `fixed=False`.
+
+        Returns
+        -------
+        Param
+        """
         return Param(self.name, self.value, False)
 
     @property
@@ -240,6 +250,14 @@ class Param:
     # ------------------------------------------------------------------
 
     def tree_flatten(self):
+        """JAX pytree protocol: ``(children, aux_data)``, with `value` the only
+        child when the parameter is free (see the comment above).
+
+        Returns
+        -------
+        children : tuple
+        aux_data : tuple
+        """
         static_bse = _to_static(self.bse)
         if self.fixed or self.value is None:
             return (), (self.name, self.fixed, _to_static(self.value), static_bse)
@@ -247,6 +265,19 @@ class Param:
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
+        """JAX pytree protocol: rebuild a `Param` from `tree_flatten`'s output.
+
+        Parameters
+        ----------
+        aux_data : tuple
+            ``(name, fixed, static value, static bse)``.
+        children : tuple
+            ``(value,)`` for a free parameter, else empty.
+
+        Returns
+        -------
+        Param
+        """
         name, fixed, static_value, static_bse = aux_data
         value = children[0] if children else _from_static(static_value)
         bse = _from_static(static_bse)
@@ -326,11 +357,21 @@ class ModelParams:
         return Param(name=name, value=_safe_asarray(value), fixed=False)
 
     def as_dict(self):
-        """dict: Map each field name to its `Param.value` (fixed and free)."""
+        """Map each field name to its `Param.value` (fixed and free).
+
+        Returns
+        -------
+        dict
+        """
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}
 
     def free_params(self):
-        """dict: Map each non-fixed field name to its `Param.value`."""
+        """Map each non-fixed field name to its `Param.value`.
+
+        Returns
+        -------
+        dict
+        """
         return {
             k: getattr(self, k).value
             for k in self.__dataclass_fields__
@@ -342,13 +383,22 @@ class ModelParams:
 
     @property
     def size(self):
+        """int: Total number of elements of all the parameter values."""
         return self.__len__()
 
     @property
     def shape(self):
+        """tuple: ``(size,)``, the shape of the flattened parameters."""
         return (self.size,)
 
     def tree_flatten(self):
+        """JAX pytree protocol: the seven `Param` fields as children.
+
+        Returns
+        -------
+        children : tuple of Param
+        aux_data : None
+        """
         children = (
             self.beta,
             self.s2e,
@@ -362,6 +412,17 @@ class ModelParams:
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
+        """JAX pytree protocol: rebuild a `ModelParams` from its children.
+
+        Parameters
+        ----------
+        aux_data : None
+        children : tuple of Param
+
+        Returns
+        -------
+        ModelParams
+        """
         return cls(*children)
 
     def __str__(self):
@@ -386,7 +447,12 @@ class ModelParams:
         return self.__str__()
 
     def copy(self):
-        """Return a deep copy of the ModelParams."""
+        """Return a deep copy of the ModelParams.
+
+        Returns
+        -------
+        ModelParams
+        """
         def _cp(p):
             return Param(
                 p.name,

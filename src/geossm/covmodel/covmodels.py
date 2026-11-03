@@ -299,6 +299,16 @@ class FEMSolver(_Verbose):
         Sardinia, mainland Italy) a mesh vertex sitting between two
         landmasses, inside their shared convex hull but outside every
         individual polygon, is classified as outer.
+
+        Parameters
+        ----------
+        points : (n, 2) array_like, optional
+            Points to classify. Defaults to the mesh vertices (`vertex`).
+
+        Returns
+        -------
+        ndarray of bool, shape (n,)
+            True for the points covered by a polygon of `domain`.
         """
         # Use provided domain polygons
         if points is not None:
@@ -555,7 +565,18 @@ class FEMSolver(_Verbose):
         )
 
     def distance(self, points=None):
-        """Alias for `get_distance`."""
+        """
+        Alias for `get_distance`.
+
+        Parameters
+        ----------
+        points : (p, 2) array_like, optional
+            Query points; see `get_distance`.
+
+        Returns
+        -------
+        ndarray, shape (nvertex, nvertex) or (p, nvertex)
+        """
 
         return self.get_distance(points=points)
 
@@ -655,6 +676,10 @@ class FEMSolver(_Verbose):
         the mesh vertices covers `domain_hull`, the convex hull of the union
         of `domain`. Does not check the mesh's actual (possibly non-convex)
         boundary shape, only its convex extent.
+
+        Returns
+        -------
+        bool
         """
         mesh_hull = MultiPoint(self.vertex[:, :2]).convex_hull
         return mesh_hull.covers(self.domain_hull)
@@ -864,8 +889,13 @@ class FEMSolver(_Verbose):
 
 
     def generate_summary(self):
-        """Build the (label, value) rows shown by `summary`, as two lists
-        of ``(str, [str])`` pairs (left and right columns)."""
+        """Build the (label, value) rows shown by `summary` (left and right
+        columns).
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list of str)
+        """
         # compute the angles and areas of the triangles
 
         top_left = dict(
@@ -913,7 +943,12 @@ class FEMSolver(_Verbose):
     def summary(self):
         """Return a `statsmodels.iolib.summary.Summary` table of mesh/FE
         diagnostics (vertex/element counts, angle & area ranges, DOFs,
-        matrix shapes, ...); also backs `__str__`."""
+        matrix shapes, ...); also backs `__str__`.
+
+        Returns
+        -------
+        statsmodels.iolib.summary.Summary
+        """
 
 
         # Add the header to the summary
@@ -1095,6 +1130,12 @@ class SPDEApproxCov(_Verbose, Matern):
            "Gaussian processes in machine learning." Summer school on
            machine learning. Springer, Berlin, Heidelberg, (2003)
     """
+
+    # gstools' CovModel.__init_subclass__ appends the CovModel constructor
+    # parameters (len_scale, anis, dim, ...) to the class docstring; this
+    # class does not take them (see `__init__`), so its own docstring is
+    # restored after the class is created (below the class body).
+    _OWN_DOC = __doc__
 
     def __init__(
         self, latlon=True, geo_scale=gs.DEGREE_SCALE, nu=1, var=1.0, rescale=1.0, verbose=False
@@ -1425,6 +1466,18 @@ class SPDEApproxCov(_Verbose, Matern):
         operator that this distance correction does not fix; for a
         geodesically accurate SPDE solve, build the mesh in a projected
         (e.g. UTM/km) CRS instead.
+
+        Parameters
+        ----------
+        points : (p, 2) array_like, optional
+            Query points (lon, lat when `latlon=True`). Defaults to the mesh
+            vertices.
+
+        Returns
+        -------
+        ndarray, shape (nvertex, nvertex) or (p, nvertex)
+            Great-circle distance in `geo_scale` units if `latlon`, else
+            Euclidean distance in mesh units.
         """
         if not self.latlon:
             return self._fem_solver.distance(points=points)
@@ -1492,6 +1545,10 @@ class SPDEApproxCov(_Verbose, Matern):
         """
         Check that the mesh (set via `setup()`) covers `domain_hull`. See
         `FEMSolver.covers_domain`.
+
+        Returns
+        -------
+        bool
         """
         return self.fem_solver.covers_domain()
 
@@ -1499,7 +1556,12 @@ class SPDEApproxCov(_Verbose, Matern):
     def generate_summary(self):
         """Build the (label, value) rows shown by `summary`, as two lists
         of ``(str, [str])`` pairs (left and right columns); includes the
-        `fem_solver`'s own rows once `setup()` has been called."""
+        `fem_solver`'s own rows once `setup()` has been called.
+
+        Returns
+        -------
+        gen_top_left, gen_top_right : list of (str, list of str)
+        """
 
         top_left = dict(
                     [
@@ -1539,7 +1601,12 @@ class SPDEApproxCov(_Verbose, Matern):
     def summary(self):
         """Return a `statsmodels.iolib.summary.Summary` table of the model
         (kappa/range/variance/nu) and, once `setup()` has been called, the
-        underlying `fem_solver`'s mesh diagnostics; also backs `__str__`."""
+        underlying `fem_solver`'s mesh diagnostics; also backs `__str__`.
+
+        Returns
+        -------
+        statsmodels.iolib.summary.Summary
+        """
 
         gen_top_left, gen_top_right = self.generate_summary()
 
@@ -1588,3 +1655,7 @@ class SPDEApproxCov(_Verbose, Matern):
 
     
 
+
+
+SPDEApproxCov.__doc__ = SPDEApproxCov._OWN_DOC  # see `_OWN_DOC` in the class body
+del SPDEApproxCov._OWN_DOC

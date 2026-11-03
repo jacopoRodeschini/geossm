@@ -49,6 +49,17 @@ class LRPredictionResults:
     y_pred_back_list, Sigma_y_pred_back_list : list of numpy.ndarray or None
         Original-scale predictions (delta method), set by `back_transform`.
 
+    Parameters
+    ----------
+    fitted_state : FittedState
+        State of the fit the predictions come from.
+    y_pred, Sigma_y_pred, var_pred, points, block_p, timestamps, crs, tdelta, in_support
+        Values of the attributes of the same name; `var_pred` defaults to
+        the diagonal of `Sigma_y_pred`. Built by
+        `LRStateSpaceResults.get_prediction`; not meant to be called directly.
+
+    Examples
+    --------
     Typical usage::
 
         pred = results.get_prediction(grid)
@@ -157,6 +168,10 @@ class LRPredictionResults:
         `std_pred_back_<var>` after `back_transform`), in the dtype of the
         fit, and `in_support_<var>` (see `in_support`). `std_*` is the
         standard deviation of the latent mean (no measurement error).
+
+        Returns
+        -------
+        geopandas.GeoDataFrame
         """
         back_var = (None if self.Sigma_y_pred_back_list is None
                     else [diag_variance(S) for S in self.Sigma_y_pred_back_list])
