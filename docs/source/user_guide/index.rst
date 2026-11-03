@@ -16,9 +16,13 @@ The typical pipeline is:
    matrices or, for large spatial domains, through the low-rank model
    that ties the previous two steps together.
 
+:doc:`model_formulation` draws the whole pipeline and gives the model, the
+estimation algorithm and the reported quantities in formulas.
+
 .. toctree::
    :maxdepth: 1
 
+   model_formulation
    data_preparation
    covariance_models
    state_space_models

@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from geossm.ssm import StateSpaceModel, StateSpaceResults
-from tests._known_bugs import known_bug
 from tests._printing import assert_printing_is_side_effect_free
 from tests._reference import kalman_filter, rts_smoother
 
@@ -50,14 +49,11 @@ class TestConstruction:
         m = _model(problem, dtype=jnp.float64)
         assert m.dtype == jnp.float64 and m.H.dtype == jnp.float64
 
-    @known_bug("F11", "the default Xbeta has shape (p, 1, 1), so filtering T > 1 fails",
-               raises=ValueError)
     def test_filter_without_covariates(self, problem):
         m = StateSpaceModel(H=problem.H, R=problem.R, F=problem.F, Q=problem.Q, backend="cpu")
         res = m.filter(problem.y)
         assert res.x_filtered.shape == (problem.q, problem.T + 1)
 
-    @known_bug("F11", "a wrongly shaped y is reported as an H/R/Xbeta shape error")
     def test_wrong_y_shape_error_names_y(self, problem):
         m = _model(problem)
         with pytest.raises(ValueError, match="y"):

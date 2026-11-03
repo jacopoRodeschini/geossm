@@ -36,32 +36,13 @@ from geossm.utils import KeyStream
 from datetime import date
 from statsmodels.iolib.summary import Summary
 from .statespace_results import StateSpaceResults
-from geossm.utils import _select_device, _to_backend, _on_device, format_info_table, _summary_table_source
+from geossm.utils import _select_device, _to_backend, _on_device, _on_backend_arg, format_info_table, _summary_table_source
+from geossm.utils import _check_x64_for_dtype
 
 
 def _itype_for(dtype):
     """Integer dtype matching the precision of a given float dtype (32<->32, 64<->64)."""
     return jnp.int64 if jnp.dtype(dtype).itemsize == 8 else jnp.int32
-
-
-# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
-_X64_REQUIRED_MSG = (
-    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
-    "program start, before any JAX array is created: "
-    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
-    "geossm does not switch it on itself because it is a process-wide setting."
-)
-
-
-def _check_x64_for_dtype(dtype):
-    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
-
-    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
-    enabled. Enabling it is a process-wide setting, so it is left to the user
-    rather than switched on here (finding F03).
-    """
-    if jnp.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        raise ValueError(_X64_REQUIRED_MSG.format(dtype=jnp.dtype(dtype).name))
 
 
 def _highest_matmul_precision(f):
@@ -70,13 +51,12 @@ def _highest_matmul_precision(f):
     On GPU, JAX's default (unset) matmul precision can route float32 `@`/dot
     ops through reduced-precision tensor-core kernels (e.g. TensorFloat32,
     ~10-bit mantissa vs float32's 23-bit). That's usually an acceptable
-    tradeoff, but the Kalman covariance update here (P_upd = P_pred - K @ H @
-    P_pred) subtracts two similar-magnitude matrices, and reduced-precision
-    matmul error gets amplified by that cancellation into an outright
-    indefinite P_pred at the next step (eigenvalues off by ~1e-1, not
-    ~1e-7) -- far too large for any reasonable Cholesky jitter to absorb.
-    Forcing "highest" precision here matches CPU's (always full-precision)
-    behavior and is what actually fixes it, not a bigger jitter.
+    tradeoff, but the Kalman recursions here are sensitive to it: with the
+    former covariance-form update (P_upd = P_pred - K @ H @ P_pred, two
+    similar-magnitude matrices subtracted) reduced-precision matmul error was
+    amplified into an outright indefinite P_pred at the next step
+    (eigenvalues off by ~1e-1, not ~1e-7). Forcing "highest" precision here
+    matches CPU's (always full-precision) behavior.
 
     Applied as the innermost decorator (below @jit) so the precision is baked
     into the compiled kernel at trace time, regardless of whatever ambient
@@ -94,8 +74,7 @@ def _highest_matmul_precision(f):
 @_highest_matmul_precision
 def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
     """Simulate a trajectory forward from the state-space model, using a
-    Python ``for`` loop over time (not ``jax.lax.scan``, despite the
-    docstring of the historical/commented-out ``@jit`` variant below).
+    Python ``for`` loop over time (not ``jax.lax.scan``).
 
     Draws :math:`x_0 \\sim N(x_0, \\Sigma_0)` and then, for
     :math:`t = 0, \\dots, T-1`, generates
@@ -174,43 +153,6 @@ def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
 
     return final_y_t, final_x_t
 
-""" 
-@jit
-def _sim_kernelJAX(keys, H, R, F, Q, x0, Sigma0, Xbeta, beta):
-    ```Simulate a linear Gaussian SSM with JAX primitives (GPU-friendly).```
-    T = Xbeta.shape[2]
-    p = R.shape[0]
-    q = F.shape[0]
-
-    chol_R = jnp.linalg.cholesky(R)
-    chol_Q = jnp.linalg.cholesky(Q)
-    chol_Sigma0 = jnp.linalg.cholesky(Sigma0)
-
-    key0, key_obs, key_state = jax.random.split(keys, 3)
-    eps0 = jax.random.normal(key0, shape=(q,), dtype=jnp.float32)
-    obs_eps = jax.random.normal(key_obs, shape=(T, p), dtype=jnp.float32)
-    state_eps = jax.random.normal(key_state, shape=(T, q), dtype=jnp.float32)
-
-    x_init = x0 + chol_Sigma0 @ eps0
-    fixed_effect = jnp.einsum("pkt,k->pt", Xbeta, beta)
-
-    def step(x_curr, inputs):
-        obs_eps_t, state_eps_t, fe_t = inputs
-        y_t = fe_t + H @ x_curr + chol_R @ obs_eps_t
-        x_next = F @ x_curr + chol_Q @ state_eps_t
-        return x_next, (y_t, x_next)
-
-    _, (y_hist, x_next_hist) = jax.lax.scan(
-        step,
-        x_init,
-        (obs_eps, state_eps, fixed_effect.T),
-    )
-
-    y_t = y_hist.T
-    x_t = jnp.concatenate([x_init[:, None], x_next_hist.T], axis=1)
-
-    return y_t, x_t
-"""
 
 @jit
 @_highest_matmul_precision
@@ -239,6 +181,18 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         M &= P_{t|t-1}^{-1} + H^T R^{-1} H \\\\
         \\Sigma_{e,t}^{-1} &= R^{-1} - R^{-1} H\\, M^{-1} H^T R^{-1} \\\\
         |\\Sigma_{e,t}| &= |M|\\, |P_{t|t-1}|\\, |R|
+
+    The update uses the information form of the same quantities,
+
+    .. math::
+        P_{t|t} = M^{-1}, \\qquad K_t = M^{-1} H^T R^{-1},
+
+    equal to the expressions above (Woodbury and push-through identities)
+    but without the subtraction :math:`P_{t|t-1} - K_t H P_{t|t-1}`, which
+    cancels catastrophically when ``R`` is small relative to the state
+    variance (indefinite or NaN covariances, finding F34). ``M^{-1}`` comes
+    from the Cholesky factor of ``M``, so :math:`P_{t|t}` is symmetric
+    positive definite by construction.
 
     This is what lets ``p`` (the number of observed locations, the
     dimension a low-rank spatial model is meant to scale in) stay out of
@@ -342,7 +296,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         # it used to also be stacked into the scan history for the smoother to
         # reuse, but that duplicated a full (q, q, T) array for something the
         # smoother can recompute inline from the (already stored) P_t_1.
-        #invP_pred = solve(P_pred, Iq)
         L_P = jnp.linalg.cholesky(P_pred)
         invL_P = jax.scipy.linalg.solve_triangular(L_P, Iq, lower=True)
         invP_pred = invL_P.T @ invL_P
@@ -361,29 +314,16 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         invL_M = jax.scipy.linalg.solve_triangular(L_M, Iq, lower=True)
         invM = invL_M.T @ invL_M
 
-        # KALMAN GAIN
-        # K = P_pred @ H.T @ invSigmaE, where (Woodbury identity)
-        #   invSigmaE = invR - invR @ H @ invM @ H.T @ invR
-        # Expanded and regrouped in terms of HtinvR/HtinvRH so the dense
-        # (p, p) invSigmaE is never formed:
-        #   K = P_pred @ (HtinvR - HtinvRH @ invM @ HtinvR)
-        K = P_pred @ (HtinvR - HtinvRH @ (invM @ HtinvR))
-
-        # UPDATE STATE
+        # KALMAN GAIN and UPDATE, information form (F34):
+        # K = P_pred H' S^-1 = M^-1 H' R^-1 and P_upd = P_pred - K H P_pred
+        # = M^-1 (push-through / Woodbury identities), without the
+        # cancelling subtraction; symmetrised against rounding
+        K = invM @ HtinvR
         x_upd = x_pred + K @ e
-        P_upd = P_pred - K @ Hna_dense @ P_pred
-        # Joseph form for P_upd keep the update symmetric and PD
-        # IKH = (Iq - K @ Hna_dense)
-        # P_upd =  IKH @ P_pred @ IKH.T + K @ R @ K.T
+        P_upd = 0.5 * (invM + invM.T)
 
 
         # LOG-LIKELIHOOD
-        # logdetSigmaE = (
-        #     jnp.linalg.slogdet(M)[1]
-        #     + jnp.linalg.slogdet(P_pred)[1]
-        #     + jnp.sum(jnp.log(R_diag))
-        # )
-
         logdet_M    = 2.0 * jnp.sum(jnp.log(jnp.diag(L_M)))
         logdet_Ppred = 2.0 * jnp.sum(jnp.log(jnp.diag(L_P)))
         # With the missing rows of H zeroed, the innovation covariance is
@@ -441,8 +381,6 @@ def _filter_kernelJAX(y_t, H, R, F, Q, x0, Sigma0, Xbeta, beta):
         [jnp.zeros(Sigma0.shape, dtype=dtype)[:, :, None], P_t_1], axis=2
     )
     logL = -0.5 * final_logL
-
-    # jax.block_until_ready(x_t)
 
     return x_t, P_t, K, x_t_1, P_t_1, logL
 
@@ -797,6 +735,31 @@ def _compute_predict_sigma_kernel_JAX(H, P_T):
     return Sigma_y_hat
 
 
+@jit
+@_highest_matmul_precision
+def _compute_predict_var_kernel_JAX(H, P_T):
+    """Diagonal of `_compute_predict_sigma_kernel_JAX`: the point-wise
+    state-driven predictive variance, without building the (p, p, T)
+    covariance.
+
+    .. math::
+        \\mathrm{var}(\\hat y_{i, t}) = h_i^T P_{t|T} h_i
+
+    Parameters
+    ----------
+    H : jax.numpy.ndarray, shape (p, q)
+        Observation matrix.
+    P_T : jax.numpy.ndarray, shape (q, q, T+1)
+        State covariances; index 0 (the prior) is dropped.
+
+    Returns
+    -------
+    var_y_hat : jax.numpy.ndarray, shape (p, T)
+        Diagonal of :math:`H P_{t|T} H^T` (excludes observation noise ``R``).
+    """
+    return jnp.einsum("ip,pqt,iq->it", H, P_T[:, :, 1:], H)
+
+
 # %% State Space Model Class
 class StateSpaceModel:
     """A linear-Gaussian state-space model with Kalman filtering,
@@ -831,6 +794,7 @@ class StateSpaceModel:
     `_prepare_diag_array`); ``H`` and ``Q`` are general dense matrices.
     """
 
+    @_on_backend_arg
     def __init__(
         self,
         H=None,
@@ -936,8 +900,10 @@ class StateSpaceModel:
         if Sigma0 is None and F is not None and Q is not None:
             Sigma0 = jnp.eye(F.shape[0])
 
-        # Set default Xbeta and beta if not provided
-        if Xbeta is None and H is not None:
+        # Set default Xbeta and beta if not provided: no covariates (one zero
+        # column), resized to the number of time steps of the data (see `set`)
+        xbeta_default = Xbeta is None and H is not None
+        if xbeta_default:
             Xbeta = jnp.zeros((H.shape[0], 1, 1))
         if beta is None and Xbeta is not None:
             beta = jnp.zeros(Xbeta.shape[1])
@@ -954,6 +920,7 @@ class StateSpaceModel:
             beta=beta,
             xbeta_names=xbeta_names,
         )
+        self._Xbeta_default = xbeta_default
 
         # Check parameters only if the key parameters are set (allow for partial initialization)
         if (
@@ -983,6 +950,7 @@ class StateSpaceModel:
         """
         return self.smoother(y_t)
 
+    @_on_device
     def set(
         self,
         H=None,
@@ -995,7 +963,7 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names=None,
-        yname=None,
+        y_name=None,
     ):
         """Update any subset of the model's system matrices/metadata in place.
 
@@ -1028,7 +996,7 @@ class StateSpaceModel:
             Regression coefficients for ``Xbeta``.
         xbeta_names : list of str, optional
             Names for the exogenous regression terms.
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
 
         Returns
@@ -1048,7 +1016,7 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
+            y_name=y_name,
         )
 
     def _update_parameters(
@@ -1063,7 +1031,7 @@ class StateSpaceModel:
         Xbeta=None,
         beta=None,
         xbeta_names = None,
-        yname = None,
+        y_name = None,
     ):
         """
         Helper function to update model parameters if provided.
@@ -1098,6 +1066,7 @@ class StateSpaceModel:
         if Xbeta is not None:
             Xbeta_arr = self._prepare_array(Xbeta)
             self._Xbeta = Xbeta_arr
+            self._Xbeta_default = False
 
             # infer (p, b, T) when possible
             if Xbeta_arr.ndim >= 3:
@@ -1155,15 +1124,18 @@ class StateSpaceModel:
 
         if y_t is not None:
             self._y_t = self._prepare_array(y_t)
-            self._p = self._y_t.shape[0]
+            if self._p is None:  # otherwise set by H; `_check_y_t` validates y_t against it
+                self._p = self._y_t.shape[0]
             self._T = self._y_t.shape[1]
+            if getattr(self, "_Xbeta_default", False) and self._Xbeta.shape[2] != self._T:
+                self._Xbeta = self._prepare_array(jnp.zeros((self._Xbeta.shape[0], self._Xbeta.shape[1], self._T)))
 
-        if yname is not None:
-            self._yname = yname
-        elif self._p is not None:
-            self._yname = "y"
-        else:
-            self._yname = None
+        if y_name is not None:
+            self._y_name = y_name
+        elif getattr(self, "_y_name", None) is None and self._p is not None:
+            self._y_name = "y"
+        elif not hasattr(self, "_y_name"):
+            self._y_name = None
 
         # update the params attributes
         self._params = self._beta
@@ -1235,22 +1207,6 @@ class StateSpaceModel:
         if not flag:
             return flag, "\n".join(messages)
 
-        # Helper: check positive semidefinite (symmetric) with tolerance
-        def is_pos_semidef(mat):
-            A = jnp.asarray(mat)
-            if A.ndim != 2 or A.shape[0] != A.shape[1]:
-                return False
-            # symmetry check
-            if not jnp.allclose(A, A.T, atol=1e-8):
-                return False
-            # eigenvalues >= -tol
-            eigs = jnp.linalg.eigvalsh(A)
-            return jnp.all(eigs >= -1e-8)
-        # Sigma0: should be (q, q)
-        sigma0_shape = shape_str(self.Sigma0)
-        if sigma0_shape not in [(q, q), (q,), (q,)]:
-            messages.append(f"Sigma0 must be shape ({q},{q}), got {sigma0_shape}.")
-            flag = False
 
         # H: (p, q)
         H_shape = shape_str(self.H)
@@ -1284,10 +1240,6 @@ class StateSpaceModel:
         if Q_shape != (q, q):
             messages.append(f"Q must be shape ({q},{q}), got {Q_shape}.")
             flag = False
-        # else:
-        #    if not is_pos_semidef(self.Q):
-        #        messages.append("Q must be symmetric positive semidefinite.")
-        #        flag = False
 
         # x0: (q,)
         x0_shape = shape_str(self.x0)
@@ -1300,29 +1252,15 @@ class StateSpaceModel:
         if Sigma0_shape != (q, q):
             messages.append(f"Sigma0 must be shape ({q},{q}), got {Sigma0_shape}.")
             flag = False
-        # Check positive semidefinite
-        # else:
-        #     if not is_pos_semidef(self.Sigma0):
-        #         messages.append(
-        #             "Sigma0 must be symmetric positive semidefinite.")
-        #         flag = False
 
         # Xbeta: (p, b, T)
-        if self.Xbeta is None:
-            messages.append("Set Xbeta to a default zero array of shape (p, b, T) before checking.")
-            self._Xbeta = self._prepare_array(jnp.zeros((p, b, T)))
-
-        Xbeta_shape = shape_str(self.Xbeta)
+        Xbeta_shape = shape_str(self.Xbeta) if self.Xbeta is not None else None
         if Xbeta_shape != (p, b, T):
             messages.append(f"Xbeta must be shape ({p},{b},{T}), got {Xbeta_shape}.")
             flag = False
 
         # beta: (b,)
-        if self.beta is None:
-            messages.append("Set beta to a default zero array of shape (b,) before checking.")
-            self._beta = self._prepare_array(jnp.zeros((b,)))
-
-        beta_shape = shape_str(self.beta)
+        beta_shape = shape_str(self.beta) if self.beta is not None else None
         if beta_shape != (b,):
             messages.append(f"beta must be shape ({b},), got {beta_shape}.")
             flag = False
@@ -1331,22 +1269,25 @@ class StateSpaceModel:
 
     def _check_y_t(self, y_t):
         """
-        Check the shape of the observed data y_t.
+        Check the shape of the observed data `y_t` (p, T) against `H` (p
+        rows) and, unless it is the default, `Xbeta` (T time steps).
         """
-        flag = True
-        y_t_shape = y_t.shape
-
-        expected_shape = (self.p, self.T)
-        msg = ""
-        if y_t_shape != expected_shape:
-            msg = f"y_t must be shape {expected_shape}, got {y_t_shape}."
-        return flag, msg
+        shape = tuple(jnp.shape(y_t))
+        if len(shape) != 2:
+            return False, f"y_t must be 2-D, shape (p, T), got {shape}."
+        if self.p is not None and shape[0] != self.p:
+            return False, (f"y_t has {shape[0]} rows, but the model has p = {self.p} observed "
+                           "variables (rows of H).")
+        if (self.Xbeta is not None and not getattr(self, "_Xbeta_default", False)
+                and self.Xbeta.ndim == 3 and shape[1] != self.Xbeta.shape[2]):
+            return False, f"y_t has {shape[1]} time steps, but Xbeta has {self.Xbeta.shape[2]}."
+        return True, ""
 
     @_on_device
     def estimate(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1371,7 +1312,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1391,7 +1332,7 @@ class StateSpaceModel:
         """
         return self.smoother(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1432,7 +1373,8 @@ class StateSpaceModel:
         std : bool, default True
             If `False`, skip the predictive covariance and return `None`
             for it -- useful when the ``(p, p, T)`` array does not fit in
-            device memory.
+            device memory. ``std`` switches the whole covariance (the
+            standard deviations are the square roots of its diagonal).
 
         Returns
         -------
@@ -1458,7 +1400,7 @@ class StateSpaceModel:
     def _run_filter_kernel(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1487,20 +1429,19 @@ class StateSpaceModel:
             Q=Q,
             x0=x0,
             Sigma0=Sigma0,
-            y_t=y_t,
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
         )
+
+        # Check y_t against the model before it is set (an error names y_t)
+        flag, msg = self._check_y_t(y_t)
+        if not flag:
+            raise ValueError(msg)
+        self.set(y_t=y_t, y_name=y_name)
 
         # Check parameters
         flag, msg = self._check_parameters()
-        if not flag:
-            raise ValueError(msg)
-
-        # check y_t
-        flag, msg = self._check_y_t(y_t)
         if not flag:
             raise ValueError(msg)
 
@@ -1527,7 +1468,7 @@ class StateSpaceModel:
     def filter(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1550,7 +1491,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1570,7 +1511,7 @@ class StateSpaceModel:
         """
         x_t, P_t, K, x_t_1, P_t_1, logL, tDelta = self._run_filter_kernel(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1583,7 +1524,7 @@ class StateSpaceModel:
         )
 
         # compute expected values (given the filterd values)
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+        y_hat, S11, S10, S00, tdelta_expectation = self.compute_expected_values(
             x_t, P_t, P_t_1
         )
 
@@ -1604,13 +1545,12 @@ class StateSpaceModel:
         )
 
         return results
-        # return (x_t, P_t, K, x_t_1, P_t_1, logL, tDelta)
 
     @_on_device
     def smoother(
         self,
         y_t,
-        yname=None,
+        y_name=None,
         H=None,
         R=None,
         F=None,
@@ -1635,7 +1575,7 @@ class StateSpaceModel:
         ----------
         y_t : array_like, shape (p, T)
             Observed data (may contain ``NaN`` for missing entries).
-        yname : str, optional
+        y_name : str, optional
             Name for the dependent variable (used in summaries).
         H, R, F, Q, x0, Sigma0, Xbeta, beta, xbeta_names : optional
             Overrides for the corresponding model parameters; see `set`.
@@ -1673,7 +1613,7 @@ class StateSpaceModel:
         # stay on-device until the smoother kernel has consumed them.
         x_t, P_t, K, x_t_1, P_t_1, logL, tDelta_filter = self._run_filter_kernel(
             y_t,
-            yname=yname,
+            y_name=y_name,
             H=H,
             R=R,
             F=F,
@@ -1701,7 +1641,7 @@ class StateSpaceModel:
         td_smoother = time.time() - tStart
 
         # compute expected values (given the smoothed values)
-        y_hat, S11, S10, S00, tdelta_expectation = self.computeExpectedValues(
+        y_hat, S11, S10, S00, tdelta_expectation = self.compute_expected_values(
             x_T, P_T, P_T_1
         )
 
@@ -1727,7 +1667,7 @@ class StateSpaceModel:
 
         return results
 
-    def computeExpectedValues(self, x_T, P_T, P_T_1) -> tuple:
+    def compute_expected_values(self, x_T, P_T, P_T_1) -> tuple:
         """Compute predicted observations and EM sufficient statistics
         from a set of state means/covariances (filtered or smoothed).
 
@@ -1833,7 +1773,7 @@ class StateSpaceModel:
         """
         # Update parameters if provided
         xbeta_names = None
-        yname = None
+        y_name = None
         self.set(
             H=H,
             R=R,
@@ -1844,7 +1784,7 @@ class StateSpaceModel:
             Xbeta=Xbeta,
             beta=beta,
             xbeta_names=xbeta_names,
-            yname=yname,
+            y_name=y_name,
         )
 
         # Check parameters
@@ -1887,7 +1827,8 @@ class StateSpaceModel:
         return y_t_sim, x_t_sim, stats, tdelta
 
 
-    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=True) -> dict:
+    @_on_device
+    def summarize_ssm_variances(self, x_sim, y_sim, block_p, block_q, decimals=4, verbose=False) -> dict:
         """Compute (and optionally print) a compact summary comparing
         theoretical (model-implied) and empirical (simulation-based)
         variances of the latent effect, observation noise and response.
@@ -1920,8 +1861,9 @@ class StateSpaceModel:
             Block boundaries along the latent dimension ``q``.
         decimals : int, default 4
             Currently unused by this implementation.
-        verbose : bool, default True
-            If True, print a formatted summary table.
+        verbose : bool, default False
+            If True, also print a formatted summary table (the values are
+            returned either way).
 
         Returns
         -------
@@ -1955,11 +1897,6 @@ class StateSpaceModel:
         # call (which would otherwise need a dense (q, q) F reconstructed just
         # for this one-off simulation-stats call).
         P = Q / (1.0 - jnp.outer(F, F))
-
-        # Theoretical latent variance
-        # temp = jnp.diag(H @ P @ H.T)
-        # temp = jnp.diag(P)
-        # var_z_t = jnp.array([float(jnp.sum(temp[block_q[i]:block_q[i+1]]) / (block_q[i+1] - block_q[i])) for i in range(len(block_q)-1)])
 
         # Theoretical variance of the latent effect (H @ x_t) is H P H^T
         temp = jnp.diag(H @ P @ H.T)
@@ -2043,7 +1980,7 @@ class StateSpaceModel:
 
     @property
     def y_t(self):
-        """jax.numpy.ndarray, shape (p, T): Currently-set observed data
+        """jax.numpy.ndarray: Shape ``(p, T)``. Currently-set observed data
         (may contain ``NaN`` for missing entries)."""
         return self._y_t
 
@@ -2085,13 +2022,15 @@ class StateSpaceModel:
         self._xbeta_names = value
 
     @property
-    def yname(self):
-        """str: Name of the dependent variable ``y``, used in summaries."""
-        return self._yname
+    def y_name(self):
+        """str: Name of the dependent variable ``y``, used in summaries
+        (a list of names, one per response variable, on
+        `LRStateSpaceModel`)."""
+        return self._y_name
 
-    @yname.setter
-    def yname(self, value):
-        self._yname = value
+    @y_name.setter
+    def y_name(self, value):
+        self._y_name = value
 
     @property
     def type(self):
@@ -2121,7 +2060,7 @@ class StateSpaceModel:
 
     @property
     def Xbeta(self):
-        """jax.numpy.ndarray, shape (p, b, T): Exogenous regressors
+        """jax.numpy.ndarray: Shape ``(p, b, T)``. Exogenous regressors
         entering the observation equation as ``X_t @ beta``."""
         return self._Xbeta
 
@@ -2132,7 +2071,7 @@ class StateSpaceModel:
 
     @property
     def beta(self):
-        """jax.numpy.ndarray, shape (b,): Regression coefficients for
+        """jax.numpy.ndarray: Shape ``(b,)``. Regression coefficients for
         `Xbeta`."""
         return self._beta
 
@@ -2143,7 +2082,7 @@ class StateSpaceModel:
 
     @property
     def H(self):
-        """jax.numpy.ndarray, shape (p, q): Observation/design matrix
+        """jax.numpy.ndarray: Shape ``(p, q)``. Observation/design matrix
         mapping the latent state to the mean of ``y_t``."""
         return self._H
 
@@ -2154,7 +2093,7 @@ class StateSpaceModel:
 
     @property
     def R(self):
-        """jax.numpy.ndarray, shape (p,): Diagonal of the observation
+        """jax.numpy.ndarray: Shape ``(p,)``. Diagonal of the observation
         noise covariance matrix ``R`` (variance of ``e_t`` per observed
         location/variable)."""
         return self._R
@@ -2166,7 +2105,7 @@ class StateSpaceModel:
 
     @property
     def F(self):
-        """jax.numpy.ndarray, shape (q,): Diagonal of the state
+        """jax.numpy.ndarray: Shape ``(q,)``. Diagonal of the state
         transition matrix ``F``."""
         return self._F
 
@@ -2177,7 +2116,7 @@ class StateSpaceModel:
 
     @property
     def Q(self):
-        """jax.numpy.ndarray, shape (q, q): Process noise covariance
+        """jax.numpy.ndarray: Shape ``(q, q)``. Process noise covariance
         matrix (covariance of ``eta_t`` in the state equation)."""
         return self._Q
 
@@ -2188,13 +2127,13 @@ class StateSpaceModel:
 
     @property
     def x0(self):
-        """jax.numpy.ndarray, shape (q,): Mean of the initial state
+        """jax.numpy.ndarray: Shape ``(q,)``. Mean of the initial state
         :math:`x_0`."""
         return self._x0
 
     @property
     def Sigma0(self):
-        """jax.numpy.ndarray, shape (q, q): Covariance of the initial
+        """jax.numpy.ndarray: Shape ``(q, q)``. Covariance of the initial
         state :math:`x_0`."""
         return self._Sigma0
 
@@ -2222,6 +2161,7 @@ class StateSpaceModel:
             "x0": to_np(self._x0),
             "Sigma0": to_np(self._Sigma0),
             "Xbeta": to_np(self._Xbeta),
+            "Xbeta_default": getattr(self, "_Xbeta_default", False),
             "beta": to_np(self._beta),
             "T": self._T,
             "p": self._p,
@@ -2235,7 +2175,7 @@ class StateSpaceModel:
             "today": self._today,
             "type": self._type,
             "order": self._order,
-            "yname": self._yname,
+            "y_name": self._y_name,
             "xbeta_names": self._xbeta_names,
         }
         return state
@@ -2287,6 +2227,7 @@ class StateSpaceModel:
         self._beta = to_jax(state.get("beta", None))
 
         self._T = state.get("T", None)
+        self._Xbeta_default = state.get("Xbeta_default", False)
         self._p = state.get("p", None)
         self._q = state.get("q", None)
         self._b = state.get("b", None)
@@ -2296,7 +2237,7 @@ class StateSpaceModel:
         self._today = state.get("today", date.today())
         self._type = state.get("type", "Linear (Gaussian)")
         self._order = state.get("order", "(1, 0)")
-        self._yname = state.get("yname", None)
+        self._y_name = state.get("y_name", None)
         self._xbeta_names = state.get("xbeta_names", None)
         self._y_t = None
         self._params = self._beta

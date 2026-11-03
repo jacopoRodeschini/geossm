@@ -4,9 +4,10 @@
 Created on Fri Jan  2 23:41:43 2026
 
 @author: jacopo
-"""
+# pip install geossm
 
-# %%
+"""
+# %% [Imports]
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -14,17 +15,12 @@ import pickle
 import jax
 import geossm
 
-# %% import and check the version
-# pip install -e geossm
-
-
 print("Version: ", geossm.__version__)
 print("Load from: ", geossm.__file__)
 
 # Import the StateSpaceModel class from geossm.ssm
 if geossm.__file__:
     from geossm.ssm import StateSpaceModel as ssm
-
 
 # %% Create the State Space Model (SSM)
 # Type = linear time-invariant SSM
@@ -52,6 +48,7 @@ Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
 
 # %% Build the model
+
 # default backend = auto ('cpu' or 'gpu')
 model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
 

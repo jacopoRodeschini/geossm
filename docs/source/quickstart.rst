@@ -63,20 +63,28 @@ temperature.
 
 The latent spatial field is represented on a triangular mesh, via a
 finite-element (SPDE) approximation of the Matérn covariance
-(:class:`~geossm.covmodel.spdeAppoxCov`).
+(:class:`~geossm.covmodel.SPDEApproxCov`).
 :func:`~geossm.covmodel.utils.buildMesh2d` builds a mesh covering the
 domain, refined around the observation locations:
 
 .. code-block:: python
 
-   from geossm.covmodel import spdeAppoxCov
+   from geossm.covmodel import SPDEApproxCov
    from geossm.covmodel.utils import buildMesh2d
 
    points = model.points[0]  # observation locations for this formula/block
-   mesh_io, _ = buildMesh2d(points, domain=domain, max_edge=0.35, min_edge=0.05)
+   mesh_io, _ = buildMesh2d(points, lowrank=0.5, domain=domain)
 
-   cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+   cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
    model = model.setup(cov_fun=[cov_fun])
+
+.. note::
+
+   The mesh and the SPDE are planar in the units of the data CRS. With
+   the longitude/latitude data of this example they are in degrees (the
+   model warns about it); project the data first (e.g.
+   ``agri.to_crs(...)``, with the domain in the same CRS) for metric
+   distances.
 
 5. Fit the model
 -------------------
@@ -91,8 +99,10 @@ Fitting runs an EM-type procedure built on the Kalman filter/smoother.
 ``results`` is a :class:`~geossm.stmodel.LRStateSpaceResults`: use
 ``results.compute_cov_params()`` to obtain standard errors and
 significance (``results.bse``, ``results.pvalues``, ``results.conf_int()``),
-``results.predict(...)`` to predict at new locations, and
-``results.to_geo()`` to export fitted/predicted values back to a
+``results.predict(...)`` for the predicted mean and point-wise variance
+at new locations (arrays), ``results.get_prediction(...)`` for a
+prediction object (covariance, back-transformation, export, polygons),
+and ``results.to_geo()`` to export the fitted values back to a
 GeoDataFrame.
 
 Next steps

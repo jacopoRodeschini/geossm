@@ -1,15 +1,13 @@
 # Example of Automatic Differentiation (AD) of a loss function 
 # with respect to model parameters using JAX.
 
-# %% 
-from geossm import Param, ModelParams, FitOptions
+# %% [imports]
+import geossm.stmodel as st 
 import jax.numpy as jnp
 from jax import grad, hessian
 
-# %% 
-
-# Dafine de model paramiters using the ModelParams dataclass.
-params = ModelParams(
+# %%  Define the model parameters using the ModelParams dataclass.
+params = st.ModelParams(
     beta=[1., 2.],
     s2e=3.,
 )
@@ -34,7 +32,6 @@ print(grads)
 print(f"Gradient w.r.t beta: {grads.beta.value}")
 
 # %% Comute the hessian 
-
 
 # Evaluate the Hessian of the loss function with respect to the model parameters.
 hess = hessian(loss_fn)(params)

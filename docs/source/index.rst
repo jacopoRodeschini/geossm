@@ -76,7 +76,7 @@ Key features
   prediction for linear-Gaussian systems (:class:`~geossm.ssm.StateSpaceModel`).
 - **Low-rank spatial models**: :class:`~geossm.stmodel.LRStateSpaceModel`
   scales the above to large spatial domains via an SPDE/finite-element
-  covariance approximation (:class:`~geossm.covmodel.spdeAppoxCov`).
+  covariance approximation (:class:`~geossm.covmodel.SPDEApproxCov`).
 - **Formula-based design matrices**: build regressors from a Patsy/R-style
   formula string against a :class:`geopandas.GeoDataFrame`
   (:class:`~geossm.data_preparation.DesignMatricesBuilder`).

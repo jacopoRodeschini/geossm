@@ -24,9 +24,6 @@ import pytest  # noqa: E402
 
 from tests._reference import make_problem  # noqa: E402
 
-# Local research script with a machine-specific data path and a GPU assert;
-# it is not a test (kept in the folder, excluded from collection).
-collect_ignore = ["test_mesh_pen.py"]
 
 CPU_DEVICE = jax.devices("cpu")[0]
 

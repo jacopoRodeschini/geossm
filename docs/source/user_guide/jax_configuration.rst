@@ -112,6 +112,79 @@ With the cache populated, the same fit took 10.7 s. The cache is keyed on
 the JAX version, the device and the array shapes, so a different dataset size
 or mesh compiles again.
 
+**How it works.** Every compiled program (XLA executable) gets a key, a hash
+of: the program itself (which depends on the array shapes and dtypes, the
+model's block sizes and any fixed parameter values), the jaxlib version, the
+backend and driver version (e.g. the CUDA driver and GPU type), the XLA flags
+and the compiler options. Before compiling, JAX looks the key up in the cache
+directory; on a hit it loads the executable instead of compiling it. The
+cache is off unless a directory is set, with the ``JAX_COMPILATION_CACHE_DIR``
+environment variable or, before the first computation,
+
+.. code-block:: python
+
+   jax.config.update("jax_compilation_cache_dir", "/path/to/cache")
+
+**Where it is saved.** In that directory only, one file per compiled program
+(named after the jitted function and the key, e.g. ``jit__filter_kernelJAX-
+<hash>``), plus, on a GPU, a ``xla_gpu_per_fusion_autotune_cache_dir``
+subdirectory with XLA's autotuning results. JAX chooses no default location;
+``~/.cache/jax`` above is just a convention. For the Agrimonia example it
+holds 14 files, 2.8 MB.
+
+**What is cached.** Only programs whose compilation took at least
+``jax_persistent_cache_min_compile_time_secs`` (1 s by default): geossm's
+filter, smoother, M-step, prediction and Hessian kernels, but not the many
+small operations compiled in a fraction of a second. Lowering the threshold
+(e.g. to 0) caches those too, at the cost of many small files. Measured on the
+Agrimonia example (GPU, float32, 4 EM iterations):
+
+.. list-table::
+   :header-rows: 1
+
+   * - First call in a new process
+     - ``fit``
+     - ``compute_cov_params`` (Hessian)
+     - ``get_prediction``
+   * - empty cache
+     - 49 s
+     - 55 s
+     - 11 s
+   * - cache filled by an earlier run
+     - 9.4 s
+     - 4.1 s
+     - 2.4 s
+   * - (later call in the same process)
+     - 3.4 s
+     - 1.9 s
+     - 2.0 s
+
+**Lifetime and size.** Entries never expire: a file stays until it is
+deleted. Entries that no longer match (after upgrading JAX or the GPU driver,
+changing XLA flags, or for data of other shapes) are simply never read again.
+By default the directory grows without limit
+(``jax_compilation_cache_max_size = -1``); setting a size in bytes, e.g.
+``jax.config.update("jax_compilation_cache_max_size", 2 * 1024**3)``,
+deletes the least recently used entries beyond it. Deleting the directory is
+always safe: the programs are compiled again on the next run.
+
+Within a process, every kernel is compiled once per array shape and dtype and
+reused by later fits, predictions and standard errors (``compute_cov_params``
+included).
+
+Not implemented yet
+-------------------
+
+Two changes could save time on a GPU but are not implemented:
+
+* **Keeping the E-step on the device.** Every EM iteration copies the
+  smoothed states, their covariances and the EM sufficient statistics to the
+  host and back (about 67 MB per iteration on the Agrimonia example, roughly
+  5-10 % of an E-step on a GPU; negligible on the CPU).
+* **Fewer synchronisations in the M-step.** The M-step waits for each of its
+  small kernels to finish (to time them), which prevents the GPU from
+  overlapping them.
+
 Summary
 -------
 

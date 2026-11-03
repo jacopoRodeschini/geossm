@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-@title: Parallel search over `buildMesh2d_density_new` settings.
+@title: Parallel search over `buildMesh2d` settings.
 
 Given observation sites, an interest domain and a vertex budget (`lowrank`),
 build one mesh per combination of settings (eps, gradation, bandwidth,
@@ -79,7 +79,7 @@ from concurrent.futures.process import BrokenProcessPool
 import numpy as np
 import pandas as pd
 
-# A small grid around the defaults; every key is a `buildMesh2d_density_new`
+# A small grid around the defaults; every key is a `buildMesh2d`
 # argument, except `bandwidth_factor`, which multiplies Scott's bandwidth.
 DEFAULT_GRID = {
     "eps": [0.05, 0.1, 0.2],
@@ -141,7 +141,7 @@ def _neighbour_ratios(T, area):
 
 
 def mesh_metrics(mesh, info, points, union, domain=None, fem=False):
-    """Quality metrics of one mesh built by `buildMesh2d_density_new` with
+    """Quality metrics of one mesh built by `buildMesh2d` with
     `return_info=True`; see the module docstring for their meaning."""
     import shapely
     from scipy.interpolate import RegularGridInterpolator
@@ -219,7 +219,7 @@ def _resolve_settings(points, settings):
 
 def _evaluate(job):
     job_id, points, domain, budget, settings, fem = job
-    from geossm.covmodel import buildMesh2d_density_new
+    from geossm.covmodel import buildMesh2d
 
     row = {"job": job_id, **{k: v for k, v in settings.items() if k != "intensity"}}
     kw = _resolve_settings(points, settings)
@@ -228,14 +228,14 @@ def _evaluate(job):
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            mesh, _, info = buildMesh2d_density_new(points, domain=domain, return_info=True,
-                                                    **budget, **kw)
+            mesh, _, info = buildMesh2d(points, domain=domain, return_info=True,
+                                        **budget, **kw)
         union = _interest_domain(points, domain)
         row.update(mesh_metrics(mesh, info, points, union, domain=domain, fem=fem))
         if kw.get("bandwidth") is None:  # Scott's default, or None with a callback
             row["bandwidth"] = info["bandwidth"]
         msgs = [str(w.message).split(": ", 1)[-1] for w in caught
-                if "buildMesh2d_density_new" in str(w.message)]
+                if "buildMesh2d" in str(w.message)]
         row["status"] = "warning" if msgs else "ok"
         row["message"] = " | ".join(msgs)
     except Exception as exc:  # report, never stop the search
@@ -255,7 +255,7 @@ def expand_grid(grid):
 
 def search_mesh_settings(points, domain=None, lowrank=None, n_vertices=None, grid=None,
                          settings=None, fixed=None, n_jobs=None, fem=False, verbose=True):
-    """Build one `buildMesh2d_density_new` mesh per setting, in parallel, and
+    """Build one `buildMesh2d` mesh per setting, in parallel, and
     return a DataFrame with one row of quality metrics per mesh.
 
     Parameters
@@ -263,12 +263,12 @@ def search_mesh_settings(points, domain=None, lowrank=None, n_vertices=None, gri
     points : (n, 2) array_like
         Observation sites.
     domain : Polygon, MultiPolygon, or list of these, optional
-        Interest domain, as for `buildMesh2d_density_new`.
+        Interest domain, as for `buildMesh2d`.
     lowrank, n_vertices : float / int
         The vertex budget (give exactly one), shared by all settings.
     grid : dict of lists, optional
         Settings to combine (Cartesian product). Keys are
-        `buildMesh2d_density_new` arguments, plus `bandwidth_factor`
+        `buildMesh2d` arguments, plus `bandwidth_factor`
         (multiple of Scott's bandwidth). Defaults to `DEFAULT_GRID`.
     settings : list of dicts, optional
         Explicit settings instead of (or in addition to) `grid`.
@@ -334,7 +334,7 @@ def rank_settings(table, min_angle=21.0, tol=0.05, max_nbr_ratio=None, by="dist_
 
 def build_from_row(points, domain, row, lowrank=None, n_vertices=None, **extra):
     """Rebuild the mesh of one table row (the mesher is deterministic)."""
-    from geossm.covmodel import buildMesh2d_density_new
+    from geossm.covmodel import buildMesh2d
 
     if lowrank is None and n_vertices is None:
         n_vertices = int(row["target"])
@@ -342,8 +342,8 @@ def build_from_row(points, domain, row, lowrank=None, n_vertices=None, **extra):
     names = ("eps", "gradation", "bandwidth", "anchor_spacing", "offset", "outer_ratio", "grid_size")
     kw = {k: row[k] for k in names if k in row and not pd.isna(row[k])}
     kw.setdefault("anchor_spacing", None)
-    return buildMesh2d_density_new(np.asarray(points, float)[:, :2], domain=domain,
-                                   **budget, **kw, **extra)
+    return buildMesh2d(np.asarray(points, float)[:, :2], domain=domain,
+                       **budget, **kw, **extra)
 
 
 SUMMARY_COLUMNS = [

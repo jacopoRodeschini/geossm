@@ -80,11 +80,13 @@ class StateSpaceResults:
     (converted from JAX arrays on construction, see `to_numpy`) in the
     dtype of the originating model.
 
+    The results do not reference the model: what they need from it is
+    copied when they are created (observed data, regressors, observation-
+    noise variances, shape, names, summary labels), so later changes to the
+    model do not change them.
+
     Attributes
     ----------
-    model : object or None
-        The `geossm.ssm.statespace.StateSpaceModel` (or subclass) instance
-        that produced these results.
     y_obs : numpy.ndarray, shape (p, T)
         Observed data used for fitting (may contain ``NaN``).
     y_hat : numpy.ndarray, shape (p, T)
@@ -117,6 +119,10 @@ class StateSpaceResults:
         value/sufficient-statistics computation, and their sum.
     """
 
+    #: Array attributes a subclass keeps elsewhere and exposes as properties
+    #: (`LRStateSpaceResults`: the latent state, held by its `FittedState`).
+    _DELEGATED_FIELDS = frozenset()
+
     def __init__(
         self,
         model: Optional[Any],
@@ -128,7 +134,7 @@ class StateSpaceResults:
         params_names=None,
         params_dim=None,
         y_obs=None,
-        yname=None,
+        y_name=None,
         Xbeta=None,
         backend=None,
         dtype=None,
@@ -162,10 +168,13 @@ class StateSpaceResults:
         ----------
         model : object or None
             The fitted `geossm.ssm.statespace.StateSpaceModel` (or
-            subclass) instance. When given, ``params``, ``params_names``,
-            ``params_dim``, ``yname``, ``y_obs`` (from ``model.y_t``),
-            ``Xbeta``, ``backend`` and ``dtype`` default to the
-            corresponding model attributes unless overridden below.
+            subclass) instance, read once and not stored. When given,
+            ``params``, ``params_names``, ``params_dim``, ``y_name``,
+            ``y_obs`` (from ``model.y_t``), ``Xbeta``, ``backend`` and
+            ``dtype`` default to the corresponding model attributes unless
+            overridden below; its observation-noise variances, shape,
+            response names and summary labels (class name, type, order) are
+            copied.
         y_hat : array_like, shape (p, T)
             Predicted/fitted observation means.
         Sigma_y_hat : array_like, shape (p, p, T), optional
@@ -178,8 +187,8 @@ class StateSpaceResults:
             `params_dim`.
         y_obs : array_like, shape (p, T), optional
             Override for the observed data (defaults to ``model.y_t``).
-        yname : str, optional
-            Override for the dependent variable's name.
+        y_name : str or sequence of str, optional
+            Override for the dependent variable's name(s).
         Xbeta : array_like, shape (p, b, T), optional
             Override for the exogenous regressors.
         backend : {'auto', 'cpu', 'gpu'} or jax.Device, optional
@@ -210,8 +219,7 @@ class StateSpaceResults:
             EM sufficient statistics.
         """
 
-        # ---- Update the metadata from the model----
-        self.model = model
+        # ---- Metadata from the model (read here, not stored) ----
 
         # ---- Backend: default to the model's backend, so any JAX
         # computation performed on the results (e.g. the Hessian in
@@ -240,16 +248,14 @@ class StateSpaceResults:
             self.params = getattr(model, "params", None)
             self.params_names = getattr(model, "params_names", None)
             self.params_dim = getattr(model, "params_dim", None)
-            self.yname = getattr(model, "yname", None)
-            self.y_obs = getattr(model, "y_t", None)  # observed data (from model)
-            self.Xbeta = getattr(model, "Xbeta", None)
+            names = getattr(model, "y_name", None)
+            self.y_name = tuple(names) if isinstance(names, list) else names
+            # observed data and regressors default to the model's
+            y_obs = getattr(model, "y_t", None) if y_obs is None else y_obs
+            Xbeta = getattr(model, "Xbeta", None) if Xbeta is None else Xbeta
 
-        if y_obs is not None:
-            self.y_obs = y_obs
-        if yname is not None:
-            self.yname = yname
-        if Xbeta is not None:
-            self.Xbeta = Xbeta
+        if y_name is not None:
+            self.y_name = y_name
         if params is not None:
             self.params = params
         if params_names is not None:
@@ -265,22 +271,21 @@ class StateSpaceResults:
         self.time_total = self.time_filter + self.time_smoother + self.time_expectation
 
         # ---- arrays ----
-        self.y_hat = y_hat
-        self.Sigma_y_hat = Sigma_y_hat
         self.tdelta_hat = tdelta_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
         self.x_pred = x_pred
         self.P_pred = P_pred
         self.K = K
-        self.x_smoothed = x_smoothed
-        self.P_smoothed = P_smoothed
-        self.P_pred_smoothed = P_pred_smoothed
-
-        # ---- sufficient stats ----
-        self.S11 = S11
-        self.S10 = S10
-        self.S00 = S00
+        # ---- data, fitted values, smoothed states and sufficient stats (kept
+        # elsewhere by a subclass for the names in `_DELEGATED_FIELDS`) ----
+        for name, value in (("y_obs", y_obs), ("Xbeta", Xbeta), ("y_hat", y_hat),
+                            ("Sigma_y_hat", Sigma_y_hat),
+                            ("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
+                            ("P_pred_smoothed", P_pred_smoothed),
+                            ("S11", S11), ("S10", S10), ("S00", S00)):
+            if name not in self._DELEGATED_FIELDS:
+                setattr(self, name, value)
 
         # ---- metadata ----
         self.today = date.today()
@@ -295,7 +300,11 @@ class StateSpaceResults:
         self._R = None if R is None else np.array(R, dtype=self._dtype, copy=True)
         shape = getattr(model, "shape", None) if model is not None else None
         self._model_shape = None if shape is None else tuple(int(v) for v in shape)
-        self._model_y_name = getattr(model, "y_name", None) if model is not None else None
+        self._model_label = {
+            "name": type(model).__name__ if model is not None else "N/A",
+            "type": getattr(model, "type", "N/A"),
+            "order": getattr(model, "order", "N/A"),
+        }
 
         # convert arrays if needed
         self.to_numpy()
@@ -344,6 +353,8 @@ class StateSpaceResults:
             "S10",
             "S00",
         ]:
+            if attr in self._DELEGATED_FIELDS:
+                continue
             value = getattr(self, attr, None)
             if value is not None:
                 setattr(self, attr, np.asarray(value, dtype=self.dtype))
@@ -373,7 +384,7 @@ class StateSpaceResults:
         AttributeError
             If a key in ``kwargs`` is not an existing public attribute.
         """
-        public = {k for k in self.__dict__ if not k.startswith("_")}
+        public = {k for k in self.__dict__ if not k.startswith("_")} | self._DELEGATED_FIELDS
         for key in kwargs:
             if key not in public:
                 raise AttributeError(
@@ -381,10 +392,18 @@ class StateSpaceResults:
                 )
 
         new = copy.copy(self)
-        new.__dict__.update(kwargs)
+        new.__dict__.update({k: v for k, v in kwargs.items() if k not in self._DELEGATED_FIELDS})
+        delegated = {k: v for k, v in kwargs.items() if k in self._DELEGATED_FIELDS}
+        if delegated:
+            new._update_delegated(delegated)
         new.to_numpy()
         new._after_update(set(kwargs))
         return new
+
+    def _update_delegated(self, values):
+        """Replace attributes listed in `_DELEGATED_FIELDS` (called by
+        `update` on the copy); implemented by subclasses that delegate."""
+        raise NotImplementedError
 
     def _after_update(self, keys):
         """Recompute or clear what depends on the attributes in `keys`
@@ -828,16 +847,14 @@ class StateSpaceResults:
         # Left: identity/config of the model and how it was run.
         top_left = dict(
             [
-                ("Model name:", lambda: [self.model.__class__.__name__]),
+                ("Model name:", lambda: [self._model_label["name"]]),
                 ("Model type (order):",
-                    lambda: [
-                        f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
-                    ],
+                    lambda: [f"{self._model_label['type']}, {self._model_label['order']}"],
                 ),
                 ("Dep. Variables:", lambda: [self._dep_variable_name()]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
-                ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
                 ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
                 (runtime_label, lambda v=runtime_value: [v]),
             ]
@@ -943,10 +960,8 @@ class StateSpaceResults:
 
     def _dep_variable_name(self):
         """Response name(s) shown by `summary` and `repr`: the model's
-        `y_name` (one per response variable, `LRStateSpaceModel`) or, for
-        a plain `StateSpaceModel`, its `yname`."""
-        return (_format_names(getattr(self, "_model_y_name", None))
-                or getattr(self, "yname", None) or "N/A")
+        `y_name` (one per response variable on `LRStateSpaceModel`)."""
+        return _format_names(getattr(self, "y_name", None)) or "N/A"
 
     def __str__(self):
         return str(self.summary())
@@ -960,6 +975,22 @@ class StateSpaceResults:
         return f"{self.__class__.__name__}\n" + format_info_table(
             gen_top_left + gen_top_right, indent=2
         )
+
+    def __getstate__(self):
+        # The JAX device is not picklable: store its platform (F52)
+        state = self.__dict__.copy()
+        state["_backend"] = getattr(self._backend, "platform", "auto")
+        return state
+
+    def __setstate__(self, state):
+        state = dict(state)
+        platform = state.pop("_backend", "auto")
+        self.__dict__.update(state)
+        # Fall back to 'auto' if the platform (e.g. 'gpu') is not available here
+        try:
+            self._backend = _select_device(platform)
+        except ValueError:
+            self._backend = _select_device("auto")
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict snapshot of the main results.

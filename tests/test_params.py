@@ -133,3 +133,23 @@ def test_jit_with_bse_set():
 def test_fit_options_defaults():
     o = FitOptions()
     assert (o.max_iter, o.tol_relat, o.force_iter, o.std) == (20, pytest.approx(1e-3), False, True)
+
+
+def test_fit_options_are_immutable():
+    # Section B, P7: FitOptions is frozen; derive modified options with replace.
+    import dataclasses
+    opts = FitOptions(max_iter=5)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        opts.max_iter = 50
+    new = dataclasses.replace(opts, max_iter=50)
+    assert (new.max_iter, opts.max_iter) == (50, 5) and new.tol_relat == opts.tol_relat
+
+
+# --- Section N: FitOptions validation ----------------------------------------
+
+@pytest.mark.parametrize("kw", [dict(max_iter=0), dict(max_iter=-1), dict(max_iter=2.5), dict(max_iter=True),
+                                dict(tol_relat=-1.0), dict(tol_relat=float("nan")),
+                                dict(ks_tol=0.0), dict(ks_tol=-1e-6), dict(ks_tol=float("inf"))])
+def test_fit_options_reject_invalid_values(kw):
+    with pytest.raises(ValueError):
+        FitOptions(**kw)

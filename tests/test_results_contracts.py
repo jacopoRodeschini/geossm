@@ -7,12 +7,14 @@ Type/shape/dtype checks right after `LRStateSpaceModel.fit` are in
 test_lrssm.py (`TestFit`).
 """
 
+import geopandas as gpd
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
 from geossm.ssm import StateSpaceModel, StateSpaceResults
+from geossm.stmodel import LRPredictionResults
 from tests.test_lrssm import _build_model, _options
 from tests._synthetic import make_panel_gdf, make_square_mesh
 
@@ -162,46 +164,54 @@ class TestLRResultsAfterFit:
 
 
 class TestLRPredictLifecycle:
-    def test_predict_returns_self_and_replaces_previous_predictions(self, gdf, mesh):
+    """Predictions do not modify the fit results; each `get_prediction` is an
+    independent `LRPredictionResults` (Section B, P2)."""
+
+    def test_predictions_are_independent_objects(self, gdf, mesh):
         _, res = _fresh_fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
-        assert res.predict(newdata, verbose=False) is res
-        p_all = res.y_pred.shape[0]
-        res.predict(newdata[newdata["site"] < 10], verbose=False)
-        assert res.y_pred.shape[0] == 10 < p_all
-        assert np.asarray(res.block_p_pred)[-1] == 10
+        a = res.get_prediction(newdata, verbose=False)
+        b = res.get_prediction(newdata[newdata["site"] < 10], verbose=False)
+        assert isinstance(a, LRPredictionResults) and a is not b
+        assert a.y_pred.shape[0] == 25 and b.y_pred.shape[0] == 10 and a.block_p[-1] == 25
+        assert a.fitted_state is res.fitted_state
+        for name in ("y_pred", "Sigma_y_pred", "points_pred", "y_pred_back_list"):
+            assert not hasattr(res, name), name
 
     @pytest.mark.usefixtures("x64")
     def test_predictions_are_numpy_in_the_model_dtype(self, gdf, mesh):
         # F45: JAX arrays, and y_pred float64 in a float32 fit under x64.
         _, res = _fresh_fit(gdf, mesh, dtype=jnp.float32)
-        res.predict(gdf.drop(columns="y"), verbose=False)
-        for name in ("y_pred", "Sigma_y_pred"):
-            value = getattr(res, name)
+        newdata = gdf.drop(columns="y")
+        pred = res.get_prediction(newdata, verbose=False)
+        y_pred, var_pred = res.predict(newdata, verbose=False)
+        for name, value in (("y_pred", pred.y_pred), ("Sigma_y_pred", pred.Sigma_y_pred),
+                            ("var_pred", pred.var_pred), ("predict mean", y_pred), ("predict variance", var_pred)):
             assert type(value) is np.ndarray and value.dtype == np.float32, name
+        assert not pred.y_pred.flags.writeable and not pred.Sigma_y_pred.flags.writeable
 
-    def test_new_prediction_invalidates_back_transformed_predictions(self, gdf, mesh):
-        # F46: the lists of the previous prediction were kept; to_geo() failed.
+    def test_back_transform_of_one_prediction_does_not_affect_another(self, gdf, mesh):
+        # F46 (stale back-transformed predictions) cannot occur: each
+        # prediction keeps its own back-transformed values.
         _, res = _fresh_fit(gdf, mesh)
         newdata = gdf.drop(columns="y")
-        res.predict(newdata, verbose=False)
-        res.back_transform(lambda v: v)
-        res.predict(newdata[newdata["site"] < 10], verbose=False)
-        assert res.y_pred_back_list is None and res.Sigma_y_pred_back_list is None
-        assert res.y_hat_back_list is not None  # in-sample: still valid
-        assert not any("back" in c for c in res.to_geo()["pred"].columns)
+        a = res.get_prediction(newdata, verbose=False).back_transform(lambda v: v)
+        b = res.get_prediction(newdata[newdata["site"] < 10], verbose=False)
+        assert a.y_pred_back_list is not None and b.y_pred_back_list is None
+        assert not any("back" in c for c in b.to_geo().columns)
+        assert res.y_hat_back_list is None  # the fit results are untouched
 
     def test_to_geo_columns_and_lengths(self, gdf, mesh):
         model, res = _fresh_fit(gdf, mesh)
-        newdata = gdf.drop(columns="y")
         geo = res.to_geo()
-        assert set(geo) == {"hat", "pred"} and geo["pred"] is None
         p, _, T = model.shape
-        assert len(geo["hat"]) == p * T
-        res.predict(newdata, verbose=False)
-        geo = res.to_geo()
-        assert len(geo["pred"]) == res.y_pred.size
-        assert {"point_id", "timestamp", "y_pred_y", "std_pred_y", "geometry"} <= set(geo["pred"].columns)
+        assert isinstance(geo, gpd.GeoDataFrame) and len(geo) == p * T
+        assert {"point_id", "timestamp", "y_hat_y", "std_hat_y", "geometry"} <= set(geo.columns)
+        pred = res.get_prediction(gdf.drop(columns="y"), verbose=False)
+        geo = pred.to_geo()
+        assert isinstance(geo, gpd.GeoDataFrame) and len(geo) == pred.y_pred.size
+        assert {"point_id", "timestamp", "y_pred_y", "std_pred_y", "geometry"} <= set(geo.columns)
+        np.testing.assert_allclose(geo["std_pred_y"].to_numpy() ** 2, pred.var_pred.T.ravel(), rtol=1e-5)
 
 
 def test_lr_sim_returns_states_with_initial_state(gdf, mesh):
@@ -227,7 +237,7 @@ def test_lr_update_recomputes_parameter_summaries(lr_fit):
 @pytest.mark.usefixtures("x64")
 def test_summary_and_repr_name_the_response(problem, lr_fit):
     # F48: the base summary read `y_name` (absent on a plain StateSpaceModel)
-    # and `repr` read `yname` (the default "y" on an LRStateSpaceModel).
+    # and `repr` read the old `yname` (the default "y" on an LRStateSpaceModel).
     res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
     model, lr = lr_fit
     for obj, name in ((res, "y"), (lr, ", ".join(model.y_name))):
@@ -236,15 +246,96 @@ def test_summary_and_repr_name_the_response(problem, lr_fit):
         assert f"Dep. Variable:   {name}" in repr(obj)
 
 
+def test_set_keeps_the_response_name(problem, lr_fit):
+    # `set()` without `y_name` used to reset the name to "y" (an LRSSM lost
+    # its response names on fit).
+    model = _ssm(problem, jnp.float32)
+    model.set(y_t=np.asarray(problem.y), y_name="pm10")
+    model.set(F=problem.F)
+    assert model.y_name == "pm10" and model.smoother(np.asarray(problem.y)).y_name == "pm10"
+    lr_model, lr = lr_fit
+    assert lr_model.y_name == ["y"] and lr.y_name == ("y",)
+
+
+def test_model_summary_full_adds_grid_and_latent_sections(lr_fit):
+    model, _ = lr_fit
+    short, full = str(model.summary()), str(model.summary(full=True))
+    assert "Grid" not in short and "Latent." not in short
+    assert "Grid" in full and "Latent." in full
+
+
 def test_back_transform_without_prediction_covariance_warns(gdf, mesh):
     _, res = _fresh_fit(gdf, mesh)
-    res.predict(gdf.drop(columns="y"), verbose=False, std=False)
+    pred = res.get_prediction(gdf.drop(columns="y"), std=False, verbose=False)
     with pytest.warns(RuntimeWarning, match="predictions have no covariance"):
-        res.back_transform(lambda v: v)
-    assert res.y_pred_back_list is None and res.y_hat_back_list is not None
+        assert pred.back_transform(lambda v: v) is pred
+    assert pred.y_pred_back_list is None
 
 
 def test_to_geo_columns_are_in_the_model_dtype(lr_fit):
     _, res = lr_fit
-    hat = res.to_geo()["hat"]
+    hat = res.to_geo()
     assert hat["y_hat_y"].dtype == hat["std_hat_y"].dtype == np.dtype(res.dtype)
+
+
+@pytest.mark.usefixtures("x64")
+def test_results_do_not_reference_the_model(problem, lr_fit):
+    # Section B, P1: neither result class stores the model.
+    res = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    _, lr = lr_fit
+    assert not hasattr(res, "model") and not hasattr(lr, "model")
+    (line,) = [ln for ln in str(res.summary()).splitlines() if ln.startswith("Model name:")]
+    assert "StateSpaceModel" in line
+    # Plain StateSpaceModel results have no FittedState: they store the state.
+    assert {"x_smoothed", "P_smoothed", "S11", "S10", "S00"} <= set(vars(res))
+
+
+@pytest.mark.usefixtures("x64")
+def test_lr_results_satisfy_the_base_results_contract(problem, lr_fit):
+    # Section C (C3, C18): what the base class documents holds for LR results.
+    base = _ssm(problem, jnp.float64).smoother(np.asarray(problem.y))
+    _, lr = lr_fit
+    for res in (base, lr):
+        p, T = res.y_hat.shape
+        assert res.residuals.shape == (p, T) and isinstance(res.mse(), float) and isinstance(res.rmse(), float)
+        assert res.mse("space").shape == (p,) and res.mse("time").shape == (T,)
+        lo, hi = res.conf_int_state()
+        assert lo.shape == hi.shape == res.x_smoothed.shape
+        assert set(res.diagnostics()) == {"jb", "jb_pvalue", "omni", "omni_pvalue", "dw", "skew", "kurtosis"}
+        assert {"y_obs", "y_hat", "x_smoothed", "P_smoothed", "llf", "S11", "S10", "S00"} <= set(res.as_dict())
+        assert isinstance(res.update(llf=0.0), type(res))
+        assert isinstance(str(res.summary()), str)
+    lo, hi = lr.conf_int_y(prediction=True)
+    assert lo.shape == hi.shape == lr.y_hat.shape and 0.0 <= lr.coverage_probability() <= 1.0
+
+
+def test_prediction_in_another_crs_is_reprojected(gdf, lr_fit):
+    # Section M: prediction data in another CRS are reprojected to the
+    # training CRS (warning), and the results are in the training CRS.
+    _, res = lr_fit
+    ref = res.get_prediction(gdf, verbose=False)
+    with pytest.warns(UserWarning, match="reprojecting the prediction data"):
+        other = res.get_prediction(gdf.to_crs("EPSG:4326"), verbose=False)
+    assert other.crs == ref.crs and other.to_geo().crs == gdf.crs
+    np.testing.assert_allclose(other.y_pred_list[0], ref.y_pred_list[0], rtol=1e-5, atol=1e-5)
+
+
+def test_to_poly_reprojects_polygons_with_a_warning(gdf, lr_fit):
+    from tests._synthetic import DOMAIN
+    _, res = lr_fit
+    pred = res.get_prediction(gdf, verbose=False)
+    ref = pred.to_poly([DOMAIN])
+    with pytest.warns(UserWarning, match="reprojecting the polygons"):
+        out = pred.to_poly(gpd.GeoSeries([DOMAIN], crs=gdf.crs).to_crs("EPSG:4326"))
+    assert out.crs == gdf.crs
+    np.testing.assert_allclose(out["y"].to_numpy(), ref["y"].to_numpy(), rtol=1e-6)
+
+
+def test_latlon_disagreeing_with_the_data_crs_warns(gdf, mesh):
+    from geossm.covmodel import SPDEApproxCov
+    from geossm.stmodel import LRStateSpaceModel
+    from tests._synthetic import DOMAIN
+    model = LRStateSpaceModel(gdf, ["y ~ 1 + x"], domain=[DOMAIN], verbose=False, backend="cpu")
+    cov = SPDEApproxCov(latlon=True, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
+    with pytest.warns(UserWarning, match="latlon=True"):
+        model.setup([cov])

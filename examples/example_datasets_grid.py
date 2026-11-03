@@ -5,10 +5,8 @@
 """
 # %% Import libraries
 import numpy as np
-import geopandas as geodf
 from geossm import DesignMatricesBuilder as grid
 import geossm.datasets as df
-from shapely.geometry import Point
 
 # %% List all availabel dataset
 
@@ -24,6 +22,7 @@ print(Agrimonia.columns)
 
 # %% Crate the regression matrix
 
+# use help(grid) to see the parameters of the DesignMatricesBuilder class
 builder = grid(Agrimonia, "np.sqrt(AQ_pm10) ~ 1 + WE_temp_2m")
 
 # Get the design matrix

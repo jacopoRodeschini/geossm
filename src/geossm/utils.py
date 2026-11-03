@@ -4,11 +4,136 @@ General utility functions for GEOSSM.
 
 import numpy as np
 import datetime
+import inspect
 import jax
 import platform
 import psutil
 from functools import wraps
 from types import SimpleNamespace
+from shapely.geometry import MultiPolygon, Polygon
+from shapely.ops import unary_union
+
+
+# %% [Utils] Precision
+
+# Message raised when a 64-bit dtype is requested while JAX's x64 mode is off.
+_X64_REQUIRED_MSG = (
+    "dtype={dtype} requires JAX's 64-bit mode, which is off. Enable it once at "
+    "program start, before any JAX array is created: "
+    "`jax.config.update(\"jax_enable_x64\", True)` (or set JAX_ENABLE_X64=1). "
+    "geossm does not switch it on itself because it is a process-wide setting."
+)
+
+
+def _check_x64_for_dtype(dtype):
+    """Raise if a 64-bit dtype is requested while JAX's x64 mode is off.
+
+    JAX silently truncates float64/int64 arrays to 32 bits unless x64 mode is
+    enabled. Enabling it is a process-wide setting, so it is left to the user
+    rather than switched on here (finding F03).
+    """
+    if np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
+        raise ValueError(_X64_REQUIRED_MSG.format(dtype=np.dtype(dtype).name))
+
+
+# %% [Utils] Spatial domain
+
+def _validate_domain(domain):
+    """
+    Validate and normalize the ``domain`` argument shared by
+    :class:`FEMSolver` and :class:`SPDEApproxCov`.
+
+    ``domain`` describes the region(s) of scientific interest, one polygon
+    per region (e.g. one polygon per landmass for a multi-polygon country
+    such as Italy: Sicily, Sardinia, mainland). It accepts a single shapely
+    ``Polygon``, a single ``MultiPolygon``, or a list/tuple mixing either --
+    any ``MultiPolygon`` is expanded into its constituent polygons, so the
+    return value is always a flat tuple of ``Polygon`` objects.
+
+    ``domain`` is used only to classify *mesh* vertices as inner/outer (see
+    ``FEMSolver.isinner``) -- a vertex is inner if it is covered by *any*
+    single polygon in ``domain``, not by their convex hull.
+
+    ``domain`` is distinct from the FEM computational domain :math:`\\Omega`:
+    :math:`\\Omega` is implicitly defined by the mesh handed to
+    ``FEMSolver``/``SPDEApproxCov.setup()``. A reasonable default choice is
+    the convex hull of the union of the ``domain`` polygons (extended by an
+    offset to limit boundary effects), computed by ``_domain_hull(domain)``
+    and exposed as the ``domain_hull`` property on both classes. Neither
+    class enforces that the mesh matches this choice -- use
+    ``FEMSolver.covers_domain()`` to check.
+    """
+    if isinstance(domain, (Polygon, MultiPolygon)):
+        domain = [domain]
+    elif not isinstance(domain, (list, tuple)):
+        raise TypeError(
+            "domain must be a shapely Polygon/MultiPolygon, or a list/tuple of them"
+        )
+
+    polygons = []
+    for poly in domain:
+        if isinstance(poly, MultiPolygon):
+            polygons.extend(poly.geoms)
+        elif isinstance(poly, Polygon):
+            polygons.append(poly)
+        else:
+            raise ValueError(
+                "Each domain element must be a shapely Polygon or MultiPolygon, "
+                f"got {type(poly).__name__}"
+            )
+
+    if len(polygons) == 0:
+        raise ValueError("domain must contain at least one Polygon")
+
+    return tuple(polygons)
+
+
+def _domain_hull(domain):
+    """
+    Convex hull of the union of the ``domain`` polygons -- a reasonable
+    default choice of FEM computational domain :math:`\\Omega`, e.g. to pass
+    as ``boundary`` to ``buildMesh2d``. See ``_validate_domain``.
+    """
+    return unary_union(domain).convex_hull
+
+
+# %% [Utils] Messages
+
+def _print_info(msg):
+    """Print `msg` prefixed with a UTC timestamp (the format of the models'
+    `print_info`)."""
+    dt = datetime.datetime.now(datetime.timezone.utc)
+    print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")
+
+
+class _Verbose:
+    """Progress messages of the models, covariance functions and formula
+    builders (Section O): `self.verbose` (default `False` everywhere) and a
+    per-call `verbose` override, `None` meaning `self.verbose`. Messages are
+    printed to stdout with a UTC timestamp (`print_info`); problems are
+    reported with `warnings.warn`, whatever the verbosity."""
+
+    def _is_verbose(self, verbose=None) -> bool:
+        """Resolve an optional per-call `verbose` override against `self.verbose`."""
+        return bool(self.verbose if verbose is None else verbose)
+
+    def _log(self, msg: str, verbose=None) -> None:
+        """Print `msg` via `print_info` if verbose (see `_is_verbose`)."""
+        if self._is_verbose(verbose):
+            _print_info(msg)
+
+    @staticmethod
+    def print_info(msg):
+        """
+        Print a UTC-timestamped log line.
+
+        Parameters
+        ----------
+        msg : str
+            Message to print, prefixed with the current UTC timestamp
+            (``YYYY-MM-DD HH:MM:SS``).
+        """
+        _print_info(msg)
 
 
 # %% [Utils] Select the device for JAX computations
@@ -72,6 +197,26 @@ def _on_device(method):
     @wraps(method)
     def wrapper(self, *args, **kwargs):
         with jax.default_device(self._backend):
+            return method(self, *args, **kwargs)
+    return wrapper
+
+
+def _on_backend_arg(method):
+    """
+    `_on_device` for constructors: `self._backend` does not exist yet when
+    `__init__` starts, so the device is resolved from the method's own
+    `backend` argument instead. Without this, arrays built before
+    `self._backend` is set (design matrices, default `x0`/`Sigma0`, ...)
+    are first allocated on JAX's default device - the GPU - and only then
+    moved, which fails outright when the GPU is out of memory.
+    """
+    signature = inspect.signature(method)
+
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        with jax.default_device(_select_device(bound.arguments["backend"])):
             return method(self, *args, **kwargs)
     return wrapper
 
@@ -225,7 +370,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
 
     Formats a timestamped, human-readable report -- the string
     representation (``__str__``) of each object in `grid_obs`, of
-    `ssm_model`, and of :func:`getHardware`'s output -- and writes it to
+    `ssm_model`, and of :func:`get_hardware`'s output -- and writes it to
     `filename`. Intended as a lightweight run log for long-running
     fits, not a machine-readable serialization format.
 
@@ -266,7 +411,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
     s += "\n"
 
     s += "HARDWARE \n"
-    s += getHardware()
+    s += get_hardware()
 
     with open(filename, mode) as f:
         f.write(s)
@@ -277,7 +422,7 @@ def write(filename, grid_obs, ssm_model, mode="a"):
 # % Get Hardware infromation
 
 
-def getHardware():
+def get_hardware():
     """
     Build a human-readable summary of the current machine's hardware.
 

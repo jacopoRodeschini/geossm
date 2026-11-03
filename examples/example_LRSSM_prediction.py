@@ -6,211 +6,167 @@ Created on Tue Feb 10 13:38:28 2026
 @author: jacopo
 """
 
-# %% Imports 
+# %% [imports] 
+
+# set environment variables for JAX
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+# os.environ["JAX_PLATFORMS"] = "cpu"
+
 import matplotlib.pyplot as plt
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point
 import numpy as np
-import pygmsh
-import gmsh
 import pandas as pd
 import geopandas as geodf
-from geossm import datasets
+from geossm import datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
 from geossm.stmodel import FitOptions
-from geossm.stmodel import ModelParams
-from geossm.covmodel import FEMSolver, spdeAppoxCov
+from geossm.covmodel import SPDEApproxCov
 from pathlib import Path
 
-# %% Download the the Full agrimonia dataset from zenodo repository
 
+# %% Download the the GRIDDED agrimonia dataset from zenodo repository
+# This dataset is useful to make prediction at pixel level 
 
-agri_path = Path('~').expanduser() / Path('Downloads/Agrimonia_Dataset_v_3_0_0.csv')
+# link: https://zenodo.org/records/7956006
 
-# %% Load the agrimonia dataset
+# Set the path
+agri_path = Path('~').expanduser() / Path('Downloads/AGC_Dataset_v_3_0_0.csv')
 
-agri = pd.read_csv(agri_path, na_values=[
-                   "      NaN", "", "NA", "null", "-"], keep_default_na=True)
-agri['Time'] = pd.to_datetime(agri['Time'], format="%Y-%m-%d")
+# Load the file
+agri_grid = pd.read_csv(agri_path, na_values=[
+                    "      NaN", "        NA", "", "NA", "null", "-", '       NA'])
+agri_grid['time'] = pd.to_datetime(agri_grid['Time'], format="%Y-%m-%d")
+
+# Remove columns with object type (non-numeric) to avoid issues during prediction
+cols_to_remove = agri_grid.select_dtypes(include=["object"]).columns
+agri_grid = agri_grid.drop(columns=cols_to_remove)
+
+# Create Point(lat,lon) for each observation
+ct = np.array([agri_grid.Longitude.to_numpy(), agri_grid.Latitude.to_numpy()]).T
+agri_grid["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
+
+# Create the geopandas dataset
+agri_grid = geodf.GeoDataFrame(agri_grid, crs=4326)
+
+# %% Load the point-wise agrimonia dataset
 
 # Import the Lombardy shape file
-_, shape = datasets.load_dataset("agrimonia")
-buffer = shape.geometry.boundary[0].buffer(0.3).boundary
-line_strings = list(buffer.geoms)
-buffer = Polygon(line_strings[0].coords)
+agri_points, shape = df.load_dataset("agrimonia")
+domain = list(shape.geometry[0].geoms)[0].buffer(0.3)
+
+
+# %% Add season dummy 
+def get_season(date):
+    month = date.month
+    if month in [12, 1, 2]:
+        return "Winter"
+    elif month in [3, 4, 5]:
+        return "Spring"
+    elif month in [6, 7, 8]:
+        return "Summer"
+    else:
+        return "Autumn"
+
+agri_points["season"] = agri_points["time"].apply(get_season)
+agri_grid["season"] = agri_grid["time"].apply(get_season)
 
 # %% Cut the dataset from 2019 to 2020
-tmin = np.datetime64("2020-01-01")
+tmin = np.datetime64("2019-01-01")
 tmax = np.datetime64("2020-12-31")
-agri = agri[(agri["Time"] >= tmin) & (agri["Time"] <= tmax)].copy()
+agri_points = agri_points[(agri_points["time"] >= tmin) & (agri_points["time"] <= tmax)].copy()
 
-
-# %% From .csv to geopandas
-
-ct = np.array([agri.Longitude.to_numpy(), agri.Latitude.to_numpy()]).T
-agri["geometry"] = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-agri = geodf.GeoDataFrame(agri, crs=4326)
-
-# %% Remove the outliers as 99.9 percentile of the AQ_pm10 variable
+# Remove the outliers (99.9 percentile of the AQ_pm10 variable)
 
 # replace the outlier with NaN
-thr999 = agri["AQ_pm10"].quantile(0.999)
-thr001 = agri["AQ_pm10"].quantile(0.001)
-index = agri[(agri["AQ_pm10"] >= thr999) | (agri["AQ_pm10"] <= thr001)].index
-agri.loc[index, "AQ_pm10"] = np.nan
+# thr999 = agri_points["AQ_pm10"].quantile(0.999)
+
+# Avoif log-issues problems with the log transformation, we also remove the 0.1 percentile of the AQ_pm10 variable
+thr001 = agri_points["AQ_pm10"].quantile(0.001)
+index = agri_points[agri_points["AQ_pm10"] <= thr001].index
+agri_points.loc[index, "AQ_pm10"] = np.nan
 
 
 # %% Build the model
 
 model = lrssm(
-    agri, ["np.log(AQ_pm10) ~ 1 + standardize(WE_temp_2m) + standardize(WE_tot_precipitation) + standardize(WE_wind_speed_10m_mean)"], verbose=True, domain=[buffer])
-
+    agri_points, ["np.log(AQ_pm10) ~ 1 + standardize(Altitude) + standardize(WE_temp_2m)*season + standardize(WE_blh_layer_max) + standardize(WE_tot_precipitation) + (EM_nh3_sum + EM_nox_sum)*season"], 
+    verbose=True, domain=[domain]
+    )
 
 print(model)
 
-
-# %% [Utils] build mesh with gmsh
-
-
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(
-            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
-        )
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer * 0.1)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
-        for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        # gmsh.model.mesh.embed(
-        #     0, embedded_tags, 2, domain._id)
-
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
-
-        # 5. Generate
-        gmsh.model.mesh.generate(2)
-
-        gmsh.model.mesh.optimize("Laplace2D")
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
-
-        # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-
-        mesh = geom.generate_mesh()
-
-    return mesh
-
-
 # %% Build the mesh for the AQ_pm10 observed variable
-
+from geossm.covmodel import buildMesh2d
 points = model.points[0]
-mesh_io = buildMesh(buffer, 0.35, points)
+mesh_io, poly = buildMesh2d(points, lowrank=0.75,gradation=1, offset = 1, anchor_spacing=1)
 print(mesh_io)
 
-# plot the mesh (use the fem_solver utlities)
-fem_solver = FEMSolver(mesh_io, [Polygon(buffer)])
-
-# plot the mesh using the utilities
-fig, ax = plt.subplots(figsize=(8, 8))
-fem_solver.plot_mesh(ax=ax)
-
-# %% Set up the lrssm model (univiarte latent)
-
 # build the latent covariance function on the mesh, then attach it to the model
-cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=[Polygon(buffer)])
-model = model.setup(cov_fun=[cov_fun])
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=[domain])
+
+# plot the mesh (use the fem_solver utlities)
+fig, ax = plt.subplots(figsize=(8, 8))
+cov_fun.fem_solver.plot_mesh(ax=ax)
+ax.plot(points[:, 0], points[:, 1], "ro", label="Observation Points")
+ax.set_title("Mesh for $PM_{10}$")
 
 
 # %% Estimate the Model (default estimation options)
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-3
+model = model.setup(cov_fun=[cov_fun])
 
+opt = FitOptions(max_iter=50, tol_relat=1e-3)
 results = model.fit(options=opt)
 print(results)  # resutls.summary()
 
 # %% Compute the covariance matrix of the estimated parameters
 
 # it's optional since it requires the computation of the hessian
+# It can takes a while
+
 results.compute_cov_params()
 print(results)  # results.summary()
 
-# %% Do the prediction 
-import pandas as pd
+# %% Residual in-sample residuals (observed - predicted) 
 
-# import the covariates dataset
-path = agri_path = Path('~').expanduser() / Path("Downloads/AGC_Dataset_v_3_0_0.csv")
+# temp = results.residuals.flatten(order='F')  # Flatten in column-major order to match the time series structure
+temp = results.y_hat_list[0].flatten(order='F')
+std = np.nanstd(temp)
+mean = np.nanmean(temp)
 
-def converter(value):
-    try:
-        # Convert the value to float
-        return np.float64(value)
-    except ValueError:
-        # If conversion fails, return the original value
-        return value
-
-# grid = pd.read_csv(path, na_values=[
-#                    "      NaN", "        NA", "", "NA", "null", "-"], keep_default_na=True, converters={col: converter for col in range(45)})
-grid = pd.read_csv(path, na_values=["      NaN", "        NA", "", "NA", "null", "-", '       NA'])
-grid['Time'] = pd.to_datetime(grid['Time'], format="%Y-%m-%d")
-
-# Remove columns with object type (non-numeric) to avoid issues during prediction
-cols_to_remove = grid.select_dtypes(include=["object"]).columns
-grid = grid.drop(columns=cols_to_remove)
-
-
-# Create Point(lat,lon) for each observation
-ct = np.array([grid.Longitude.to_numpy(), grid.Latitude.to_numpy()]).T
-pt = [Point(p[0], p[1]) for p in ct]  # (x,y) = (lat,lon)
-
-# Add point to Agrimonia dataset
-grid['geometry'] = pt
-
-# create geopandas dataset
-grid = geodf.GeoDataFrame(grid, crs=4326)
-
+# Plot the histogram of the residuals values
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.hist(temp, bins=30, color='skyblue', edgecolor='black')
+ax.set_title("Histogram of Residual $PM_{10}$ Values")
+ax.set_xlabel("$PM_{10}$ (µg/m³)")
+ax.set_ylabel("Frequency")
+ax.axvline(x=mean + 4 * std, color='red', linestyle='--', label='Outlier Thresholds')
+ax.axvline(x=mean - 4 * std, color='red', linestyle='--')
+ax.legend()
 
 # %% Model prediction 
 
-results = results.predict(grid, verbose=True)
-print(results)  # results.summary()
+# Compute the prediction at the agri_grid points (pixel level)
+prediction = results.get_prediction(agri_grid, verbose=True)
+print(prediction)  # prediction.summary()
 
-# %% Compute the back transformation of the predicted values and their covariance matrix
-import jax.numpy as jnp
-results = results.back_transform(g_inv=jnp.exp)
+# %% histogram of the predicted values 
+y_pred = prediction.y_pred_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
 
-
-print(results.y_hat_list[0].min(), results.y_hat_list[0].max())
-print(results.y_hat_back_list[0].min(), results.y_hat_back_list[0].max())
-print(np.nanmin(results.y_pred_back_list[0]), np.nanmax(results.y_pred_back_list[0]))
-
+fig, ax = plt.subplots(figsize=(8, 6))
+# Plot the histogram of the predicted values
+ax.hist(y_pred, bins=30, color='skyblue', edgecolor='black')
+ax.set_title("Histogram of Predicted $PM_{10}$ Values")
+ax.set_xlabel("$PM_{10}$ (µg/m³)")
+ax.set_ylabel("Frequency")
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
 
+index = np.where(y_pred > np.nanquantile(y_pred, 0.999))  # Get indices of values above the 99.9th percentile
+y_pred[index] = np.nan  # Replace values above the 99.9th percentile with NaN
+y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
 
-
+  # Replace values above the 99.9th percentile with NaN
 # Define month boundaries (assuming daily data for a year)
 # Days: Jan(31), Feb(28), Mar(31), Apr(30), May(31), Jun(30), 
 #       Jul(31), Aug(31), Sep(30), Oct(31), Nov(30), Dec(31)
@@ -233,7 +189,7 @@ month_ranges = [
 monthly_avg = []
 month_names = []
 for start, end, name in month_ranges:
-    avg = np.nanmean(results.y_pred_back_list[0][:, start:end], axis=1)
+    avg = np.nanmean(y_pred[:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
 
@@ -249,8 +205,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     ax = axs[i // 4, i % 4]
 
     # Get unique sorted coordinates
-    x_unique = np.sort(np.unique(results.points_pred[0][:, 0]))
-    y_unique = np.sort(np.unique(results.points_pred[0][:, 1]))
+    x_unique = np.sort(np.unique(prediction.points[0][:, 0]))
+    y_unique = np.sort(np.unique(prediction.points[0][:, 1]))
     
     # Create mapping dictionaries
     x_to_idx = {x: idx for idx, x in enumerate(x_unique)}
@@ -261,8 +217,8 @@ for i, (avg_data, month_name) in enumerate(zip(monthly_avg, month_names)):
     Z = np.full((rows, cols), np.nan)
     
     # Fill grid
-    x_indices = np.array([x_to_idx[x] for x in results.points_pred[0][:, 0]])
-    y_indices = np.array([y_to_idx[y] for y in results.points_pred[0][:, 1]])
+    x_indices = np.array([x_to_idx[x] for x in prediction.points[0][:, 0]])
+    y_indices = np.array([y_to_idx[y] for y in prediction.points[0][:, 1]])
     Z[y_indices, x_indices] = avg_data
     
     # Mask pixels outside boundary
@@ -304,7 +260,5 @@ fig.colorbar(im, cax=cbar_ax, label="PM10 (µg/m³)")
 plt.tight_layout(rect=[0, 0, 0.88, 1])
 
 # %% Export the results to a shapefile
-
-geo = results.to_geo()
-# geo["hat"].to_file("fitted.shp")
-# geo["pred"].to_file("predictions.shp")
+geo_fitted = results.to_geo()
+# geo_fitted.to_file("fitted.shp")
