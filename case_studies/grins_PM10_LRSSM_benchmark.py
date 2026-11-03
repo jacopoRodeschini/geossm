@@ -7,7 +7,6 @@ The example is run on a GPU and CPU device.
 """
 
 # %% Import the necessary libraries
-import os
 
 
 msg = """
@@ -17,6 +16,8 @@ This study compares CPU and GPU, so none is set here; uncomment as needed:
 
 CPU only: JAX does not start its GPU backend (0 GB of GPU memory used).
 Without it, JAX reserves GPU memory even for backend="cpu" models.
+
+import os
 os.environ["JAX_PLATFORMS"] = "cpu"
 
 GPU: allocate memory on demand instead of reserving 75 % of it upfront
@@ -40,19 +41,16 @@ import jax.numpy as jnp
 # any JAX array is created (geossm does not switch it on itself).
 jax.config.update("jax_enable_x64", True)
 
-import geossm
-from shapely.geometry import Polygon, MultiPolygon
 from shapely import ops
 import matplotlib.pyplot as plt
 from pathlib import Path
 
 
-if geossm.__file__:
-    from geossm.covmodel import SPDEApproxCov as matern_spde
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-    from geossm.stmodel import FitOptions
-    from geossm.covmodel import buildMesh2d_density
-    import geossm.datasets as df
+import geossm.datasets as df
+from geossm.covmodel import SPDEApproxCov as matern_spde
+from geossm.stmodel import LRStateSpaceModel as lrssm
+from geossm.stmodel import FitOptions
+from geossm.covmodel import buildMesh2d
 
 
 # Assert the presence of a GPU device
@@ -103,31 +101,16 @@ gdfpm10_train = grins[grins["AirQualityStation"].isin(stpm10)].copy()
 points = np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
 
 # %% Create the mesh and the buffer for the SPDE approximation of the covariance function
-"""
-@points: array of shape (n_points, 2) with the coordinates of the points to create the mesh
-@offset: float, the offset to create the buffer around the points
-@lowrank: float, the low rank approximation of the covariance function
-@density_neighbors: int, the number of neighbors to use for the density estimation
-@min_edge: float, the minimum edge length of the mesh
-@max_edge: float, the maximum edge length of the mesh
-@return: mesh_io, buffer
-"""
-lowrank = [0.15, 0.25, 0.5, 0.75, 1.0]
-# lowrank = [1]
+
+lowrank = [0.25, 0.5, 0.75]
 cov_funcs = []
 for lr in lowrank:
-
-    if lr == 1.0:
-        mesh_io, buffer = buildMesh2d_density(points, domain=list(italy_union.geoms), offset=2,
-            lowrank=lr, max_edge=0.7, snap_to_points=False, relax_iters=1)
-    else:
-        mesh_io, buffer = buildMesh2d_density(points, domain=list(italy_union.geoms), offset=2,
-            lowrank=lr, max_edge=0.7, snap_to_points=True)
-
-
+    mesh_io, poly = buildMesh2d(points, lowrank = lr, domain=polygons,
+                    eps=0.1, gradation=0.5,bandwidth=0.1, anchor_spacing=0.3, return_info=False)
+    
     # Create the covariance function used to simulate the "truth"
     cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
-    cov_fun = cov_fun.setup(mesh_io, domain=list(italy_union.geoms))
+    cov_fun = cov_fun.setup(mesh_io, domain=polygons)
     cov_funcs.append(cov_fun)
 
 # Plot the generated mesh and the observed points
@@ -156,34 +139,17 @@ q001 = gdfpm10_train["AQ_mean_PM10"].quantile(0.001)
 inx = (gdfpm10_train["AQ_mean_PM10"] > q999) | (gdfpm10_train["AQ_mean_PM10"] < q001)
 gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
-# %% Standardise the covariates (CL_t2m, CL_windspeed, CL_rh) to have mean 0 and variance 1
-fix, ax = plt.subplots(1, 4, figsize=(20, 5))
-ax[0].hist(np.sqrt(gdfpm10_train["AQ_mean_PM10"]), bins=30, alpha=0.5, label="AQ_mean_PM10")
-ax[1].hist(gdfpm10_train["CL_t2m"], bins=30, alpha=0.5, label="CL_t2m")
-ax[2].hist(gdfpm10_train["CL_windspeed"], bins=30, alpha=0.5, label="CL_windspeed")
-ax[3].hist(gdfpm10_train["CL_rh"], bins=30, alpha=0.5, label="CL_rh")
-ax[0].legend()
-ax[1].legend()
-ax[2].legend()
-ax[3].legend()
-ax[0].set_title("Histograms of the covariates before standardisation")
-plt.show()
-
-
-# %% 
+# %% fit the LRSSM model with the specified formula and covariances for each backend (CPU and GPU) 
 
 # Define the formula used to define the fixed effects in the LRSSM model. 
 # The formula is used to create the design matrices for the fixed effects.
-formula = "AQ_mean_PM10 ~ 1 + CL_t2m + CL_windspeed + CL_rh"
+formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + "
 
 # Create the model
 backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
 
 # Set the options for the fitting procedure
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-4
-opt.verbose = True
+opt = FitOptions(max_iter=50, tol_relat=1e-4, verbose=True)
 
 # Store the results in a list of dictionaries, one for each backend
 # lowrank = [0.25, 0.5, 0.75, 1.0]
@@ -204,8 +170,8 @@ for cov_fun, lr in zip(cov_funcs, lowrank):
         model = lrssm(
             df=gdfpm10_train, 
             formulas=[formula], 
-            domain=[italy_union], 
-            verbose=False, backend=backend, dtype=jnp.float64)
+            domain=polygons, 
+            verbose=False, backend=backend, dtype=jnp.float32)
 
 
         # Set up the model cov. 
