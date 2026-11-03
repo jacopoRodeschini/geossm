@@ -53,13 +53,6 @@ def plot_mesh(
 
     triang = mtri.Triangulation(vertex[:, 0], vertex[:, 1], triangles)
 
-    # Collect all triangles (elements)
-    # inner_triangles = []
-    # for i in range(fem.nelement):
-    #     tri = fem.mesh.GetElement(i).GetVerticesArray()
-    #     inner_triangles.append(tri)
-    # inner_triangles = np.array(inner_triangles)
-
     # Collect all boundary edges
     outer_edges = []
     for i in range(fem.n_boundary_elements):
@@ -67,9 +60,6 @@ def plot_mesh(
         outer_edges.append(bElem)
 
     boundary_edge = np.array(outer_edges)
-
-    # Plot the mesh
-    # fig, ax = plt.subplots()
 
     # Handle the 'ax' argument
     if ax is None:

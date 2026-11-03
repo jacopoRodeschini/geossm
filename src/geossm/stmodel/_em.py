@@ -82,14 +82,8 @@ def _compute_initial_values_jax_kernel(y_t, Xbeta, block_p, block_q):
         diag_vals[:diag_size]
     )
 
-    # --- Random Initial Values ---
-    # JAX requires explicit handling of random number keys.
-    # Split the main key for each separate random operation.
-    # key, f_key = jax.random.split(key)
-
-    # est_f: Sorted initial values
-    # rand_vals = jax.random.uniform(f_key, shape=(nlat,), minval=0.8, maxval=0.9)
-    est_f = jnp.repeat(0.8, nlat)  # jnp.flip(jnp.sort(rand_vals))
+    # est_f: the same AR coefficient for every latent factor
+    est_f = jnp.repeat(0.8, nlat)
 
     # est_x0: Initial state
     est_x0 = jnp.zeros((block_q[-1],), dtype=y_t.dtype)
@@ -181,7 +175,7 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
     err_sliced = err.T
 
     # 2. Define the function that computes s2e for a SINGLE block.
-    # This is the function we will vectorize with `jax.vmap`.
+    # It is called once per block below.
     # It takes the start and end indices for its block as arguments.
     def compute_block_s2e(i_start, i_end):
 
@@ -224,17 +218,10 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
         # Final result for this block, with a safeguard for division by zero
         return jnp.where(nnaobs > 0, temp_p / nnaobs, 0.0)
 
-    # 3. Prepare inputs for vmap
-    # We want to call compute_for_one_block for each pair of (start, end) indices.
+    # 3. One value per block: a Python loop over the static block boundaries,
+    # unrolled by jit
     starts = block_p[:-1]
     ends = block_p[1:]
-
-    # 4. Vectorize the single-block function over the start and end indices.
-    # vmap will effectively call:
-    # compute_block_s2e(starts[0], ends[0])
-    # compute_block_s2e(starts[1], ends[1])
-    # ... and so on, but in a single, efficient, compiled operation.
-
     s2e = jnp.asarray([compute_block_s2e(s, e) for s, e in zip(starts, ends)])
 
     return s2e

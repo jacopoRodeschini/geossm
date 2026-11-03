@@ -127,16 +127,37 @@ environment variable or, before the first computation,
 
 **Where it is saved.** In that directory only, one file per compiled program
 (named after the jitted function and the key, e.g. ``jit__filter_kernelJAX-
-<hash>``). JAX chooses no default location; ``~/.cache/jax`` above is just a
-convention.
+<hash>``), plus, on a GPU, a ``xla_gpu_per_fusion_autotune_cache_dir``
+subdirectory with XLA's autotuning results. JAX chooses no default location;
+``~/.cache/jax`` above is just a convention. For the Agrimonia example it
+holds 14 files, 2.8 MB.
 
 **What is cached.** Only programs whose compilation took at least
 ``jax_persistent_cache_min_compile_time_secs`` (1 s by default): geossm's
-filter, smoother, M-step and Hessian kernels, but not the many small
-operations compiled in a fraction of a second, which is why a cached first
-fit still takes about 10 s instead of the 3 s of a later fit in the same
-process. Lowering the threshold (e.g. to 0) caches those too, at the cost of
-many small files.
+filter, smoother, M-step, prediction and Hessian kernels, but not the many
+small operations compiled in a fraction of a second. Lowering the threshold
+(e.g. to 0) caches those too, at the cost of many small files. Measured on the
+Agrimonia example (GPU, float32, 4 EM iterations):
+
+.. list-table::
+   :header-rows: 1
+
+   * - First call in a new process
+     - ``fit``
+     - ``compute_cov_params`` (Hessian)
+     - ``get_prediction``
+   * - empty cache
+     - 49 s
+     - 55 s
+     - 11 s
+   * - cache filled by an earlier run
+     - 9.4 s
+     - 4.1 s
+     - 2.4 s
+   * - (later call in the same process)
+     - 3.4 s
+     - 1.9 s
+     - 2.0 s
 
 **Lifetime and size.** Entries never expire: a file stays until it is
 deleted. Entries that no longer match (after upgrading JAX or the GPU driver,

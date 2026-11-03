@@ -526,12 +526,9 @@ class DesignMatrices:
         self.N, self.b, self.T = self.X.shape
         self.terms = ModelDesc.from_formula(self.formula)
 
-        # Convert to JAX arrays if requested
-        # if self.backend == "jax":
+        # X and y as JAX arrays (timestamps stay NumPy: JAX arrays are numeric only)
         self.y = jnp.array(self.y) if self.y is not None else None
         self.X = jnp.array(self.X)
-            # Only arrays of numeric types are supported by JAX.
-            # self.timestamps = jnp.array(self.timestamps)
 
     def astype(self, dtype) -> "DesignMatrices":
         """
