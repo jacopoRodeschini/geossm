@@ -1,39 +1,28 @@
+# Development environment for geossm (CPU).
+#
+#   conda env create -f environment.yml && conda activate geossm
+#
+# The native geospatial/mesh stack comes from conda-forge; everything else,
+# geossm itself (editable) included, is installed by pip from pyproject.toml,
+# which is the single place where the supported version ranges live. Nothing
+# is pinned here: this is the same recipe the CI workflows use.
+#
+# GPU: after creating the environment, `pip install -U "jax[cuda12]"` (see the
+# JAX installation guide for the CUDA versions supported by your driver).
 name: geossm
 channels:
   - conda-forge
-  - defaults
 dependencies:
-  - python=3.10
-  - psutil=6.0.0
-  - matplotlib=3.9.1
-  - pandas=2.2.2
-  - numpy=2.2.6
-  - scipy=1.15.3
-  - numba=0.63.1
-  - statsmodels=0.14.6
-  - patsy=1.0.2
-  # Geospatial packages
-  - geopandas=1.1.2
-  - shapely=2.1.2
-  # Physics/Mesh packages
-  - gmsh=4.15.0
-  - pygmsh=7.1.17  
-  - meshio=5.3.5
-  # JAX packages
-  - jax=0.6.2
-  - jaxlib=0.6.2
-  - optax=0.2.0
-  # Interactive/Jupyter packages
-  - ipykernel=6.29.5
-  - ipympl=0.9.4
-  - ipython=8.27.0
-  - ipywidgets=8.1.5
-  - pandoc=3.4
-  - markdown-it-py=3.0.0
-  - black=26.1.0
-  # Support for parquet files
-  - pyarrow=24.0.0
+  - python=3.12
+  - pip
+  # Native geospatial/mesh stack
+  - geopandas
+  - shapely
+  - pyarrow
+  - gmsh
+  - python-gmsh
+  # Tools used outside the package (formatting, notebook export)
+  - black
+  - pandoc
   - pip:
-    - mfem==4.8.0.1
-    - gstools==1.7.0
-    - .               # Install geossm in editable mode (pip install -e .)
+    - -e .[test,interactive]

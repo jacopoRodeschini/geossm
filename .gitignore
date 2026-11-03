@@ -1,10 +1,13 @@
+# Workflow 
+.github/
+
+# Audit
+docs/design_audit/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# workflows
-.github/
 
 # C extensions
 *.so
@@ -189,5 +192,4 @@ cython_debug/
 .pypirc
 
 # Test
-tests/
-
+# tests/

@@ -69,7 +69,10 @@ jobs:
 
       - name: Build HTML docs
         shell: bash -el {0}
-        run: sphinx-build -b html docs/source docs/build/html
+        # -W --keep-going: any warning (broken cross-reference, docstring
+        # syntax, a public object missing from api.rst's toctree) fails the
+        # build, after reporting all of them (Section R).
+        run: sphinx-build -b html -W --keep-going docs/source docs/build/html
 
       - name: Upload built docs as a workflow artifact
         uses: actions/upload-artifact@v4

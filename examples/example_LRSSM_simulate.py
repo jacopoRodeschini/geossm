@@ -5,33 +5,19 @@ Created on Tue Feb 10 13:38:28 2026
 
 @author: jacopo
 """
-# %% 
+# %% [imports]
+
+import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
 import numpy as np
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
-import pygmsh
-import gmsh
 import geopandas as gpd
 from datetime import date, timedelta
-import geossm
-
-
-
-# %% import the geossm package
-
-
-# print("Version: ", geossm.__version__)
-print("Load from: ", geossm.__file__)
-
-
-# %% Import the Matern model based on the SPDE approach R^2
-
-if geossm.__file__:
-    # import lrssm
-    from geossm.covmodel import spdeAppoxCov as matern_spde
-    from geossm.stmodel import ModelParams
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-
+from geossm.covmodel import SPDEApproxCov, buildMesh2d
+from geossm.stmodel import LRStateSpaceModel as lrssm
+import geossm.stmodel as st
 
 # %% Simulate random point in a convex space
 
@@ -40,7 +26,7 @@ center = (0, 0)
 radius = 1
 circle = Point(center).buffer(radius)
 
-points = np.random.uniform(-radius, radius, (200, 2))
+points = np.random.uniform(-radius, radius, (500, 2))
 
 # take the mask of the points that are inside the circle
 mask = np.array([circle.contains(Point(p)) for p in points])
@@ -57,70 +43,17 @@ plt.legend()
 plt.axis("equal")
 plt.show()
 
-# %% Create a mesh
-
-
-def buildMesh(poly, lc, points, lc_buffer=None, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-
-        if lc_buffer is None:
-            lc_buffer = lc
-
-        coords = np.array(
-            poly.buffer(lc_buffer).simplify(lc_buffer).exterior.coords[:-1]
-        )
-        domain = geom.add_polygon(coords, mesh_size=lc_buffer * 0.1)
-
-        # 2. Add physical group for the domain surface (good practice)
-        geom.add_physical(domain, label="surface_domain")
-
-        # Add points for the boundary
-        embedded_tags = []
-        for p in points:
-            t = gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-            embedded_tags.append(t)
-
-        gmsh.model.occ.synchronize()  # Synchronize OCC entities before using them in fields
-
-        # fix the points
-        gmsh.model.mesh.embed(0, embedded_tags, 2, domain._id)
-
-        gmsh.option.setNumber("Mesh.Algorithm", 6)
-
-        # CRITICAL: Tell Gmsh NOT to force density based on the internal points
-        gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
-        gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
-
-        # Allow triangles to be very large
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMax", lc)
-        # Only limit the absolute minimum to prevent crashes
-        gmsh.option.setNumber("Mesh.CharacteristicLengthMin", lc * 0.1)
-
-        # 5. Generate
-        gmsh.model.mesh.generate(2)
-
-        gmsh.model.mesh.optimize("Laplace2D")
-        gmsh.option.setNumber("Mesh.Smoothing", 10)
-
-        # # This allows the optimizer to move nodes more freely
-        gmsh.option.setNumber("Mesh.Optimize", 1)
-        gmsh.option.setNumber("Mesh.OptimizeNetgen", 1)
-
-        mesh = geom.generate_mesh()
-
-    return mesh
-
-
-mesh_io = buildMesh(circle, 1, points)
-print(mesh_io)
-
-
 # %% Create the covariance function
 
-cov_fun = matern_spde(latlon=False, nu=1, var=2, rescale=4)
-cov_fun = cov_fun.setup(mesh_io, domain=circle)
+# build the discretisation mesh 
+mesh_io, poly = buildMesh2d(points, domain=circle, lowrank=0.75, 
+            offset=0.2,bandwidth=0.01)
+print(mesh_io)
 
-# PLot the mesh behind the cov. function
+# build the covariance function using the SPDE approximation
+cov_fun = SPDEApproxCov(latlon=False).setup(mesh_io, domain=circle)
+
+# Plot the mesh behind the cov. function
 fig, ax = plt.subplots(figsize=(8, 8))
 cov_fun.fem_solver.plot_mesh(ax=ax)
 ax.plot(points[:, 0], points[:, 1], "ro", label="Observation Points")
@@ -131,65 +64,52 @@ ax.grid(True, linestyle="--", alpha=0.6)
 ax.legend()
 plt.show()
 
+# %% Build the model (which allows only for geopandas)
 
-# %% Build the model (which allows oly for geopandas)
+def build_gdf(points, T=50):
 
-# Create the spatio-temporal covariates (e.g. temperature and humidity)
-n = points.shape[0]
-T = 20
+    # Create the spatio-temporal covariates (e.g. temperature and humidity)
+    n = points.shape[0]
+   
+    # repeat the points T times for the temporal dimension
+    _points = np.tile(points, (T, 1, 1)).reshape(-1, 2) 
 
-# repeat the points T times for the temporal dimension
-_points = np.tile(points, (T, 1, 1)).reshape(-1, 2) 
+    d = np.linspace(0, 2 * np.pi, n)
 
-d = np.linspace(0, 2 * np.pi, n)
+    t2m = np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+    t2m = t2m.reshape(-1, )
 
-t2m = np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-t2m = t2m.reshape(-1, )
+    humidity = 1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
+    humidity = humidity.reshape(-1, )
 
-humidity = 1 / 2 * np.sin(d).reshape(-1, 1) + np.random.normal(0, 1, size=n * T).reshape(n, T)
-humidity = humidity.reshape(-1, )
+    tstart = date(2020, 1, 1)
+    time = np.sort(np.tile([tstart + timedelta(days=d) for d in range(T)], n))
 
-tstart = date(2020, 1, 1)
-time = np.sort(np.tile([tstart + timedelta(days=d) for d in range(T)], n))
+    # Create a GeoDataFrame from the points
+    gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(_points[:, 0], _points[:, 1]))
+    gdf["temperature"] = t2m
+    gdf["humidity"] = humidity
+    gdf["Time"] = time
+    gdf.crs = "EPSG:4326"  # Set the coordinate reference system
 
-# Create a GeoDataFrame from the points
-gdf = gpd.GeoDataFrame(geometry=gpd.points_from_xy(_points[:, 0], _points[:, 1]))
-gdf["temperature"] = t2m
-gdf["humidity"] = humidity
-gdf["Time"] = time
-gdf.crs = "EPSG:4326"  # Set the coordinate reference system
-
-
-# %% Plot the covariates
-
-inx = gdf.geometry == gdf.geometry[0]
-
-# plot the temperature and humidity for the firs points
-fig, ax = plt.subplots(1, 1, figsize=(12, 6))
-ax.plot(gdf[inx]["humidity"],'o', linestyle='--', label="Humidity")
-ax.set_title("Humidity")
-ax.set_xlabel("Longitude")
-ax.set_ylabel("Latitude")
-plt.grid(True, linestyle="--", alpha=0.6)
-ax.legend()
-plt.show()
-
+    return gdf
 
 # %% build the lrssm and set the covariance function
 
+gdf = build_gdf(points, T=50)
 model = lrssm(
     df=gdf, 
     formulas=["humidity ~ 1 + temperature", "temperature ~ 1"], 
     domain=[circle, circle], 
     verbose=True)
-print(model)
 
 # Set up the model cov. (univariate)
 model = model.setup(cov_fun=[cov_fun])
 print(model)
 
 # %% [Case 1] Create the model parameters and simulate the model
-params = ModelParams(beta=[0.1, 0.5, 2], A=np.array([[3],[2]]), s2e=[2, 2], ks=[20], f=[0.9])
+
+params = st.ModelParams(beta=[0.1, 0.5, 2], A=np.array([[3],[2]]), s2e=[2, 2], ks=[20], f=[0.9])
 
 # The simulation does not change the model propoerties
 y_sim, x_sim, info, tdelta = model.sim(params=params, stats=True, verbose=True)
@@ -198,10 +118,15 @@ print(y_sim.shape)
 print(x_sim.shape)
 
 # %% [Case 2] Simulate the model with specific covariates 
+theta = 0.3
+ks = np.sqrt(8)/theta
 
-params = ModelParams(beta=[0.1, 0.5, 2, 1.2, 3], A=np.array([[3],[2]]), s2e=[2, 2], ks=[2], f=[0.9])
+beta=[0.1, 0.5, 2, 1.2, 3]
+params = st.ModelParams(beta=beta, A=np.array([[3],[2]]), s2e=[2, 2], ks=[ks], f=[0.9])
 
-y_sim, x_sim, info, tdelta = model.sim(formulas=["1 + temperature", "1 + humidity + I(humidity ** 2)"], params=params, stats=True, verbose=True)
+y_sim, x_sim, info, tdelta = model.sim(
+        formulas=["1 + temperature", "1 + humidity + I(humidity ** 2)"], 
+        params=params, stats=True, verbose=True)
 
 Xbeta = info['Xbeta']
 x_names = info['xbeta_names']
@@ -216,7 +141,8 @@ fix, ax = plt.subplots(2,3, figsize=(18, 12))
 for i, t in enumerate([0, 3, 6, 9, 12, 19]):
     row = i // 3
     col = i % 3
-    ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[block[1]: block[2], t], cmap="viridis")
+    ax[row, col].scatter(pt[:, 0], pt[:, 1], c=y_sim[block[1]: block[2], t], 
+        cmap="viridis", marker="o", s=70, label=f"Time Step {t+1}")
     ax[row, col].plot(*circle.boundary.xy, color="red", label="Domain Boundary")
     ax[row, col].set_xlabel("X-axis")
     ax[row, col].set_ylabel("Y-axis")
@@ -232,3 +158,4 @@ for i, t in enumerate([0, 3, 6, 9, 12, 19]):
     label="Simulated $PM_{10}$",
 )"""
 plt.show()
+plt.close()

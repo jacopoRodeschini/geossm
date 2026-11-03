@@ -25,6 +25,11 @@ The workflow
    The constructor validates the input (CRS/geometry, time column,
    regular time spacing, formula columns) and optionally restricts the
    data to a time window (``tmin``/``tmax``) or spatial ``domain``.
+   Coordinates are used as they are, in the units of the data CRS (no
+   reprojection); a geographic CRS gives a warning. A site that is not a
+   ``Point`` is represented by its centroid (with a warning). Prediction
+   data in another CRS are reprojected to the training CRS, with a
+   warning.
 #. Call :meth:`~geossm.data_preparation.DesignMatricesBuilder.build` to
    obtain a :class:`~geossm.data_preparation.DesignMatrices` instance.
 
@@ -44,6 +49,23 @@ values are kept as ``NaN`` (not dropped), so the site x time grid stays
 rectangular -- this is what lets the state-space models below treat
 irregular reporting as ordinary missing data in the Kalman filter.
 
+Data rules:
+
+- The formula is evaluated on the columns as given; ``X`` and ``y`` are
+  cast to ``dtype`` afterwards.
+- The response must be numeric (one column); infinite values become
+  missing, with a warning.
+- Repeated (site, time) rows: the first row of each pair (in the input
+  order) is kept, with a warning.
+- Missing or infinite covariates are kept in ``X``. In
+  :class:`~geossm.stmodel.LRStateSpaceModel` the corresponding (site,
+  time) observations are treated as missing in ``fit()`` and their fitted
+  values are ``NaN`` (with a warning); a prediction with a missing
+  covariate is ``NaN`` (with a warning).
+- Sites whose response is never observed are dropped.
+- Timestamps must be regularly spaced (fixed steps, months, quarters or
+  years).
+
 Predicting at new locations/times
 ------------------------------------
 
@@ -52,7 +74,8 @@ builder can construct design matrices for new data with
 :meth:`~geossm.data_preparation.DesignMatricesBuilder.build_predict`,
 reusing the training formula's fitted state (e.g. ``standardize(...)``
 statistics) so covariates are transformed consistently between training
-and prediction.
+and prediction. Timestamps outside the training period are dropped, with
+a warning (the latent state exists only on that period).
 
 Where this fits in
 --------------------

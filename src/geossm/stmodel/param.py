@@ -10,15 +10,45 @@ configures the EM stopping rule used by `fit`.
 """
 
 from dataclasses import dataclass, replace
+from typing import Optional
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax import tree_util
 
 # %% Data class supports
 
-# Sentinel string used in aux_data when bse is None.
-# A plain string is hashable and is never confused for a JAX array.
-_NONE_BSE = "__bse_is_none__"
+
+class _StaticArray:
+    """Hashable, value-compared holder for an array kept in pytree aux data.
+
+    JAX hashes and compares aux data (jit cache keys, tree-structure
+    equality), which raises for a raw array (finding F13). Two holders are
+    equal when their arrays have the same shape, dtype and values; the
+    original array object is kept and returned on unflatten.
+    """
+
+    __slots__ = ("array", "_key")
+
+    def __init__(self, array):
+        self.array = array
+        a = np.asarray(array)
+        self._key = (a.shape, a.dtype.str, a.tobytes())
+
+    def __hash__(self):
+        return hash(self._key)
+
+    def __eq__(self, other):
+        return isinstance(other, _StaticArray) and self._key == other._key
+
+
+def _to_static(x):
+    return None if x is None else _StaticArray(x)
+
+
+def _from_static(x):
+    return None if x is None else x.array
 
 
 def _safe_asarray(value):
@@ -32,40 +62,70 @@ def _safe_asarray(value):
             return jnp.atleast_1d(jnp.asarray(value))
 
 
-@dataclass
+@dataclass(frozen=True)
 class FitOptions:
     """
     Stopping-rule and logging options for :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
 
+    Immutable: fields cannot be reassigned after construction; use
+    ``dataclasses.replace(options, max_iter=50)`` to derive modified options.
+    The results of a fit keep the `FitOptions` they were fitted with
+    (`LRStateSpaceResults.options`).
+
     Parameters
     ----------
     max_iter : int, default 20
-        Maximum number of EM iterations to run.
+        Maximum number of EM iterations to run (>= 1).
     tol_relat : float, default 1e-3
-        Relative log-likelihood-improvement tolerance below which the EM
-        iteration is considered converged and stops early (before
-        `max_iter` is reached).
-    verbose : bool, default True
-        If `True`, log per-iteration progress during `fit`.
+        Convergence tolerance (>= 0) on the log-likelihood change per observed
+        value, ``|llf_k - llf_{k-1}| / n_obs``. EM stops as converged once
+        it is reached (before `max_iter`), including when the change is a
+        decrease of that size (iterates oscillating on the plateau). Unlike
+        a change relative to ``|llf|``, it does not depend on additive
+        constants in the log-likelihood.
+    verbose : bool or None, default None
+        If `True`, print the model summary and the per-iteration progress
+        during `fit`, if `False` nothing; `None` uses the model's `verbose`.
+        For that call only: the model's own `verbose` is not changed.
     force_iter : bool, default False
-        If `False`, `fit` enforces a monotonically increasing
-        log-likelihood: it stops at the first decrease and returns the last
-        valid estimate. If `True`, a decrease only triggers a warning and
-        the EM iterations continue (useful when poor initial values make
-        the log-likelihood oscillate at the start). A NaN/Inf
-        log-likelihood always stops the algorithm and returns the last
-        valid estimate.
+        How a log-likelihood decrease larger than `tol_relat` is handled.
+        If `False`, `fit` stops at the first one and returns the
+        highest-likelihood estimate seen. If `True`, it only triggers a
+        warning and the EM iterations continue (useful when poor initial
+        values make the log-likelihood oscillate at the start). A NaN/Inf
+        log-likelihood always stops the algorithm and returns the
+        highest-likelihood estimate seen.
     std : bool, default True
         If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
         computed after the EM loop (left as `None`) -- useful when the
-        ``(p, p, T)`` array does not fit in device memory.
+        ``(p, p, T)`` array does not fit in device memory. ``std``
+        switches the whole covariance (the standard deviations are the
+        square roots of its diagonal).
+    ks_tol : float, default 1e-6
+        Tolerance of the `ks` M-step (L-BFGS-B over ``log(ks)``): it stops
+        when the gradient of its objective (the `ks`-dependent part of the
+        expected complete-data log-likelihood) is below `ks_tol` times the
+        objective's magnitude at the start of the M-step, so the tolerance
+        does not depend on the size of the problem.
     """
 
     max_iter: int = 20
     tol_relat: float = 1e-3
-    verbose: bool = True
+    verbose: Optional[bool] = None
     force_iter: bool = False
     std: bool = True
+    ks_tol: float = 1e-6
+
+    def __post_init__(self):
+        if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
+                or self.max_iter < 1:
+            raise ValueError(f"max_iter must be an integer >= 1, got {self.max_iter!r}.")
+        if not (isinstance(self.tol_relat, (int, float, np.number)) and np.isfinite(self.tol_relat)
+                and self.tol_relat >= 0):
+            raise ValueError(f"tol_relat must be a finite number >= 0, got {self.tol_relat!r}.")
+        if not (isinstance(self.ks_tol, (int, float, np.number)) and np.isfinite(self.ks_tol)
+                and self.ks_tol > 0):
+            raise ValueError(f"ks_tol must be a finite number > 0, got {self.ks_tol!r}.")
 
     def __str__(self):
         lines = ["FitOptions:"]
@@ -95,6 +155,8 @@ class Param:
     (non-differentiable) auxiliary data. A fixed parameter (or one with
     `value=None`) has no leaves at all, so it is excluded from
     gradient-based updates during :meth:`~geossm.stmodel.LRStateSpaceModel.fit`.
+    Under ``jax.jit`` its value is a compile-time constant: an equal value
+    reuses the compiled function, a different one recompiles.
 
     Parameters
     ----------
@@ -145,11 +207,21 @@ class Param:
         return Param(name=self.name, value=new_value, fixed=self.fixed)
 
     def freeze(self):
-        """Return a copy of this parameter with `fixed=True`."""
+        """Return a copy of this parameter with `fixed=True`.
+
+        Returns
+        -------
+        Param
+        """
         return Param(self.name, self.value, True)
 
     def unfreeze(self):
-        """Return a copy of this parameter with `fixed=False`."""
+        """Return a copy of this parameter with `fixed=False`.
+
+        Returns
+        -------
+        Param
+        """
         return Param(self.name, self.value, False)
 
     @property
@@ -169,31 +241,46 @@ class Param:
     # JAX pytree registration
     #
     # children  = differentiable leaves  -> only `value` when free & not None
-    # aux_data  = static metadata        -> name, fixed, bse (all non-array)
+    # aux_data  = static metadata        -> name, fixed, the value of a fixed
+    #             parameter, bse (computed FROM the Hessian, not through it)
     #
-    # bse lives in aux_data (it is computed FROM the Hessian, not through it).
-    # We use the string _NONE_BSE instead of Python None because aux_data must
-    # survive pytree equality checks without touching any JAX machinery.
+    # Arrays in aux_data are wrapped in _StaticArray so that JAX can hash and
+    # compare it: under jit a fixed value is a compile-time constant (an equal
+    # value reuses the compiled function, a different one recompiles).
     # ------------------------------------------------------------------
 
     def tree_flatten(self):
+        """JAX pytree protocol: ``(children, aux_data)``, with `value` the only
+        child when the parameter is free (see the comment above).
+
+        Returns
+        -------
+        children : tuple
+        aux_data : tuple
+        """
+        static_bse = _to_static(self.bse)
         if self.fixed or self.value is None:
-            children = ()
-            aux_data = (self.name, self.value, self.fixed, self.bse)
-        else:
-            children = (self.value,)
-            bse_aux = _NONE_BSE if self.bse is None else self.bse
-            aux_data = (self.name, self.fixed, bse_aux)
-        return children, aux_data
+            return (), (self.name, self.fixed, _to_static(self.value), static_bse)
+        return (self.value,), (self.name, self.fixed, None, static_bse)
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
-        if len(children) == 0:
-            name, value, fixed, bse = aux_data
-        else:
-            name, fixed, bse_aux = aux_data
-            (value,) = children
-            bse = None if bse_aux == _NONE_BSE else bse_aux
+        """JAX pytree protocol: rebuild a `Param` from `tree_flatten`'s output.
+
+        Parameters
+        ----------
+        aux_data : tuple
+            ``(name, fixed, static value, static bse)``.
+        children : tuple
+            ``(value,)`` for a free parameter, else empty.
+
+        Returns
+        -------
+        Param
+        """
+        name, fixed, static_value, static_bse = aux_data
+        value = children[0] if children else _from_static(static_value)
+        bse = _from_static(static_bse)
         # Bypass __post_init__ to avoid calling jnp.asarray on a JAX tracer.
         obj = object.__new__(cls)
         obj.name = name
@@ -270,11 +357,21 @@ class ModelParams:
         return Param(name=name, value=_safe_asarray(value), fixed=False)
 
     def as_dict(self):
-        """dict: Map each field name to its `Param.value` (fixed and free)."""
+        """Map each field name to its `Param.value` (fixed and free).
+
+        Returns
+        -------
+        dict
+        """
         return {k: getattr(self, k).value for k in self.__dataclass_fields__}
 
     def free_params(self):
-        """dict: Map each non-fixed field name to its `Param.value`."""
+        """Map each non-fixed field name to its `Param.value`.
+
+        Returns
+        -------
+        dict
+        """
         return {
             k: getattr(self, k).value
             for k in self.__dataclass_fields__
@@ -286,13 +383,22 @@ class ModelParams:
 
     @property
     def size(self):
+        """int: Total number of elements of all the parameter values."""
         return self.__len__()
 
     @property
     def shape(self):
+        """tuple: ``(size,)``, the shape of the flattened parameters."""
         return (self.size,)
 
     def tree_flatten(self):
+        """JAX pytree protocol: the seven `Param` fields as children.
+
+        Returns
+        -------
+        children : tuple of Param
+        aux_data : None
+        """
         children = (
             self.beta,
             self.s2e,
@@ -306,6 +412,17 @@ class ModelParams:
 
     @classmethod
     def tree_unflatten(cls, aux_data, children):
+        """JAX pytree protocol: rebuild a `ModelParams` from its children.
+
+        Parameters
+        ----------
+        aux_data : None
+        children : tuple of Param
+
+        Returns
+        -------
+        ModelParams
+        """
         return cls(*children)
 
     def __str__(self):
@@ -330,7 +447,12 @@ class ModelParams:
         return self.__str__()
 
     def copy(self):
-        """Return a deep copy of the ModelParams."""
+        """Return a deep copy of the ModelParams.
+
+        Returns
+        -------
+        ModelParams
+        """
         def _cp(p):
             return Param(
                 p.name,

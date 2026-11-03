@@ -13,6 +13,7 @@ a printable summary.
 
 from __future__ import annotations
 from typing import Optional, Any, Tuple, Dict
+import copy
 import warnings
 
 import numpy as np
@@ -22,7 +23,7 @@ from scipy.stats import jarque_bera, skew, kurtosis
 from statsmodels.stats.stattools import durbin_watson, omni_normtest
 from datetime import date
 import jax
-from geossm.utils import _select_device, format_info_table
+from geossm.utils import _select_device, format_info_table, _summary_table_source
 
 ArrayLike = Optional[Any]
 
@@ -59,6 +60,13 @@ def _safe_sqrt_variance(var: np.ndarray, *, context: str = "") -> np.ndarray:
         return np.sqrt(safe)
 
 
+def _format_names(names):
+    """Response name(s) for the summary: a list or tuple is joined with ", "."""
+    if isinstance(names, (list, tuple)):
+        return ", ".join(map(str, names))
+    return names
+
+
 class StateSpaceResults:
     """Container for state-space model estimation results (filter and/or
     smoother outputs), with convenience methods for residuals, error
@@ -72,11 +80,13 @@ class StateSpaceResults:
     (converted from JAX arrays on construction, see `to_numpy`) in the
     dtype of the originating model.
 
+    The results do not reference the model: what they need from it is
+    copied when they are created (observed data, regressors, observation-
+    noise variances, shape, names, summary labels), so later changes to the
+    model do not change them.
+
     Attributes
     ----------
-    model : object or None
-        The `geossm.ssm.statespace.StateSpaceModel` (or subclass) instance
-        that produced these results.
     y_obs : numpy.ndarray, shape (p, T)
         Observed data used for fitting (may contain ``NaN``).
     y_hat : numpy.ndarray, shape (p, T)
@@ -101,10 +111,17 @@ class StateSpaceResults:
         `geossm.ssm.statespace._compute_expected_values_kernelJAX`.
     llf : float or None
         Model log-likelihood.
+    nobs, missing : int or None
+        Number of observed (non-NaN) and of missing entries of ``y_obs``;
+        ``nobs`` is the sample size used by BIC and ``df_resid``.
     time_filter, time_smoother, time_expectation, time_total : float
         Wall-clock runtimes (seconds) of the filter, smoother, expected-
         value/sufficient-statistics computation, and their sum.
     """
+
+    #: Array attributes a subclass keeps elsewhere and exposes as properties
+    #: (`LRStateSpaceResults`: the latent state, held by its `FittedState`).
+    _DELEGATED_FIELDS = frozenset()
 
     def __init__(
         self,
@@ -117,7 +134,7 @@ class StateSpaceResults:
         params_names=None,
         params_dim=None,
         y_obs=None,
-        yname=None,
+        y_name=None,
         Xbeta=None,
         backend=None,
         dtype=None,
@@ -151,10 +168,13 @@ class StateSpaceResults:
         ----------
         model : object or None
             The fitted `geossm.ssm.statespace.StateSpaceModel` (or
-            subclass) instance. When given, ``params``, ``params_names``,
-            ``params_dim``, ``yname``, ``y_obs`` (from ``model.y_t``),
-            ``Xbeta``, ``backend`` and ``dtype`` default to the
-            corresponding model attributes unless overridden below.
+            subclass) instance, read once and not stored. When given,
+            ``params``, ``params_names``, ``params_dim``, ``y_name``,
+            ``y_obs`` (from ``model.y_t``), ``Xbeta``, ``backend`` and
+            ``dtype`` default to the corresponding model attributes unless
+            overridden below; its observation-noise variances, shape,
+            response names and summary labels (class name, type, order) are
+            copied.
         y_hat : array_like, shape (p, T)
             Predicted/fitted observation means.
         Sigma_y_hat : array_like, shape (p, p, T), optional
@@ -167,8 +187,8 @@ class StateSpaceResults:
             `params_dim`.
         y_obs : array_like, shape (p, T), optional
             Override for the observed data (defaults to ``model.y_t``).
-        yname : str, optional
-            Override for the dependent variable's name.
+        y_name : str or sequence of str, optional
+            Override for the dependent variable's name(s).
         Xbeta : array_like, shape (p, b, T), optional
             Override for the exogenous regressors.
         backend : {'auto', 'cpu', 'gpu'} or jax.Device, optional
@@ -199,8 +219,7 @@ class StateSpaceResults:
             EM sufficient statistics.
         """
 
-        # ---- Update the metadata from the model----
-        self.model = model
+        # ---- Metadata from the model (read here, not stored) ----
 
         # ---- Backend: default to the model's backend, so any JAX
         # computation performed on the results (e.g. the Hessian in
@@ -229,16 +248,14 @@ class StateSpaceResults:
             self.params = getattr(model, "params", None)
             self.params_names = getattr(model, "params_names", None)
             self.params_dim = getattr(model, "params_dim", None)
-            self.yname = getattr(model, "yname", None)
-            self.y_obs = getattr(model, "y_t", None)  # observed data (from model)
-            self.Xbeta = getattr(model, "Xbeta", None)
+            names = getattr(model, "y_name", None)
+            self.y_name = tuple(names) if isinstance(names, list) else names
+            # observed data and regressors default to the model's
+            y_obs = getattr(model, "y_t", None) if y_obs is None else y_obs
+            Xbeta = getattr(model, "Xbeta", None) if Xbeta is None else Xbeta
 
-        if y_obs is not None:
-            self.y_obs = y_obs
-        if yname is not None:
-            self.yname = yname
-        if Xbeta is not None:
-            self.Xbeta = Xbeta
+        if y_name is not None:
+            self.y_name = y_name
         if params is not None:
             self.params = params
         if params_names is not None:
@@ -246,36 +263,48 @@ class StateSpaceResults:
         if params_dim is not None:
             self.params_dim = params_dim
 
-        # ---- likelihood ----
-        self.llf = llf
+        # ---- likelihood (a Python float, not a 0-d array) ----
+        self.llf = None if llf is None else float(llf)
         self.time_filter = time_filter
         self.time_smoother = time_smoother
         self.time_expectation = time_expectation
         self.time_total = self.time_filter + self.time_smoother + self.time_expectation
 
         # ---- arrays ----
-        self.y_hat = y_hat
-        self.Sigma_y_hat = Sigma_y_hat
         self.tdelta_hat = tdelta_hat
         self.x_filtered = x_filtered
         self.P_filtered = P_filtered
         self.x_pred = x_pred
         self.P_pred = P_pred
         self.K = K
-        self.x_smoothed = x_smoothed
-        self.P_smoothed = P_smoothed
-        self.P_pred_smoothed = P_pred_smoothed
-
-        # ---- sufficient stats ----
-        self.S11 = S11
-        self.S10 = S10
-        self.S00 = S00
+        # ---- data, fitted values, smoothed states and sufficient stats (kept
+        # elsewhere by a subclass for the names in `_DELEGATED_FIELDS`) ----
+        for name, value in (("y_obs", y_obs), ("Xbeta", Xbeta), ("y_hat", y_hat),
+                            ("Sigma_y_hat", Sigma_y_hat),
+                            ("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
+                            ("P_pred_smoothed", P_pred_smoothed),
+                            ("S11", S11), ("S10", S10), ("S00", S00)):
+            if name not in self._DELEGATED_FIELDS:
+                setattr(self, name, value)
 
         # ---- metadata ----
         self.today = date.today()
 
         # ---- internal cache ----
         self._residuals: Optional[np.ndarray] = None
+
+        # ---- snapshot of the model state the methods below need (F09):
+        # later fit()/set() calls on the model must not change these results.
+        # The model holds the matrices of these results' parameters now.
+        R = getattr(model, "R", None) if model is not None else None
+        self._R = None if R is None else np.array(R, dtype=self._dtype, copy=True)
+        shape = getattr(model, "shape", None) if model is not None else None
+        self._model_shape = None if shape is None else tuple(int(v) for v in shape)
+        self._model_label = {
+            "name": type(model).__name__ if model is not None else "N/A",
+            "type": getattr(model, "type", "N/A"),
+            "order": getattr(model, "order", "N/A"),
+        }
 
         # convert arrays if needed
         self.to_numpy()
@@ -284,12 +313,7 @@ class StateSpaceResults:
         # lazily inside generate_summary()) so they're already available
         # to __repr__ and to any direct caller, without requiring
         # summary()/generate_summary() to have run first. ----
-        if self.y_obs is not None:
-            self.nobs = self.y_obs.size
-            self.nspace, self.ntime = self.y_obs.shape
-            self.missing = int(np.sum(np.isnan(self.y_obs)))
-        else:
-            self.nobs = self.nspace = self.ntime = self.missing = None
+        self._set_observation_counts()
 
     @property
     def backend(self):
@@ -313,6 +337,8 @@ class StateSpaceResults:
         consistent with the precision the model was fit in.
         """
         for attr in [
+            "y_obs",
+            "Xbeta",
             "y_hat",
             "Sigma_y_hat",
             "x_filtered",
@@ -327,17 +353,20 @@ class StateSpaceResults:
             "S10",
             "S00",
         ]:
-            value = getattr(self, attr)
+            if attr in self._DELEGATED_FIELDS:
+                continue
+            value = getattr(self, attr, None)
             if value is not None:
                 setattr(self, attr, np.asarray(value, dtype=self.dtype))
 
     def update(self, **kwargs) -> "StateSpaceResults":
-        """Return a new `StateSpaceResults` with some fields replaced.
+        """Return a new results object with some fields replaced.
 
-        Copies every current public (non-underscore-prefixed) attribute
-        except ``today``, overrides the ones given in ``kwargs``, and
-        constructs a new instance from the result. Does not mutate
-        ``self``.
+        A shallow copy of ``self`` (same class; the stored arrays are
+        shared, they are read-only) with the attributes in ``kwargs``
+        replaced. Values derived from the replaced fields are recomputed
+        or cleared in the copy (observation counts, residuals, coverage;
+        see `_after_update`). Does not mutate ``self``.
 
         Parameters
         ----------
@@ -355,26 +384,44 @@ class StateSpaceResults:
         AttributeError
             If a key in ``kwargs`` is not an existing public attribute.
         """
-
-        # Collect all current attributes (excluding private ones if desired)
-        current_data = {
-            k: v
-            for k, v in self.__dict__.items()
-            if k not in ["today"] and not k.startswith("_")
-        }
-
-        # Validate keys
+        public = {k for k in self.__dict__ if not k.startswith("_")} | self._DELEGATED_FIELDS
         for key in kwargs:
-            if key not in current_data:
+            if key not in public:
                 raise AttributeError(
                     f"{key} is not a valid attribute of {self.__class__.__name__}"
                 )
 
-        # Update values
-        current_data.update(kwargs)
+        new = copy.copy(self)
+        new.__dict__.update({k: v for k, v in kwargs.items() if k not in self._DELEGATED_FIELDS})
+        delegated = {k: v for k, v in kwargs.items() if k in self._DELEGATED_FIELDS}
+        if delegated:
+            new._update_delegated(delegated)
+        new.to_numpy()
+        new._after_update(set(kwargs))
+        return new
 
-        # Create new instance
-        return self.__class__(**current_data)
+    def _update_delegated(self, values):
+        """Replace attributes listed in `_DELEGATED_FIELDS` (called by
+        `update` on the copy); implemented by subclasses that delegate."""
+        raise NotImplementedError
+
+    def _after_update(self, keys):
+        """Recompute or clear what depends on the attributes in `keys`
+        (called by `update` on the copy)."""
+        self._residuals = None
+        self.__dict__.pop("_coverage_probability_cache", None)
+        if "y_obs" in keys:
+            self._set_observation_counts()
+
+    def _set_observation_counts(self):
+        """`nspace`, `ntime`, `missing` and `nobs` (observed values only)
+        from `y_obs`."""
+        if self.y_obs is not None:
+            self.nspace, self.ntime = self.y_obs.shape
+            self.missing = int(np.sum(np.isnan(self.y_obs)))
+            self.nobs = self.y_obs.size - self.missing  # observed values only
+        else:
+            self.nobs = self.nspace = self.ntime = self.missing = None
 
     def _to_numpy(self, arr):
         """Best-effort conversion of a (possibly JAX) array to NumPy, passing ``None`` through."""
@@ -539,9 +586,13 @@ class StateSpaceResults:
         \\sqrt{\\mathrm{diag}(\\Sigma_{\\hat y, t})}`, where
         :math:`\\Sigma_{\\hat y, t}` is `Sigma_y_hat` (the state-driven
         predictive covariance, excluding observation noise) plus, when
-        ``prediction=True``, the observation noise covariance ``R`` read
-        from ``self.model`` - turning a confidence interval for the mean
-        response into a prediction interval for a new observation.
+        ``prediction=True``, the observation noise covariance ``R`` of the
+        parameters these results were computed with (recorded when they
+        were created, so a later fit of the model does not change them) -
+        turning a confidence interval for the mean response into a
+        prediction interval for a new observation. The intervals are
+        plug-in: the estimated parameters are treated as known, so their
+        estimation uncertainty is not included.
 
         Parameters
         ----------
@@ -573,7 +624,6 @@ class StateSpaceResults:
             raise ValueError("y_hat not available.")
 
         p, T = y_hat.shape
-        model = getattr(self, "model", None)
 
         # Sigma_y_hat is snapshotted at fit time by the concrete model
         # subclass (e.g. LRStateSpaceResults), not reconstructed here from
@@ -588,8 +638,10 @@ class StateSpaceResults:
                 "available on this results object."
             )
 
-        R = np.asarray(getattr(model, "R", 0.0)) if model is not None else np.asarray(0.0)
-        R_diag_matrix = np.diag(R) if (prediction and R.ndim > 0) else None
+        # Observation-noise variances of the parameters these results were
+        # computed with (snapshotted at construction), not the model's current R
+        R = getattr(self, "_R", None)
+        R_diag_matrix = np.diag(R) if (prediction and R is not None and R.ndim > 0) else None
 
         lower = np.zeros((p, T), dtype=self.dtype)
         upper = np.zeros((p, T), dtype=self.dtype)
@@ -609,23 +661,36 @@ class StateSpaceResults:
 
         Computes the fraction of observed values ``y_obs`` that fall
         within the ``1 - alpha`` prediction interval from
-        ``conf_int_y(alpha, prediction=True)``; for a well-calibrated
-        model this should be close to ``1 - alpha``.
+        ``conf_int_y(alpha, prediction=True)``. Missing values are left
+        out (they are neither inside nor outside an interval).
+
+        The intervals are in-sample and plug-in: ``y_hat`` is the smoothed
+        (or filtered) fit, which uses the observations themselves, and the
+        parameters are treated as known. The coverage is therefore not an out-of-sample
+        calibration check: it typically exceeds ``1 - alpha`` for a
+        correctly specified model.
 
         Parameters
         ----------
         alpha : float, default 0.05
             Significance level used for the prediction interval.
         which : {'global', 'space', 'time'}, default 'global'
-            Aggregation axis: ``'global'`` averages over all entries;
-            ``'space'`` averages over time (shape ``(p,)``); ``'time'``
-            averages over space (shape ``(T,)``).
+            Aggregation axis: ``'global'`` averages over all observed
+            values; ``'space'`` averages over time (shape ``(p,)``);
+            ``'time'`` averages over space (shape ``(T,)``). A row or
+            column without observations gives ``NaN``.
 
         Returns
         -------
         float or numpy.ndarray
             Empirical coverage probability in ``[0, 1]``, aggregated as
             requested.
+
+        Raises
+        ------
+        ValueError
+            If ``which`` is not one of ``'global'``, ``'space'``,
+            ``'time'``.
         """
         return self._coverage_probability(alpha, which)
 
@@ -654,20 +719,21 @@ class StateSpaceResults:
         return result
 
     def _compute_coverage_probability(self, alpha: float, which: str):
+        axes = {"global": None, "space": 1, "time": 0}
+        if which not in axes:
+            raise ValueError("which must be one of {'global','space','time'}")
         y_true = self.y_obs
 
         lower, upper = self.conf_int_y(alpha, prediction=True)
 
-        inside = (y_true >= lower) & (y_true <= upper)
-
-        if which == "global":
-            return np.nanmean(inside)
-        elif which == "space":
-            return np.nanmean(inside, axis=1)
-        elif which == "time":
-            return np.nanmean(inside, axis=0)
-        else:
-            raise ValueError("which must be 'smoothed' or 'filtered'")
+        # Over the observed values only: a missing value is neither inside nor
+        # outside its interval (F44)
+        observed = ~np.isnan(y_true)
+        inside = np.where(observed, (y_true >= lower) & (y_true <= upper), np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # rows/columns without observations: NaN
+            coverage = np.nanmean(inside, axis=axes[which])
+        return float(coverage) if which == "global" else coverage
 
     @staticmethod
     def _format_runtime_summary(parts) -> Tuple[str, str]:
@@ -703,6 +769,19 @@ class StateSpaceResults:
         dict of str to float
             Keys ``jb``, ``jb_pvalue``, ``omni``, ``omni_pvalue``, ``dw``,
             ``skew``, ``kurtosis``.
+
+        Notes
+        -----
+        The residuals are in-sample: ``y_obs - y_hat``, with ``y_hat`` the
+        fitted values of these results (for a smoother or a fitted
+        `LRStateSpaceModel`, the smoothed fit, which uses the observations
+        themselves), pooled over sites and times. Under a correctly
+        specified model they are neither independent nor standardized, so
+        the usual reference distributions of these statistics (and the
+        reference values shown by `summary`) are only indicative.
+        Durbin-Watson is computed on the residuals concatenated site by
+        site with missing values dropped, so consecutive values may belong
+        to different sites or be separated by gaps.
         """
 
         err = getattr(self, "residuals", None)
@@ -754,7 +833,8 @@ class StateSpaceResults:
 
 
         # top-left / top-right small tables
-        p, q, T = self.model.shape if hasattr(self.model, "shape") else ("N/A", "N/A", "N/A")
+        shape = getattr(self, "_model_shape", None)
+        p, q, T = shape if shape is not None else ("N/A", "N/A", "N/A")
 
         runtime_label, runtime_value = self._format_runtime_summary(
             [
@@ -767,16 +847,14 @@ class StateSpaceResults:
         # Left: identity/config of the model and how it was run.
         top_left = dict(
             [
-                ("Model name:", lambda: [self.model.__class__.__name__]),
+                ("Model name:", lambda: [self._model_label["name"]]),
                 ("Model type (order):",
-                    lambda: [
-                        f"{self.model.type if hasattr(self.model, 'type') else 'N/A'}, {self.model.order if hasattr(self.model, 'order') else 'N/A'}"
-                    ],
+                    lambda: [f"{self._model_label['type']}, {self._model_label['order']}"],
                 ),
-                ("Dep. Variables:", lambda: [self.model.y_name if hasattr(self.model, "y_name") else "N/A"]),
+                ("Dep. Variables:", lambda: [self._dep_variable_name()]),
                 ("Shape (p, q, T) :", lambda: [f"(p = {p}, q = {q}, T = {T})"]),
                 ("# missing:", lambda: [self.missing]),
-                ("Model backend:", lambda: [f"{self.model.backend}, (dtype {self.model.dtype})"]),
+                ("Model backend:", lambda: [f"{self.backend}, (dtype {self.dtype})"]),
                 ("Log-Likelihood:", lambda: ["%#8.5g" % self.llf]),
                 (runtime_label, lambda v=runtime_value: [v]),
             ]
@@ -816,11 +894,13 @@ class StateSpaceResults:
 
         return gen_top_left, gen_top_right
 
-    #: Footnote explaining the "(x*)" reference values shown next to the
-    #: residual diagnostics in `generate_summary()`.
+    #: Footnote lines explaining the residual diagnostics and the "(x*)"
+    #: reference values shown in `generate_summary()` (F49).
     _DIAGNOSTICS_NOTE = (
-        "(x*) reference value expected for normal, uncorrelated residuals "
-        "(or, for Coverage Prob., the nominal 1 - alpha)."
+        "Diagnostics of the in-sample residuals y_obs - y_hat (y_hat: smoothed or filtered fit), pooled",
+        "over sites and times; Durbin-Watson on the residuals concatenated site by site, NaNs dropped.",
+        "(x*) reference value for independent normal residuals (Coverage Prob.: the nominal 1 - alpha).",
+        "In-sample residuals are not independent even under a correct model; in-sample intervals over-cover.",
     )
 
     def summary(self) -> Summary:
@@ -835,24 +915,19 @@ class StateSpaceResults:
             Printable summary table; ``str()``/``repr()`` of this
             results object render this summary.
         """
-        # Ensure numpy arrays for summary stats
-
-        self.results = np.array([0])
-
         gen_top_left, gen_top_right = self.generate_summary()
-
 
         # Generate the summary
         smry = Summary()
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="State Space Model results",
             gleft=gen_top_left,
             gright=gen_top_right,
             yname=None,
             xname=None,
         )
-        smry.add_extra_txt([self._DIAGNOSTICS_NOTE])
+        smry.add_extra_txt(list(self._DIAGNOSTICS_NOTE))
 
         return smry
 
@@ -873,7 +948,7 @@ class StateSpaceResults:
         p, T = y_hat.shape if y_hat is not None else ("N/A", "N/A")
         llf = getattr(self, "llf", None)
         gen_top_left = [
-            ("Dep. Variable:", [getattr(self, "yname", None) or "N/A"]),
+            ("Dep. Variable:", [self._dep_variable_name()]),
             ("Shape (p, T):", [f"({p}, {T})"]),
         ]
         gen_top_right = [
@@ -882,6 +957,11 @@ class StateSpaceResults:
             ("Backend, dtype:", [f"{self.backend}, {self.dtype}"]),
         ]
         return gen_top_left, gen_top_right
+
+    def _dep_variable_name(self):
+        """Response name(s) shown by `summary` and `repr`: the model's
+        `y_name` (one per response variable on `LRStateSpaceModel`)."""
+        return _format_names(getattr(self, "y_name", None)) or "N/A"
 
     def __str__(self):
         return str(self.summary())
@@ -895,6 +975,22 @@ class StateSpaceResults:
         return f"{self.__class__.__name__}\n" + format_info_table(
             gen_top_left + gen_top_right, indent=2
         )
+
+    def __getstate__(self):
+        # The JAX device is not picklable: store its platform (F52)
+        state = self.__dict__.copy()
+        state["_backend"] = getattr(self._backend, "platform", "auto")
+        return state
+
+    def __setstate__(self, state):
+        state = dict(state)
+        platform = state.pop("_backend", "auto")
+        self.__dict__.update(state)
+        # Fall back to 'auto' if the platform (e.g. 'gpu') is not available here
+        try:
+            self._backend = _select_device(platform)
+        except ValueError:
+            self._backend = _select_device("auto")
 
     def as_dict(self) -> Dict[str, Any]:
         """Return a plain dict snapshot of the main results.

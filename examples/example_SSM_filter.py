@@ -4,6 +4,7 @@
 @author: jacopo
 """
 
+# %% 
 import numpy as np
 import matplotlib.pyplot as plt
 import jax
@@ -32,28 +33,11 @@ Xbeta = np.random.normal(0, 1, size=(p, b, T))
 beta = np.ones(b)
 
 # %% Build the model
-model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, dtype=np.float32)
+model = ssm(H, R, F, Q, Xbeta=Xbeta, beta=beta, x0=None, Sigma0=None, 
+            dtype=np.float32, backend="cpu")
 
 print(model)
-
-# %% Simulate the model
-y_sim, x_sim, stats, tdelta = model.sim(seed=1234)
-
-print("Simulate response y:", y_sim.shape)
-print("Simulate stete x:", x_sim.shape)
-print("runtime", tdelta)
-
-# plot one time-series
-fig, ax = plt.subplots(figsize=(10, 6))
-ax.plot(y_sim[0, :], label="Simulated observation (y)")
-ax.plot(x_sim[0, :T], ":", label="Simulated state (x)")
-ax.set_title("Simulated Time Series")
-ax.set_xlabel("Time")
-ax.set_ylabel("Value")
-ax.legend()
-plt.show()
-
-# %% Simulate with dirrent beta
+# %% Simulate with different beta
 
 # regression design matrix
 Xbeta = np.random.normal(1, 2, size=(p, b, 100))
@@ -79,9 +63,7 @@ plt.show()
 
 
 # %% Estimate the model (by filtering the data)
-
 results = model.filter(y_sim)
-print(results)
 
 # print the summary of the results
 print(results)  # = print(results.summary())
@@ -110,9 +92,32 @@ coverage_probability = np.mean(inner)
 print("Coverage Probability of the Filtered State:", coverage_probability)
 
 
-# %% The residual array are all numpy array
+# %% Smoothed state
+results = model.smoother(y_sim)
 
-# Get residuals
+lower_sm, upper_sm = results.conf_int_state(alpha=0.05, which="smoothed")
+
+plt.figure()
+plt.plot(t, x_sim[0, :T], label="Simulated state (x)")
+plt.plot(t, results.x_filtered[0, 1:], ":", label="Filtered state (x_filtered)")
+plt.plot(t, results.x_smoothed[0, 1:], ":", label="Smoothed state (x_smoothed)")
+plt.fill_between(
+    t, lower[0][1:], upper[0][1:], alpha=0.3, label="95% Confidence Interval"
+)
+plt.fill_between(
+    t, lower_sm[0][1:], upper_sm[0][1:], alpha=0.3, label="95% Confidence Interval (smoothed)"
+)
+
+plt.grid()
+plt.xlabel("Time")
+plt.ylabel("Value")
+plt.title("Filtered State with 95% Confidence Interval")
+plt.legend()
+plt.show()
+plt.close()
+
+
+# %% The residual array are all numpy array
 res = results.residuals
 
 # Plot the grouped by boxplot (firs 50 days)
@@ -125,6 +130,7 @@ plt.xticks(rotation=45)
 plt.tight_layout()
 plt.grid()
 plt.show()
+plt.close()
 
 # %% Get the goodness of fit
 # get the mse
@@ -148,26 +154,24 @@ plt.show()
 
 # %% Get the prediction and confidence interval
 
-# get the predicted values
+# get the predicted values from the results object
 y_hat = results.y_hat
 
 # conf_int_y() needs the predictive covariance Sigma_y_hat, which filter()
 # does not compute by default (it's only needed for confidence intervals,
-# not for the filtering itself) -- so compute and attach it here
+# not for the filtering itself)
+
 _, results.Sigma_y_hat = model.predict(
     model.H, results.x_filtered, results.P_filtered, model.Xbeta, model.beta
 )
 
 # get the confidence interval
-lower, upper = results.conf_int_y(alpha=0.05, prediction=True)
-
-
-t = np.arange(y_hat.shape[1])
+lower_pr, upper_pr = results.conf_int_y(alpha=0.05, prediction=True)
 
 plt.figure()
-plt.plot(t, y_hat[0])
-plt.plot(t, y_sim[0], "x")
-plt.fill_between(t, lower[0], upper[0], alpha=0.3)
+plt.plot(y_hat[0])
+plt.plot(y_sim[0], "x")
+plt.fill_between(t, lower_pr[0], upper_pr[0], alpha=0.3)
 plt.grid()
 plt.xlabel("Time")
 plt.ylabel("Value")

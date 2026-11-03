@@ -11,8 +11,9 @@ DesignMatricesBuilder class handles the preparation of the DesignMatrices object
 """
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 import ast
+import warnings
 import numpy as np
 import shapely
 from scipy.spatial.distance import cdist
@@ -25,25 +26,10 @@ from dataclasses import dataclass, field
 
 from statsmodels.iolib.summary import Summary
 
-
-try:
-    import jax
-    import jax.numpy as jnp
-    JAX_AVAILABLE = True
-except ImportError:
-    JAX_AVAILABLE = False
+from geossm.utils import _summary_table_source, _check_x64_for_dtype, _Verbose
 
 
-def _ensure_x64_for_dtype(dtype):
-    """Enable JAX's x64 mode if 64-bit precision was explicitly requested.
-
-    JAX silently truncates float64 arrays back to 32-bit unless x64 mode is
-    enabled. Mirrors geossm.ssm.statespace._ensure_x64_for_dtype; duplicated
-    here (rather than imported) to avoid a circular import with geossm.ssm
-    during package initialization.
-    """
-    if JAX_AVAILABLE and np.dtype(dtype).itemsize == 8 and not jax.config.jax_enable_x64:
-        jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
 
 
 class _NAPassthrough(NAAction):
@@ -278,7 +264,15 @@ def check_regular_timestamps(timestamps):
         return False, None, None
 
     # 3) Try calendar-aware frequency first (works for month/year)
-    inferred = pd.infer_freq(ts_unique) if ts_unique.size >= 3 else None
+    inferred = None
+    if ts_unique.size >= 3:
+        with warnings.catch_warnings():
+            # pandas >= 3.1 warns that infer_freq will return a BaseOffset
+            # instead of a string; both are handled below.
+            warnings.filterwarnings("ignore", message="A future version of pandas will return a BaseOffset")
+            inferred = pd.infer_freq(ts_unique)
+        if inferred is not None and not isinstance(inferred, str):
+            inferred = inferred.freqstr
     if inferred is not None:
         # Normalize aliases like '2MS', 'M', 'YS', etc.
         n = ""
@@ -288,11 +282,15 @@ def check_regular_timestamps(timestamps):
             n += code[i]
             i += 1
         mult = int(n) if n else 1
-        base = code[i:]
+        base = code[i:].split("-")[0]  # drop the anchor of e.g. "YS-JAN", "QS-OCT"
 
         # Month-like frequencies
         if base in {"M", "MS", "BM", "BMS", "ME"}:
             return True, mult, "month"
+
+        # Quarter-like frequencies: three months
+        if base in {"Q", "QS", "QE", "BQ", "BQS", "BQE"}:
+            return True, 3 * mult, "month"
 
         # Year-like frequencies
         if base in {"A", "AS", "Y", "YS", "YE", "BA", "BAS"}:
@@ -363,9 +361,10 @@ class DesignMatrices:
 
     Parameters
     ----------
-    X : numpy.ndarray
+    X : numpy.ndarray or jax.Array
         Covariate design array of shape ``[N, P, T]`` (sites x covariates
-        x timesteps), built from the right-hand side of `formula`.
+        x timesteps), built from the right-hand side of `formula`. Stored
+        as a JAX array (converted in `__post_init__`).
     X_design_info : patsy.design_info.DesignInfo
         Patsy metadata describing how `X`'s columns were built from
         `formula` (term names, factor info, etc.). Reused by
@@ -379,10 +378,13 @@ class DesignMatrices:
         Transformation/expression applied to each covariate term (e.g.
         ``"1"`` for a plain variable, or the full expression for
         ``I(...)``/function terms), as extracted from `formula`.
-    points : list of shapely.geometry.Point or numpy.ndarray
+    points : list of shapely geometries or numpy.ndarray
         The N unique site locations, in the CRS given by `crs`. Passed in
-        as `Point` geometries; converted in `__post_init__` to an
-        ``[N, 2]`` coordinate array of dtype `dtype`.
+        as geometries; converted in `__post_init__` to the ``[N, 2]``
+        float64 array of their centroids (the point itself for a `Point`;
+        planar centroid in CRS units otherwise; any z is ignored). Kept in
+        float64 whatever `dtype`: projected coordinates (e.g. northings
+        around 5e6 m) lose about 0.5 m in float32.
     formula : str
         The Patsy/R-style model formula (e.g.
         ``"AQ_pm10 ~ 1 + WE_temp_2m"``) that `X` (and `y`, if present)
@@ -404,9 +406,10 @@ class DesignMatrices:
         in the unit given by `unit` (see `check_regular_timestamps`).
     unit : str
         Unit of `delta` (e.g. ``"day"``, ``"hour"``, ``"month"``).
-    y : numpy.ndarray, optional
+    y : numpy.ndarray or jax.Array, optional
         Response array of shape ``[N, T]``, built from the left-hand side
-        of `formula`. ``None`` if `formula` has no response (covariates
+        of `formula`, stored as a JAX array (converted in
+        `__post_init__`). ``None`` if `formula` has no response (covariates
         only). Missing observations are ``NaN`` rather than dropped, so
         the site x time grid stays complete.
     y_design_info : patsy.design_info.DesignInfo, optional
@@ -422,9 +425,9 @@ class DesignMatrices:
         Name of the column in the source GeoDataFrame that held the
         timestamps.
     dtype : numpy.dtype, default numpy.float32
-        Numeric precision used for `X`, `y` and `points`. Passing a
-        64-bit dtype (e.g. `numpy.float64`) also enables JAX's x64 mode,
-        since JAX otherwise silently truncates float64 arrays to 32-bit.
+        Numeric precision used for `X`, `y` (JAX arrays) and `points`
+        (NumPy array); `astype` converts them, and for a 64-bit dtype requires
+        JAX's x64 mode to be enabled.
 
     Attributes
     ----------
@@ -477,24 +480,16 @@ class DesignMatrices:
     def __post_init__(self):
         """Validate and normalize the fields set by the dataclass constructor.
 
-        Coerces `dtype`, casts `X`/`y`/`points` to it, validates array
-        shapes, and derives `N`, `b`, `T` and `terms`.
+        Coerces `dtype`, casts `X`/`y` to it, converts `points` to float64
+        centroid coordinates, validates array shapes, and derives `N`, `b`,
+        `T` and `terms`.
         """
-        # Validate backend
-        # if self.backend == "jax" and not JAX_AVAILABLE:
-        #     raise ImportError(
-        #         "JAX is not installed. Install it with `pip install jax` "
-        #         "or use backend='numpy'."
-        #     )
-        # if self.backend not in ("numpy", "jax"):
-        #     raise ValueError(f"backend must be 'numpy' or 'jax', got '{self.backend}'")
 
         # Validate dtype
         try:
             self.dtype = np.dtype(self.dtype)
         except TypeError:
             raise TypeError(f"Invalid dtype: {self.dtype}")
-        _ensure_x64_for_dtype(self.dtype)
 
         # Cast arrays to dtype
         self.y = np.asarray(self.y, dtype=self.dtype) if self.y is not None else None
@@ -503,7 +498,7 @@ class DesignMatrices:
         self.type = np.unique(self.geometry).astype(str)
         # shapely.get_coordinates is a vectorized (C-level) ufunc -- ~35x
         # faster than a per-point Python loop at N in the millions.
-        self.points = shapely.get_coordinates(np.asarray(self.points)).astype(self.dtype)
+        self.points = shapely.get_coordinates(shapely.centroid(np.asarray(self.points))).astype(np.float64)
 
         # Validate shapes
         if self.y is not None and self.y.ndim != 2:
@@ -531,16 +526,14 @@ class DesignMatrices:
         self.N, self.b, self.T = self.X.shape
         self.terms = ModelDesc.from_formula(self.formula)
 
-        # Convert to JAX arrays if requested
-        # if self.backend == "jax":
+        # X and y as JAX arrays (timestamps stay NumPy: JAX arrays are numeric only)
         self.y = jnp.array(self.y) if self.y is not None else None
         self.X = jnp.array(self.X)
-            # Only arrays of numeric types are supported by JAX.
-            # self.timestamps = jnp.array(self.timestamps)
 
     def astype(self, dtype) -> "DesignMatrices":
         """
-        Cast `X`, `y` and `points` to a new numeric dtype, in place.
+        Cast `X` and `y` to a new numeric dtype, in place (`points` stay
+        float64).
 
         Lets an already-built DesignMatrices be realigned with a model's
         dtype (e.g. LRStateSpaceModel.dtype) without re-running formula
@@ -550,14 +543,15 @@ class DesignMatrices:
         ----------
         dtype : numpy.dtype or str
             Target numeric precision (e.g. `numpy.float32`,
-            `numpy.float64`). If it is 64-bit, JAX's x64 mode is enabled
-            (see `dtype` on the class), since JAX otherwise silently
-            truncates float64 arrays to 32-bit.
+            `numpy.float64`). A 64-bit dtype requires JAX's x64 mode to be
+            enabled beforehand (`jax.config.update("jax_enable_x64", True)`),
+            since JAX otherwise silently truncates float64 arrays to 32-bit;
+            a `ValueError` is raised if it is not.
 
         Returns
         -------
         DesignMatrices
-            `self`, with `X`, `y`, `points` and `dtype` updated. Returned
+            `self`, with `X`, `y` and `dtype` updated. Returned
             unchanged (no copy/cast) if `dtype` already matches
             `self.dtype`.
         """
@@ -565,12 +559,11 @@ class DesignMatrices:
         if dtype == self.dtype:
             return self
 
-        _ensure_x64_for_dtype(dtype)
+        _check_x64_for_dtype(dtype)
 
         self.dtype = dtype
         self.X = jnp.asarray(self.X, dtype=dtype)
         self.y = jnp.asarray(self.y, dtype=dtype) if self.y is not None else None
-        self.points = np.asarray(self.points, dtype=dtype)
 
         return self
 
@@ -657,13 +650,6 @@ class DesignMatrices:
         :class:`statsmodels.iolib.summary.Summary`, in the same style as
         a statsmodels model-fit summary. Also used by `__str__`.
 
-        Notes
-        -----
-        As a side effect, sets placeholder `model`/`params`/`bse`/
-        `tvalues`/`pvalues` attributes on `self`, required by
-        `Summary.add_table_2cols`; these are not meaningful statistics
-        (`DesignMatrices` holds no fitted model).
-
         Returns
         -------
         statsmodels.iolib.summary.Summary
@@ -674,17 +660,10 @@ class DesignMatrices:
 
         smry = Summary()
 
-        self.model = None
-        self.params = np.zeros(1)
-        self.param_names = "Placeholder" #self.xbeta_names
-        self.bse = np.zeros(len(self.params))
-        self.tvalues = np.zeros(len(self.params))
-        self.pvalues = np.zeros(len(self.params))
-
         gen_top_left, gen_top_right = self.generate_summary()
 
         smry.add_table_2cols(
-            self,
+            _summary_table_source(),
             title="Design Matrices Summary",
             gleft=gen_top_left,
             gright=gen_top_right,
@@ -707,7 +686,7 @@ class DesignMatrices:
         )
 
 
-class DesignMatricesBuilder:
+class DesignMatricesBuilder(_Verbose):
     """
     Turn a spatio-temporal :class:`geopandas.GeoDataFrame` plus a
     Patsy/R-style model `formula` into a :class:`DesignMatrices` object
@@ -730,14 +709,14 @@ class DesignMatricesBuilder:
     >>> dm_new = builder.build_predict(new_geodf)
     """
 
-    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = True,
+    def __init__(self, geodf: geopd.GeoDataFrame, formula: str, dtype=np.float32, verbose: bool = False,
                  tmin: datetime = None, tmax: datetime = None, domain=None):
         """
         Prepare the spatial-temporal dataset for modeling.
 
         Runs all validation/coercion steps on `geodf` (spatial checks,
         time column detection and coercion, formula-column existence,
-        time-regularity check, numeric dtype casting, and optional
+        time-regularity check, and optional
         time-window/domain filtering) so that `build` can construct the
         design matrices directly. Does not build the design matrices
         itself.
@@ -748,6 +727,11 @@ class DesignMatricesBuilder:
             Spatio-temporal dataset in long format: one row per
             (site, timestamp) observation, with a ``geometry`` column
             (a single geometry type, e.g. all `Point`) and a CRS set. A
+            site that is not a `Point` is represented by its centroid
+            (planar, in CRS units; a warning says so). The model is planar
+            in CRS units: a geographic CRS (lon/lat degrees) is accepted
+            with a warning, project the data first (``geodf.to_crs(...)``)
+            for metric distances. A
             time column named ``"Time"`` is used if present, otherwise
             the first datetime64 column found. All rows for a given
             site must share exactly one geometry per site, and after any
@@ -764,11 +748,10 @@ class DesignMatricesBuilder:
             is allowed and builds covariates only (`y` is `None`).
             Every column referenced by `formula` must exist in `geodf`.
         dtype : numpy.dtype, default numpy.float32
-            Numeric precision used when casting `geodf`'s numeric columns
-            and when building the resulting `DesignMatrices` (`X`, `y`,
-            `points`). Passing a 64-bit dtype also enables JAX's x64
-            mode, which is otherwise off by default.
-        verbose : bool, default True
+            Numeric precision of the resulting `DesignMatrices` (`X`, `y`;
+            `points` are float64). The formula is evaluated on the columns
+            as given, before the cast.
+        verbose : bool, default False
             If `True`, log progress (spatial/time checks, formula
             parsing, etc.) to stdout via `print_info`.
         tmin : datetime, optional
@@ -781,7 +764,8 @@ class DesignMatricesBuilder:
             design matrices are built.
         domain : shapely Polygon/MultiPolygon, optional
             The scientific interest domain, in the same CRS as `geodf`. When
-            given, every site (unique geometry) outside `domain` is dropped
+            given, every site (unique geometry) whose centroid is outside
+            `domain` is dropped
             -- together with all of its timestamps -- before the design
             matrices are built, so training never sees observations outside
             the domain. Contrast with `build_predict`'s own `domain`
@@ -816,11 +800,18 @@ class DesignMatricesBuilder:
             self.geodf, self.geometry_id, self.time_col_name,
             self.crs, self.box, self.geometry, self.delta, self.unit,
         ) = self._prepare_geodf(geodf, tmin, tmax, domain=domain)
+        if self.crs.is_geographic:
+            warnings.warn(
+                f"The data CRS ({self.crs.name}) is geographic: the mesh, the SPDE operator and the "
+                "range parameter are then in degrees (a planar approximation, anisotropic away "
+                "from the equator). Project the data (e.g. geodf.to_crs(...)) for metric distances.",
+                UserWarning, stacklevel=2,
+            )
         self._log(f"Spatial check passed using geometry id column '{self.geometry_id}'")
         self._log(f"Time column detected: '{self.time_col_name}'")
         self._log(f"Time consistency check passed: delta {self.delta}, unit {self.unit}")
 
-    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False, domain=None):
+    def _prepare_geodf(self, geodf, tmin, tmax, prediction = False, domain=None, warn_time_range=False):
         """
         Run every check/coercion a GeoDataFrame needs before it can be
         turned into design matrices. Shared by `__init__` (on the training
@@ -841,6 +832,12 @@ class DesignMatricesBuilder:
 
         geometry_id = self._check_spatial_dataset(geodf)
         geometry = pd.unique(geodf.geom_type)
+        if geometry[0] != "Point":
+            warnings.warn(
+                f"Site geometries are {geometry[0]}: each site is represented by its centroid "
+                "(planar, in CRS units).",
+                UserWarning, stacklevel=4,
+            )
 
         time_col_name = self._check_time_dataset(geodf)
         self._coerce_time_column(geodf, time_col_name)
@@ -849,11 +846,9 @@ class DesignMatricesBuilder:
 
         delta, unit = self._check_time_regularity(geodf, time_col_name)
 
-        self._cast_numeric_columns(geodf, geometry_id)
-
         # Cut the dataset to the specified time range if tmin and tmax are provided
         if tmin is not None or tmax is not None:
-            geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax)
+            geodf = self._filter_time_range(geodf, time_col_name, tmin, tmax, warn=warn_time_range)
 
         if domain is not None:
             geodf = self._filter_domain(geodf, geometry_id, domain)
@@ -872,7 +867,7 @@ class DesignMatricesBuilder:
         sites = geodf.drop_duplicates(subset=[geometry_id])
 
         shapely.prepare(domain)
-        inside = shapely.covers(domain, np.asarray(sites.geometry))
+        inside = shapely.covers(domain, shapely.centroid(np.asarray(sites.geometry)))
         outside_ids = sites.loc[~inside, geometry_id]
 
         n_out = len(outside_ids)
@@ -890,11 +885,6 @@ class DesignMatricesBuilder:
             raise ValueError("No sites remain after filtering to the scientific interest domain")
 
         return geodf
-
-    def _log(self, msg: str) -> None:
-        """Print `msg` via `print_info` if `self.verbose` is True."""
-        if self.verbose:
-            self.print_info(msg)
 
     @contextmanager
     def _verbosity(self, verbose):
@@ -960,15 +950,17 @@ class DesignMatricesBuilder:
         Parameters
         ----------
         df : geopandas.GeoDataFrame
-            New (prediction) spatio-temporal dataset, in the same format,
-            CRS and time step as the GeoDataFrame `build` was trained on.
+            New (prediction) spatio-temporal dataset, in the same format
+            and time step as the GeoDataFrame `build` was trained on. A
+            different CRS is reprojected to the training CRS, with a
+            warning; the result is in the training CRS.
             It only needs to supply the covariate columns referenced by
             `formula` (plus the response column if `include_response=True`).
         verbose : bool, optional
             Temporarily override `self.verbose` for this call only. If
             `None` (default), `self.verbose` (set in `__init__`) is used.
         domain : shapely Polygon/MultiPolygon, optional
-            The scientific interest domain, in the same CRS as `df`. When
+            The scientific interest domain, in the training CRS. When
             given, every prediction point is checked against it and the
             result is stored as the boolean array `self.mask` (True where
             the point falls inside `domain`), aligned with `points`/the N
@@ -995,8 +987,8 @@ class DesignMatricesBuilder:
         ------
         ValueError
             If `build()` has not been called yet, if `df` fails the same
-            validation as the training data, or if `df`'s CRS or time
-            step does not match the training data's.
+            validation as the training data, or if `df`'s time step does
+            not match the training data's.
         """
         if not hasattr(self, "design_matrices"):
             raise ValueError("build() must be called before build_predict()")
@@ -1009,8 +1001,16 @@ class DesignMatricesBuilder:
             # whatever timestamps the training data actually had.
             train_tmin = self.design_matrices.timestamps.min()
             train_tmax = self.design_matrices.timestamps.max()
+            if isinstance(df, geopd.GeoDataFrame) and df.crs is not None and df.crs != self.crs:
+                warnings.warn(
+                    f"The prediction data CRS ({df.crs.name}) differs from the training CRS "
+                    f"({self.crs.name}): reprojecting the prediction data to the training CRS.",
+                    UserWarning, stacklevel=3,
+                )
+                df = df.to_crs(self.crs)
             geodf, geometry_id, time_col_name, crs, box, geometry, delta, unit = (
-                self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response)
+                self._prepare_geodf(df, train_tmin, train_tmax, prediction=not include_response,
+                                    warn_time_range=True)
             )
             self._check_consistent_with_training(crs, delta, unit)
             self._log(f"Spatial check passed using geometry id column '{geometry_id}'")
@@ -1229,22 +1229,39 @@ class DesignMatricesBuilder:
             raise ValueError(f"Timestamps in column '{time_col_name}' are not regularly spaced")
         return delta, unit
 
-    def _cast_numeric_columns(self, geodf, geometry_id) -> None:
-        """Cast all numeric columns of `geodf` (except `geometry_id`) to `self.dtype`, in place."""
-        numeric_cols = [
-            col for col in geodf.columns
-            if pd.api.types.is_numeric_dtype(geodf[col]) and col != geometry_id
-        ]
-        geodf[numeric_cols] = (
-            geodf[numeric_cols]
-            .apply(lambda col: pd.to_numeric(col, errors="coerce"))
-            .astype(self.dtype)
-        )
-        self._log(f"Converted numeric columns to dtype={self.dtype}")
+    def _check_response(self, y_matrix):
+        """The response must be one numeric column; infinite values become
+        missing (NaN), with a warning."""
+        if y_matrix.shape[1] != 1:
+            raise ValueError(
+                f"The response '{self.formula_info.response_name}' must be numeric (one column); "
+                f"Patsy built {y_matrix.shape[1]} columns ({', '.join(y_matrix.design_info.column_names[:3])}"
+                f"{', ...' if y_matrix.shape[1] > 3 else ''}), e.g. from a text or categorical column."
+            )
+        inf = np.isinf(y_matrix)
+        if inf.any():
+            warnings.warn(f"{int(inf.sum())} infinite response values are treated as missing (NaN).",
+                          UserWarning, stacklevel=5)
+            y_matrix[inf] = np.nan
+        return y_matrix
 
-    def _filter_time_range(self, geodf, time_col_name, tmin, tmax):
-        """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound optional)."""
+    @staticmethod
+    def _drop_duplicate_rows(geodf, geometry_id, time_col_name):
+        """Keep the first row (in the input order) of each repeated
+        (site, time) pair, with a warning giving their number."""
+        dup = geodf.duplicated(subset=[geometry_id, time_col_name])
+        if dup.any():
+            warnings.warn(
+                f"{int(dup.sum())} rows repeat a (site, time) pair: the first row of each pair is kept.",
+                UserWarning, stacklevel=5,
+            )
+        return geodf[~dup]
+
+    def _filter_time_range(self, geodf, time_col_name, tmin, tmax, warn=False):
+        """Keep only rows with `time_col_name` in `[tmin, tmax]` (either bound
+        optional); with `warn`, a warning gives the number of timestamps dropped."""
         self._log("Filtering dataset by time range")
+        n_times = geodf[time_col_name].nunique()
         if tmin is not None:
             tmin = _to_naive_utc(tmin)
             geodf = geodf[geodf[time_col_name] >= tmin]
@@ -1256,6 +1273,13 @@ class DesignMatricesBuilder:
 
         if geodf.empty:
             raise ValueError(f"No rows remain after filtering to tmin={tmin}, tmax={tmax}")
+        n_dropped = n_times - geodf[time_col_name].nunique()
+        if warn and n_dropped:
+            warnings.warn(
+                f"{n_dropped} of {n_times} timestamps of the prediction data are outside the training "
+                f"period [{tmin}, {tmax}] and are dropped (the latent state exists only on that period).",
+                UserWarning, stacklevel=5,
+            )
         self._log(f"Dataset filtered to {len(geodf)} rows")
         return geodf
 
@@ -1297,7 +1321,7 @@ class DesignMatricesBuilder:
         return DesignMatrices(
             y=y,
             y_design_info=y_design_info,
-            y_name=y_design_info.column_names if y_design_info else None,
+            y_name=y_design_info.column_names[0] if y_design_info else None,
             y_expr=self.formula_info.response_expr,
             X=Xbeta,
             X_design_info=x_design_info,
@@ -1319,8 +1343,8 @@ class DesignMatricesBuilder:
         """Evaluate `formula` on `self.geodf` with Patsy and reshape the result to `[N, P, T]`/`[N, T]`."""
         self._log("Computing design matrix from GeoDataFrame")
 
-        geodf = self.geodf.sort_values([self.time_col_name, self.geometry_id])
-        geodf = geodf.drop_duplicates(subset=[self.geometry_id, self.time_col_name])
+        geodf = self.geodf.sort_values([self.time_col_name, self.geometry_id], kind="stable")
+        geodf = self._drop_duplicate_rows(geodf, self.geometry_id, self.time_col_name)
         self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
 
         # len(lhs_termlist) > 0 -> response required, == 0 -> covariates-only formula
@@ -1349,7 +1373,7 @@ class DesignMatricesBuilder:
             y_matrix, x_matrix = dmatrices(
                 self.formula, data=geodf, NA_action=na_action, return_type="matrix",
             )
-            y_matrix[np.isinf(y_matrix)] = np.nan
+            y_matrix = self._check_response(y_matrix)
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
             self._log(f"y name: {y_design_info.column_names[0]}, shape={y.shape}")
@@ -1388,8 +1412,8 @@ class DesignMatricesBuilder:
         """
         self._log("Computing prediction design matrix from GeoDataFrame")
 
-        geodf = geodf.sort_values([time_col_name, geometry_id])
-        geodf = geodf.drop_duplicates(subset=[geometry_id, time_col_name])
+        geodf = geodf.sort_values([time_col_name, geometry_id], kind="stable")
+        geodf = self._drop_duplicate_rows(geodf, geometry_id, time_col_name)
         self._log("Dataset sorted by time/geometry id, duplicate space-time rows dropped")
 
         timestamps = np.sort(np.unique(geodf[time_col_name]))
@@ -1432,11 +1456,11 @@ class DesignMatricesBuilder:
                 [self.design_matrices.y_design_info], data=geodf,
                 NA_action=na_action, return_type="matrix",
             )
-            y_matrix[np.isinf(y_matrix)] = np.nan
+            y_matrix = self._check_response(y_matrix)
             y = y_matrix.reshape(T, N).T
             y_design_info = y_matrix.design_info
-            y_name = y_design_info.column_names
-            self._log(f"y name: {y_name[0]}, shape={y.shape}")
+            y_name = y_design_info.column_names[0]
+            self._log(f"y name: {y_name}, shape={y.shape}")
 
         self._log(f"Computed prediction design matrices with N={N}, P={Xbeta.shape[1]}, T={T}")
 
@@ -1465,20 +1489,6 @@ class DesignMatricesBuilder:
     # Misc helpers (not currently wired into build(), kept for reuse)
     # ------------------------------------------------------------------
 
-    def _getPoints(self, geodf, geometry_id):
-        """Return unique geometry centroids as an `[N, 2]` coordinate array (computed in a metric UTM CRS)."""
-        self._log("Computing centroid coordinates for geometry points")
-
-        if "geometry" not in geodf:
-            raise ValueError("Geometry column not found in the dataset")
-
-        gdf_metric = geodf.to_crs(geodf.estimate_utm_crs())
-        centroids = gdf_metric.geometry.drop_duplicates().centroid.to_crs(geodf.crs)
-        points = np.column_stack([centroids.x, centroids.y])
-
-        self._log(f"Computed {points.shape[0]} point coordinates")
-        return points
-
     def _computeDistance(self, points, pt=None, distance="euclidean"):
         """Return the (cross-)distance matrix between `points` and `pt` (or `points` itself if `pt` is None), via `scipy.spatial.distance.cdist`."""
         self._log(f"Computing distance matrix using '{distance}' metric")
@@ -1492,16 +1502,3 @@ class DesignMatricesBuilder:
             self._log(f"Computed cross-distance matrix with shape {dist.shape}")
             return dist
 
-    @staticmethod
-    def print_info(msg):
-        """
-        Print a UTC-timestamped log line.
-
-        Parameters
-        ----------
-        msg : str
-            Message to print, prefixed with the current UTC timestamp
-            (``YYYY-MM-DD HH:MM:SS``).
-        """
-        dt = datetime.now(timezone.utc)
-        print(f"{dt.strftime('%Y-%m-%d %H:%M:%S')} - {msg}")

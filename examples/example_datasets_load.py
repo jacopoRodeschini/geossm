@@ -6,27 +6,17 @@ Created on Tue Feb 10 14:34:05 2026
 @author: jacopo
 """
 
-# %%
-import numpy as np
+# %% Load matrices 
 import matplotlib.pyplot as plt
-import geopandas as geodf
-from shapely import Point
-
-# %% import and check the version
 import geossm
+import geossm.datasets as df
 
-# print("Version: ", geossm.__version__)
+print("Version: ", geossm.__version__)
 print("Load from: ", geossm.__file__)
 
-# %% Create the State Space Model (SSM)
-# Type = linear time-invariant SSM
-
-if geossm.__file__:
-    import geossm.datasets as df
 
 
-# %% List all availabel dataset
-
+# %% List all available datasets
 print(df.list_datasets())
 
 # %% Import the Agrimonia dataset
@@ -36,9 +26,9 @@ print(type(agrimonia))
 print(agrimonia.columns)
 agrimonia.crs
 
-# %% Aggregate the monthly data to get the average yield per location
+# %% Aggregate the monthly data to get the averages per location
 
-# convert to categorical
+# convert ID string to categorical
 agrimonia['IDStations'] = agrimonia['IDStations'].astype('category')
 
 mean_pm10_space = agrimonia.groupby(["IDStations"]).agg(
@@ -51,7 +41,6 @@ mean_pm25_space = agrimonia.groupby(["IDStations"]).agg(
 
 # %% Plot monthly dataset (scatter plot)
 
-# --- Create subplots (1 row, 2 columns) ---
 fig, axes = plt.subplots(1, 2, figsize=(14, 6), constrained_layout=True)
 
 # Ensure same color scale across both plots

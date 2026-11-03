@@ -10,8 +10,11 @@ builds them from:
 - a :class:`geopandas.GeoDataFrame` of observations,
 - one Patsy/R-style ``formula`` per response variable (block), and
 - a spatial ``domain`` and a fitted covariance model
-  (:class:`~geossm.covmodel.spdeAppoxCov`, see :doc:`covariance_models`)
+  (:class:`~geossm.covmodel.SPDEApproxCov`, see :doc:`covariance_models`)
   giving a **low-rank basis** for the latent spatial field.
+
+The model equations, the EM algorithm and the formulas behind the
+reported quantities are in :doc:`model_formulation`.
 
 Representing the latent field through the low-rank, mesh-based SPDE
 basis (rather than one latent dimension per observed site) is what makes
@@ -27,15 +30,15 @@ This is the same workflow used in :doc:`../quickstart`:
 .. code-block:: python
 
    from geossm.stmodel import LRStateSpaceModel
-   from geossm.covmodel import spdeAppoxCov
+   from geossm.covmodel import SPDEApproxCov
    from geossm.covmodel.utils import buildMesh2d
 
    # 1. Build the model from the data, formula(s) and domain
    model = LRStateSpaceModel(geodf, ["y ~ 1 + x1"], domain=domain)
 
    # 2. Build a mesh and a covariance model, then attach it
-   mesh_io, _ = buildMesh2d(model.points[0], domain=domain)
-   cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain)
+   mesh_io, _ = buildMesh2d(model.points[0], lowrank=0.5, domain=domain)
+   cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
    model = model.setup(cov_fun=[cov_fun])
 
    # 3. Fit
@@ -46,12 +49,38 @@ This is the same workflow used in :doc:`../quickstart`:
 observation noise variance, and the spatial covariance parameters) with
 an EM-type procedure built on the parent class's Kalman filter/smoother;
 :class:`~geossm.stmodel.FitOptions` controls the stopping rule
-(``max_iter``, ``tol_relat``), and :class:`~geossm.stmodel.ModelParams`
+(``max_iter``, ``tol_relat``) and the tolerance of the inner ``ks``
+optimisation (``ks_tol``), and :class:`~geossm.stmodel.ModelParams`
 / :class:`~geossm.stmodel.Param` let you pass custom initial values or
 fix specific parameters instead of estimating them (see
 `examples/example_LRSSM_estimate_2.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_LRSSM_estimate_2.py>`_
 and
 `example_LRSSM_estimate_3.py <https://github.com/jacopoRodeschini/geossm/blob/develop/examples/example_LRSSM_estimate_3.py>`_).
+
+Progress messages
+--------------------
+
+geossm is quiet by default. ``verbose=True`` on the model, covariance
+function or formula builder prints timestamped progress lines; a method's
+own ``verbose`` (``None``: the object's setting; for predictions, the
+setting at the end of the fit) overrides it for that call, e.g.
+``model.fit(options=FitOptions(verbose=True))``. Problems (a decreasing or
+NaN log-likelihood, ``max_iter`` reached, sites outside the latent support,
+...) are always reported with :mod:`warnings`.
+
+Formulas
+------------
+
+As in Patsy, every formula includes an intercept unless it is removed:
+
+- ``"AQ_pm10"`` (a response name alone) means ``"AQ_pm10 ~ 1"``: an
+  intercept plus the latent spatial field;
+- ``"AQ_pm10 ~ 1 + WE_temp_2m"`` adds covariates;
+- ``"AQ_pm10 ~ -1"`` removes the intercept: no fixed effects, only the
+  latent field.
+
+With ``formulas=None`` the model has no observations and only supports
+``sim()``, which then uses ``"~ 1"`` unless formulas are passed to it.
 
 Multiple response variables / domains
 -----------------------------------------
@@ -80,10 +109,15 @@ Results, inference, and prediction
 - :attr:`~geossm.stmodel.LRStateSpaceResults.aic` /
   :attr:`~geossm.stmodel.LRStateSpaceResults.bic` -- information
   criteria for model comparison.
-- :meth:`~geossm.stmodel.LRStateSpaceResults.predict` and
-  :meth:`~geossm.stmodel.LRStateSpaceResults.to_geo` -- predict at new
-  locations/times and export fitted/predicted values back to a
-  :class:`geopandas.GeoDataFrame`.
+- :meth:`~geossm.stmodel.LRStateSpaceResults.predict` -- predicted mean
+  and point-wise variance at new locations/times, as arrays.
+- :meth:`~geossm.stmodel.LRStateSpaceResults.get_prediction` -- the same
+  prediction as a :class:`~geossm.stmodel.LRPredictionResults` object, with
+  the predictive covariance, back-transformation, export to a
+  :class:`geopandas.GeoDataFrame` (``to_geo``) and change of support to
+  polygons (``to_poly``).
+- :meth:`~geossm.stmodel.LRStateSpaceResults.to_geo` -- export the fitted
+  values back to a :class:`geopandas.GeoDataFrame`.
 - :meth:`~geossm.stmodel.LRStateSpaceResults.back_transform` -- map
   parameters back through a formula transformation (e.g. undo a
   ``np.sqrt(...)`` response transform) via the delta method.

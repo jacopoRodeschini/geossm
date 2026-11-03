@@ -16,21 +16,11 @@ Example:
     >>> from geossm.datasets import load_dataset
 """
 
-# Version handling
-try:
-    from importlib.metadata import version, PackageNotFoundError
-
-    try:
-        __version__ = version("geossm")
-    except PackageNotFoundError:
-        __version__ = "unknown"
-except ImportError:
-    # Python < 3.8
-    __version__ = "2.1.0"
+from ._version import __version__
 
 # Core utilities
 from .data_preparation import DesignMatrices, DesignMatricesBuilder
-from .utils import block_diag_3D, write, getHardware
+from .utils import block_diag_3D, write, get_hardware
 
 # Submodules
 from . import covmodel
@@ -39,7 +29,7 @@ from . import ssm
 from . import stmodel
 
 # Import main classes for convenience
-from .covmodel import spdeAppoxCov, FEMSolver
+from .covmodel import SPDEApproxCov, FEMSolver
 from .datasets import load_dataset, list_datasets
 from .ssm import StateSpaceModel, StateSpaceResults
 from .stmodel import (
@@ -48,6 +38,7 @@ from .stmodel import (
     FitOptions,
     ModelParams,
     LRStateSpaceResults,
+    LRPredictionResults,
 )
 
 # Public API
@@ -60,14 +51,14 @@ __all__ = [
     "DesignMatricesBuilder",
     "block_diag_3D",
     "write",
-    "getHardware",
+    "get_hardware",
     # Submodules
     "covmodel",
     "datasets",
     "ssm",
     "stmodel",
     # Covariance models
-    "spdeAppoxCov",
+    "SPDEApproxCov",
     "FEMSolver",
     # Datasets
     "load_dataset",
@@ -81,4 +72,5 @@ __all__ = [
     "FitOptions",
     "ModelParams",
     "LRStateSpaceResults",
+    "LRPredictionResults",
 ]

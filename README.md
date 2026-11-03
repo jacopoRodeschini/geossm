@@ -101,19 +101,20 @@ The `*` symbol indicates dataset more than 10MB.
 - **Multiple Model Types**: Support for linear time-invariant and time-varying SSMs
 
 ## Requirements
-- **OS**: Linux or macOS (Windows not currently supported)
-- **Python**: 3.10 or higher (required by the `jax` dependency)
+- **OS**: Linux (x86-64). macOS and Windows are not supported: the `mfem` wheels required on Python 3.10 are Linux-only.
+- **Python**: 3.10 to 3.13. These are the tested versions; on 3.10, pip resolves `jax` 0.6.x, the last JAX series that supports it.
 - **Key Dependencies**:
-  - `geopandas` ≥ 1.1.2 (geospatial data handling)
+  - `geopandas` ≥ 1.1.2 (geospatial data handling; `pyarrow`, `pyogrio` and `pyproj` for its I/O and CRS support)
   - `pandas` ≥ 2.2.2 (data manipulation)
   - `numpy` ≥ 2.2.6 (numerical computing)
   - `scipy` ≥ 1.15.3 (scientific computing)
   - `jax` ≥ 0.6.2 (automatic differentiation & optimization)
   - `statsmodels` ≥ 0.14.6 (statistical modeling)
   - `matplotlib` ≥ 3.9.1 (visualization)
-  - Additional spatial & mesh packages: `shapely`, `gmsh`, `meshio`, `pygmsh`, `pyproj`
+  - Additional spatial & mesh packages: `shapely`, `gmsh`, `meshio`, `pygmsh`, `mfem`, `gstools`
 
-See [pyproject.toml](pyproject.toml) or [environment.yml](environment.yml) for the complete dependency list.
+[pyproject.toml](pyproject.toml) holds the complete dependency list and its supported ranges. The lower bounds are tested in CI.
+The wheel includes the example datasets, so it is about 43 MB.
 
 ## Installation
 
@@ -131,21 +132,7 @@ git clone https://github.com/jacopoRodeschini/geossm.git
 cd geossm
 ```
 
-2. **Create the conda environment** (named `geossm`) with all required packages. 
-Before creating the environment, make sure your **Conda installation is updated to the latest version** and configured to use the faster `libmamba` solver (recommended for significantly faster dependency resolution).
-
-- Update Conda (recommended)
-```bash
-# Enable the faster libmamba solver
-conda config --set solver libmamba
-
-# Update conda in the base environment
-conda update -n base -c defaults conda
-```
-
-- Create the environment
-Once Conda is updated, create the environment (named `geossm`) using:
-
+2. **Create the conda environment** (named `geossm`). It takes the native geospatial/mesh stack from conda-forge, then uses pip to install geossm in editable mode with the `test` and `interactive` extras. Versions are not pinned: the supported ranges live in `pyproject.toml`.
 ```bash
 conda env create -f environment.yml
 ```
@@ -155,9 +142,9 @@ conda env create -f environment.yml
 conda activate geossm
 ```
 
-4. **Install the package in development mode**:
+4. **(GPU only) Install the CUDA build of JAX**:
 ```bash
-pip install -e .
+pip install -U "jax[cuda12]"
 ```
 
 ### Verify Installation
@@ -177,6 +164,27 @@ Remove an entire environment
 ```bash
 conda remove -n geossm --all
 ```
+
+### JAX configuration (CPU/GPU, memory, float64)
+
+geossm computes with JAX. Some JAX settings are process-wide, so geossm never
+changes them itself. Set them at the top of your script, **before** importing
+JAX or geossm:
+
+```python
+import os
+os.environ.setdefault("JAX_PLATFORMS", "cpu")                   # CPU only: leaves the GPU untouched
+os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false") # GPU: allocate on demand, not 75 % upfront
+os.environ.setdefault("JAX_COMPILATION_CACHE_DIR", os.path.expanduser("~/.cache/jax"))  # reuse compiled kernels
+
+import jax
+jax.config.update("jax_enable_x64", True)  # only if you use dtype=jnp.float64 (otherwise a ValueError is raised)
+```
+
+Without `JAX_PLATFORMS=cpu`, JAX reserves 75 % of the GPU memory as soon as a
+model is created, even with `backend="cpu"`. See the user guide page
+[JAX configuration](https://jacopoRodeschini.github.io/geossm/user_guide/jax_configuration.html)
+for details and measurements.
 
 ## Quick Start
 
@@ -203,43 +211,23 @@ plotting) is available at
 [examples/example_LRSSM_build.py](examples/example_LRSSM_build.py).
 
 ```python
-from shapely.geometry import Point, Polygon
-import numpy as np
-import geopandas as geodf
-import pygmsh
-import gmsh
-
 import geossm.datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.covmodel import spdeAppoxCov
+from geossm.covmodel import SPDEApproxCov, buildMesh2d
 
-# 1. Load a dataset and turn it into a GeoDataFrame
+# 1. Load a dataset and the domain
 agri, shape = df.load_dataset('agrimonia')
-
-domain = list(shape.geometry[0].geoms)[0].boundary
-buffer = list(domain.buffer(0.3).boundary.geoms)[0]
-domain_polygon = [Polygon(buffer)]
+domain = list(shape.geometry[0].geoms)[0].buffer(0.3)
 
 # 2. Define the model formula and the observation domain
-model = lrssm(agri, ['AQ_pm10 ~ 1 + WE_temp_2m'], verbose=True, domain=domain_polygon)
-
+model = lrssm(agri, ['np.log(AQ_pm10) ~ 1 + WE_temp_2m'], verbose=True, domain=[domain])
 
 # 3. Build a mesh over the domain for the latent spatial field with gmsh
-def build_mesh(poly, lc, points, lc_points=1e22):
-    with pygmsh.occ.Geometry() as geom:
-        coords = np.array(poly.buffer(lc).simplify(lc).exterior.coords[:-1])
-        surface = geom.add_polygon(coords, mesh_size=lc * 0.1)
-        for p in points:
-            gmsh.model.occ.addPoint(p[0], p[1], 0, lc_points)
-        gmsh.model.occ.synchronize()
-        gmsh.model.mesh.generate(2)
-        return geom.generate_mesh()
-
-
-mesh_io = build_mesh(buffer, lc=0.35, points=model.points[0])
+points = model.points[0]
+mesh_io, poly = buildMesh2d(points, lowrank=0.75,gradation=1, offset = 1, anchor_spacing=1)
 
 # 4. Build the latent covariance function on the mesh and attach it
-cov_fun = spdeAppoxCov(latlon=True).setup(mesh_io, domain=domain_polygon)
+cov_fun = SPDEApproxCov(latlon=True).setup(mesh_io, domain=domain)
 model = model.setup(cov_fun=[cov_fun])
 
 # 5. Fit the model
@@ -303,6 +291,13 @@ python -m http.server --directory docs/build/html 8000  # then open http://local
 ([.github/workflows/docs.yml](.github/workflows/docs.yml)) builds the docs
 on every push/PR touching `docs/`, `src/`, or `examples/`, and deploys them
 to GitHub Pages on pushes to `main`.
+
+## Run the tests 
+
+```bash
+conda activate env
+JAX_PLATFORMS=cpu python -m pytest tests -q -p no:cacheprovider
+```
 
 ## Contributing
 
