@@ -6,7 +6,7 @@ Requirements
 
 - **OS**: Linux (x86-64). macOS and Windows are not supported: the ``mfem``
   wheels required on Python 3.10 are Linux-only.
-- **Python**: 3.10 to 3.13 (tested). On 3.10, pip resolves ``jax`` 0.6.x,
+- **Python**: 3.10 to 3.14 (tested). On 3.10, pip resolves ``jax`` 0.6.x,
   the last JAX series that supports it.
 - Key runtime dependencies: ``geopandas`` (with ``pyarrow``, ``pyogrio`` and
   ``pyproj`` for its I/O and CRS support), ``pandas``, ``numpy``, ``scipy``,
@@ -73,7 +73,7 @@ geossm defines a few optional dependency groups in :file:`pyproject.toml`:
    * - Extra
      - Purpose
    * - ``test``
-     - ``pytest`` / ``pytest-cov`` for running the test suite.
+     - ``pytest`` for running the test suite.
    * - ``docs``
      - Sphinx, the Furo theme, and sphinx-design, to build this
        documentation locally (see :doc:`user_guide/index`'s development

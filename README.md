@@ -102,7 +102,7 @@ The `*` symbol indicates dataset more than 10MB.
 
 ## Requirements
 - **OS**: Linux (x86-64). macOS and Windows are not supported: the `mfem` wheels required on Python 3.10 are Linux-only.
-- **Python**: 3.10 to 3.13. These are the tested versions; on 3.10, pip resolves `jax` 0.6.x, the last JAX series that supports it.
+- **Python**: 3.10 to 3.14. These are the tested versions; on 3.10, pip resolves `jax` 0.6.x, the last JAX series that supports it.
 - **Key Dependencies**:
   - `geopandas` ≥ 1.1.2 (geospatial data handling; `pyarrow`, `pyogrio` and `pyproj` for its I/O and CRS support)
   - `pandas` ≥ 2.2.2 (data manipulation)

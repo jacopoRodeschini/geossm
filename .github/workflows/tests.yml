@@ -1,0 +1,131 @@
+name: Tests
+
+# Runs the pytest suite (tests/) on CPU for the oldest and newest supported
+# Python versions. GPU-only tests skip themselves (no GPU on hosted runners)
+# and are reported as skipped. Known, not-yet-fixed defects are pinned as
+# strict xfails (tests/_known_bugs.py): fixing one makes the run fail until
+# its marker is removed, so the list of open defects cannot silently drift.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/tests.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/tests.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "tests-${{ github.ref }}"
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: pytest (Python ${{ matrix.python-version }}, CPU)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    env:
+      # CPU-only JAX; also keeps XLA from probing for accelerators.
+      JAX_PLATFORMS: cpu
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same native-stack setup as docs.yml: geopandas/shapely/pyarrow/gmsh from
+      # conda-forge (unpinned), the rest (jax, mfem wheels, ...) from pip via
+      # pyproject.toml.
+      - name: Set up Conda (native geospatial/mesh stack)
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          python-version: ${{ matrix.python-version }}
+          channels: conda-forge
+          channel-priority: strict
+          activate-environment: geossm-tests
+          miniforge-version: latest
+
+      - name: Install native dependencies from conda-forge
+        shell: bash -el {0}
+        run: conda install -y geopandas shapely pyarrow gmsh python-gmsh
+
+      - name: Install geossm with test dependencies
+        shell: bash -el {0}
+        run: pip install -e ".[test]"
+
+      - name: Show versions
+        shell: bash -el {0}
+        run: python -c "import sys, jax, numpy, scipy, geossm; print(sys.version); print('jax', jax.__version__, jax.devices()); print('numpy', numpy.__version__, 'scipy', scipy.__version__)"
+
+      - name: Run tests
+        shell: bash -el {0}
+        run: pytest
+
+  # Packaging check (F29): build the sdist and wheel, install the wheel with
+  # pip-only dependencies in a fresh virtual environment, and run the suite
+  # against the installed package. The 3.10 leg resolves every direct
+  # dependency to its declared lower bound, so the floors in pyproject.toml
+  # are what is actually tested; the newest leg takes the latest releases.
+  package:
+    name: wheel (Python ${{ matrix.python-version }}, ${{ matrix.resolution }} deps)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python-version: "3.10"
+            resolution: lowest-direct
+          - python-version: "3.14"
+            resolution: highest
+    env:
+      JAX_PLATFORMS: cpu
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # The gmsh wheel links against these X/GL libraries.
+      - name: System libraries for the gmsh wheel
+        run: sudo apt-get update && sudo apt-get install -y libglu1-mesa libxcursor1 libxft2 libxinerama1
+
+      - name: Build and check the sdist and wheel
+        run: |
+          python -m pip install build twine uv
+          python -m build
+          twine check dist/*
+
+      # Resolve from pyproject.toml, where geossm's dependencies are the direct
+      # ones (installing the wheel directly would make them transitive, and
+      # lowest-direct would then leave them at their newest versions).
+      - name: Install the wheel in a clean virtual environment
+        run: |
+          uv pip compile pyproject.toml --extra test --resolution ${{ matrix.resolution }} \
+            --python-version ${{ matrix.python-version }} -o "$RUNNER_TEMP/requirements.txt"
+          uv venv --python ${{ matrix.python-version }} "$RUNNER_TEMP/venv"
+          export VIRTUAL_ENV="$RUNNER_TEMP/venv"
+          uv pip install -r "$RUNNER_TEMP/requirements.txt"
+          uv pip install --no-deps dist/*.whl
+          uv pip check
+          uv pip list
+
+      # Outside the checkout, so src/ cannot shadow the installed wheel.
+      - name: Run tests against the installed wheel
+        run: |
+          mkdir "$RUNNER_TEMP/run" && cp -r tests pyproject.toml "$RUNNER_TEMP/run/"
+          cd "$RUNNER_TEMP/run"
+          "$RUNNER_TEMP/venv/bin/python" -c "import geossm; print(geossm.__version__, geossm.__file__)"
+          "$RUNNER_TEMP/venv/bin/python" -m pytest
