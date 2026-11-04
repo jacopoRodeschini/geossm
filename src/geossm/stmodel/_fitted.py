@@ -108,7 +108,10 @@ class FittedState:
         design matrix ``(p, b, T)``.
     y_hat, Sigma_y_hat : numpy.ndarray or None
         In-sample fitted mean ``(p, T)`` and state-driven covariance
-        ``(p, p, T)`` (`None` when `fit` ran with ``std=False``).
+        ``(p, p, T)`` (only with ``FitOptions(std="full")``).
+    var_y_hat : numpy.ndarray or None
+        Point-wise variances of the fitted mean ``(p, T)`` (`None` with
+        ``std=False``).
     in_support : numpy.ndarray of bool or None
         Training sites ``(p,)`` the latent field enters (see
         `latent_support`); the observations of the others are missing
@@ -149,11 +152,12 @@ class FittedState:
     Xbeta: Optional[np.ndarray] = None
     y_hat: Optional[np.ndarray] = None
     Sigma_y_hat: Optional[np.ndarray] = None
+    var_y_hat: Optional[np.ndarray] = None
     in_support: Optional[np.ndarray] = None
 
     #: Arrays of the fit held here and exposed by `LRStateSpaceResults`.
     ARRAY_FIELDS = ("x_smoothed", "P_smoothed", "P_pred_smoothed", "S11", "S10", "S00",
-                    "y_obs", "Xbeta", "y_hat", "Sigma_y_hat")
+                    "y_obs", "Xbeta", "y_hat", "Sigma_y_hat", "var_y_hat")
 
     def __post_init__(self):
         for name in self.ARRAY_FIELDS:
@@ -348,8 +352,8 @@ def observed_loglik(state, y_obs, Xbeta, x0, Sigma0):
     """
     `ModelParams -> scalar` closure computing the observed log-likelihood of
     the model described by `state` at fixed `y_obs`/`Xbeta`/`x0`/`Sigma0`;
-    differentiated by `LRStateSpaceResults._compute_hessian` with
-    `jax.hessian`.
+    differentiated twice by `LRStateSpaceResults._compute_hessian` (see
+    `stmodel_results._loglik_hessian`).
     """
     check_cov_functions(state)
     basis = latent_basis(state.cov_function, state.points, state.dtype)
@@ -383,7 +387,10 @@ def predict_from_fit(state, df, verbose=False, cov="full", log=None):
     `state.dtype`; `None` when not computed), `tdelta`, `timestamps`, `crs`,
     `in_support` (sites the latent field enters, see `latent_support`; at
     the others the mean is `X beta` and the state-driven variance 0, with a
-    warning).
+    warning), `H` (the measurement matrix at the prediction sites) and
+    `state_cols` (columns of `state.P_smoothed` of the prediction times,
+    column 0 the prior), used for polygon variances without the
+    ``(p, p, T)`` covariance.
     """
     if cov not in ("full", "diag", None):
         raise ValueError("cov must be 'full', 'diag' or None")
@@ -475,4 +482,9 @@ def predict_from_fit(state, df, verbose=False, cov="full", log=None):
         "timestamps": [grid.timestamps for grid in grids],
         "crs": grids[0].crs,
         "in_support": np.concatenate(support),
+        # for areal (polygon) variances without the (n, n) covariance:
+        # H at the prediction sites, and the columns of the smoothed state of
+        # the prediction times (index 0: prior slot)
+        "H": np.asarray(H, dtype=dtype),
+        "state_cols": cols,
     }

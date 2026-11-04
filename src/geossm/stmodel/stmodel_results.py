@@ -16,7 +16,7 @@ from geossm.utils import _on_device, split_by_block, format_info_table, _summary
 from geossm.utils import _print_info
 from geossm.stmodel._fitted import (FittedState, _observed_loglik_value, _read_only_copy, observed_loglik,
                                     predict_from_fit)
-from geossm.stmodel._output import build_geo_dataframe, delta_method, diag_variance, direct_transform, normalize_g_invs
+from geossm.stmodel._output import build_geo_dataframe, delta_method, direct_transform, normalize_g_invs
 from geossm.stmodel.prediction_results import LRPredictionResults
 
 
@@ -81,12 +81,21 @@ def _loglik_hessian(vec, template, data, mesh, *, meta, pdim, qdim, n_inner, nva
     of free parameters `vec` (see `_pack_params`), at full matmul precision.
     Module-level and jitted once per problem shape and dtype (J2): `data`
     (`y_t`, `Xbeta`, `basis`, `x0`, `Sigma0`) and `mesh` (mass, stiffness,
-    permutations) are traced arguments; the block sizes and `meta` are static."""
+    permutations) are traced arguments; the block sizes and `meta` are static.
+
+    Built one column at a time, one Hessian-vector product (forward over
+    reverse) per free parameter, rather than with `jax.hessian`: that one
+    pushes all `k` tangents through the reverse pass of the filter scan at
+    once, so it stores the T-step tape of the gradient `k + 1` times (160 GiB
+    for the bivariate GRINS model). Here the peak memory is about two
+    gradients, whatever `k`; column `i` is `H e_i`, so the stacked columns are
+    `H.T`, which equals `H`."""
     def fun_flat(v):
         return _observed_loglik_value(
             _unpack_params(v, template, meta), mesh=(*mesh, n_inner), pdim=np.asarray(pdim),
             qdim=np.asarray(qdim), nvar=nvar, nlat=nlat, dtype=dtype, **data)
-    return jax.hessian(fun_flat)(vec)
+    grad = jax.grad(fun_flat)
+    return jax.lax.map(lambda e: jax.jvp(grad, (vec,), (e,))[1], jnp.eye(vec.size, dtype=vec.dtype))
 
 
 def _loglik_hessian_of(logL, vec0, params, meta):
@@ -175,7 +184,7 @@ class LRStateSpaceResults(StateSpaceResults):
     `conf_int_y`, ...). It also adds:
 
     - Parameter inference: `compute_cov_params` (observed-information
-      Hessian, via `jax.hessian` of the observed log-likelihood), `bse`,
+      Hessian of the observed log-likelihood, by automatic differentiation), `bse`,
       `tvalues`, `pvalues`, `conf_int`, `aic`/`bic`.
     - Out-of-sample prediction: `predict` (mean and point-wise variance as
       arrays) and `get_prediction` (an `LRPredictionResults` object with the
@@ -302,7 +311,6 @@ class LRStateSpaceResults(StateSpaceResults):
         self.params = params
         self.param_names = None  # will be processed from params
         self.param_dim = None  # will be processed from params
-        self.param_names = None  # will be processed from params
 
         self.nstats = nstats
         self.options = options
@@ -350,6 +358,7 @@ class LRStateSpaceResults(StateSpaceResults):
         # are plain attributes rather than properties.
         self.y_hat_back_list = None
         self.Sigma_y_hat_back_list = None
+        self.var_y_hat_back_list = None
         self.y_obs_back_list = None
         self.residuals_back_list = None
 
@@ -546,6 +555,9 @@ class LRStateSpaceResults(StateSpaceResults):
         "observations of the others are missing (NaN) in `y_obs` and do not enter the fit or its "
         "diagnostics. See `fitted_state`.")
     y_hat = _state_property("y_hat", "ndarray: Shape ``(p, T)``. In-sample fitted mean; see `fitted_state`.")
+    var_y_hat = _state_property(
+        "var_y_hat", "ndarray or None: Shape ``(p, T)``. Point-wise variances of `y_hat` (None with "
+        "``FitOptions(std=False)``); see `fitted_state`.")
     Sigma_y_hat = _state_property(
         "Sigma_y_hat", "ndarray or None: Shape ``(p, p, T)``. In-sample state-driven covariance; see `fitted_state`.")
     x_smoothed = _state_property(
@@ -661,7 +673,8 @@ class LRStateSpaceResults(StateSpaceResults):
         `conf_int`, and its presence (together with `summary()`) decides
         whether `summary()` shows real standard errors or NaN placeholders
         (see `_nan_bse_params`). Computing the Hessian
-        (`_compute_hessian`, via `jax.hessian`) can be relatively slow for
+        (`_compute_hessian`, one Hessian-vector product per free parameter,
+        see `_loglik_hessian`) can be relatively slow for
         models with many free parameters, so it is not run automatically by
         `fit()`; call this explicitly when standard errors are needed.
 
@@ -973,8 +986,8 @@ class LRStateSpaceResults(StateSpaceResults):
     def get_prediction(self, df, std=True, verbose=None):
         """
         Out-of-sample prediction at new locations/times, as an
-        `LRPredictionResults` object: predicted mean, full predictive
-        covariance (if `std`) and point-wise variance, prediction grid,
+        `LRPredictionResults` object: predicted mean, point-wise variance
+        (and the full covariance with ``std="full"``), prediction grid,
         per-variable views, `back_transform`, `to_geo`, and the change of
         support `to_poly`. These results are not modified.
 
@@ -982,12 +995,12 @@ class LRStateSpaceResults(StateSpaceResults):
         ----------
         df : geopandas.GeoDataFrame or list of geopandas.GeoDataFrame
             New locations/times; see `predict`.
-        std : bool, default True
-            Compute the predictive covariance `Sigma_y_pred` `(p, p, T)`
-            (needed by `to_poly(std=True)` and the back-transformed
-            covariance). If `False`, only the mean is computed -- useful when
-            the covariance does not fit in memory (`predict` gives the
-            point-wise variance without it).
+        std : {True, "full", False}, default True
+            `True`: point-wise predictive variances `var_pred` ``(p, T)``
+            (enough for `to_geo`, `to_poly(std=True)` and `back_transform`);
+            ``"full"``: also the covariance `Sigma_y_pred` ``(p, p, T)``
+            (memory grows with ``p^2 T``: e.g. 38 GB for 10,000 points and
+            100 time steps in float32); `False`: the mean only.
         verbose : bool, optional
             See `predict`.
 
@@ -997,11 +1010,15 @@ class LRStateSpaceResults(StateSpaceResults):
         """
         state = self._fitted_state
         verbose, log = self._verbosity(verbose)
-        pred = predict_from_fit(state, df, verbose=verbose, cov="full" if std else None, log=log)
+        if not (std is True or std is False or std == "full"):
+            raise ValueError(f"std must be True, False or 'full', got {std!r}.")
+        cov = "full" if std == "full" else "diag" if std else None
+        pred = predict_from_fit(state, df, verbose=verbose, cov=cov, log=log)
         return LRPredictionResults(
             state, pred["y_pred"], Sigma_y_pred=pred["Sigma_y_pred"], var_pred=pred["var_pred"],
             points=pred["points"], block_p=pred["block_p"], timestamps=pred["timestamps"],
             crs=pred["crs"], tdelta=pred["tdelta"], in_support=pred["in_support"],
+            H=pred["H"], state_cols=pred["state_cols"],
         )
 
     # ---- Per-variable ("_list") views -----------------------------------
@@ -1029,6 +1046,14 @@ class LRStateSpaceResults(StateSpaceResults):
         if self.y_hat is None or self.block_p is None:
             return None
         return split_by_block(self.y_hat, self.block_p)
+
+    @property
+    def var_y_hat_list(self):
+        """list of ndarray : Per-response-variable view of `var_y_hat`
+        (point-wise variances of the fitted mean), split along `block_p`."""
+        if self.var_y_hat is None or self.block_p is None:
+            return None
+        return split_by_block(self.var_y_hat, self.block_p)
 
     @property
     def Sigma_y_hat_list(self):
@@ -1079,20 +1104,18 @@ class LRStateSpaceResults(StateSpaceResults):
         -------
         geopandas.GeoDataFrame
         """
-        var_list = None if self.Sigma_y_hat_list is None else [diag_variance(S) for S in self.Sigma_y_hat_list]
-        back_var = (None if self.Sigma_y_hat_back_list is None
-                    else [diag_variance(S) for S in self.Sigma_y_hat_back_list])
         return build_geo_dataframe(
-            self._y_names, self.points_hat, self.timestamps_hat, self.y_hat_list, var_list, self.crs_hat,
-            prefix="hat", y_back_list=self.y_hat_back_list, var_back_list=back_var,
+            self._y_names, self.points_hat, self.timestamps_hat, self.y_hat_list, self.var_y_hat_list,
+            self.crs_hat, prefix="hat", y_back_list=self.y_hat_back_list, var_back_list=self.var_y_hat_back_list,
             support_list=None if self.in_support is None else np.split(self.in_support, self.block_p[1:-1]),
         )
 
     def back_transform(self, g_invs):
         """
         Map `y_hat_list`/`y_obs_list` back to the response's original scale,
-        and store the results as `y_hat_back_list`/`Sigma_y_hat_back_list`
-        and `y_obs_back_list`. Also derives `residuals_back_list`
+        and store the results as `y_hat_back_list`/`var_y_hat_back_list`
+        (and `Sigma_y_hat_back_list` when the full covariance was kept,
+        ``FitOptions(std="full")``) and `y_obs_back_list`. Also derives `residuals_back_list`
         (`y_obs_back_list - y_hat_back_list`, elementwise per response
         variable) once both are available. Predictions are back-transformed
         by `LRPredictionResults.back_transform` (see `get_prediction`).
@@ -1149,9 +1172,10 @@ class LRStateSpaceResults(StateSpaceResults):
         variance in the second-order term), and `Sigma_*_back_list` its
         covariance. `residuals_back_list` is `h(y_obs) - E[h(signal)]`.
 
-        A fitted or predicted mean without its covariance (`std=False`)
-        cannot be back-transformed this way: it is left as `None`, with a
-        warning.
+        The mean correction and the variances need only the point-wise
+        variances; the back-transformed covariance needs the full one. A
+        fitted mean without variances (``std=False``) cannot be
+        back-transformed this way: it is left as `None`, with a warning.
 
         Parameters
         ----------
@@ -1169,17 +1193,15 @@ class LRStateSpaceResults(StateSpaceResults):
 
         g_invs = normalize_g_invs(g_invs, len(self._y_names))
 
-        if self.y_hat_list is not None and self.Sigma_y_hat_list is not None:
-            y_hat_back_list, Sigma_hat_back_list = [], []
-            for mu_i, Sigma_i, g_i in zip(self.y_hat_list, self.Sigma_y_hat_list, g_invs):
-                m, S = delta_method(g_i, mu_i, Sigma_i)
-                y_hat_back_list.append(m)
-                Sigma_hat_back_list.append(S)
-
-            self.y_hat_back_list = y_hat_back_list
-            self.Sigma_y_hat_back_list = Sigma_hat_back_list
+        if self.y_hat_list is not None and self.var_y_hat_list is not None:
+            Sigma_lists = self.Sigma_y_hat_list or [None] * len(g_invs)
+            out = [delta_method(g_i, mu_i, var_i, Sigma_i)
+                   for mu_i, var_i, Sigma_i, g_i in zip(self.y_hat_list, self.var_y_hat_list, Sigma_lists, g_invs)]
+            self.y_hat_back_list = [o[0] for o in out]
+            self.var_y_hat_back_list = [o[1] for o in out]
+            self.Sigma_y_hat_back_list = None if self.Sigma_y_hat_list is None else [o[2] for o in out]
         elif self.y_hat_list is not None:
-            warnings.warn("back_transform(): the fitted values have no covariance (Sigma_y_hat), "
+            warnings.warn("back_transform(): the fitted values have no variances (FitOptions(std=False)), "
                           "so they are not back-transformed.", RuntimeWarning, stacklevel=2)
 
         if self.y_obs_list is not None:
