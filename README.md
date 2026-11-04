@@ -147,6 +147,45 @@ conda activate geossm
 pip install -U "jax[cuda12]"
 ```
 
+### Option 3: From Source with uv
+
+[uv](https://docs.astral.sh/uv/) installs geossm and its dependencies from PyPI wheels into a plain virtual environment, without conda. It can also download the Python interpreter itself.
+
+1. **Install uv** (once):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh    # or: pip install uv
+```
+
+2. **Clone the repository**:
+```bash
+git clone https://github.com/jacopoRodeschini/geossm.git
+cd geossm
+```
+
+3. **Create and activate a virtual environment** (`.venv` in the repository; any supported Python, 3.10 to 3.14, is downloaded by uv if it is not installed):
+```bash
+uv venv --python 3.12
+source .venv/bin/activate
+```
+
+4. **Install geossm** in editable mode, with the test dependencies:
+```bash
+uv pip install -e ".[test]"
+```
+Add other extras as needed, e.g. `".[test,docs,interactive]"`.
+
+5. **(GPU only) Install the CUDA build of JAX**:
+```bash
+uv pip install -U "jax[cuda12]"
+```
+
+The `gmsh` wheel needs a few system OpenGL/X libraries. On a minimal Debian/Ubuntu system (e.g. a container), install them with:
+```bash
+sudo apt-get install -y libglu1-mesa libxcursor1 libxft2 libxinerama1
+```
+
+Use the activated environment (`python`, `pytest`, ...) rather than `uv run`: the repository has no `uv.lock`, and `uv run` would create one and re-sync the environment on every call. To remove the environment, delete the `.venv` directory.
+
 ### Verify Installation
 
 ```python
@@ -294,8 +333,9 @@ to GitHub Pages on pushes to `main`.
 
 ## Run the tests 
 
+In the activated environment (`conda activate geossm`, or `source .venv/bin/activate` with uv):
+
 ```bash
-conda activate env
 JAX_PLATFORMS=cpu python -m pytest tests -q -p no:cacheprovider
 ```
 
