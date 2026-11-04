@@ -132,7 +132,7 @@ class TestFit:
         p, q, T = model.shape
         assert isinstance(res, LRStateSpaceResults)
         assert res.y_hat.shape == (p, T)
-        assert res.Sigma_y_hat.shape == (p, p, T)
+        assert res.var_y_hat.shape == (p, T) and res.Sigma_y_hat is None  # std=True: variances only (P-c)
         assert res.x_smoothed.shape == (q, T + 1)
         assert res.P_smoothed.shape == (q, q, T + 1)
         assert res.iterations == MAX_ITER and res.convergence is False
@@ -163,7 +163,7 @@ class TestFit:
         p, q, T = model.shape
         b = model.Xbeta.shape[1]
         dt = np.dtype(model.dtype)
-        shapes = {"y_obs": (p, T), "Xbeta": (p, b, T), "y_hat": (p, T), "Sigma_y_hat": (p, p, T),
+        shapes = {"y_obs": (p, T), "Xbeta": (p, b, T), "y_hat": (p, T), "var_y_hat": (p, T),
                   "residuals": (p, T), "x_smoothed": (q, T + 1), "P_smoothed": (q, q, T + 1),
                   "S11": (q, q), "S10": (q, q), "S00": (q, q)}
         for name, shape in shapes.items():
@@ -409,7 +409,8 @@ class TestPredict:
         assert np.all(var_pred >= -1e-6)
         pred = res.get_prediction(sub, verbose=False)
         assert isinstance(pred, LRPredictionResults)
-        assert pred.Sigma_y_pred.shape == (N_SITES, N_SITES, 10)
+        assert pred.Sigma_y_pred is None and pred.var_pred.shape == (N_SITES, 10)
+        assert res.get_prediction(sub, std="full", verbose=False).Sigma_y_pred.shape == (N_SITES, N_SITES, 10)
         np.testing.assert_array_equal(pred.y_pred, y_pred)
         assert not hasattr(res, "y_pred")  # the fit results are not modified
 
@@ -418,7 +419,7 @@ class TestPredict:
         _, res = fitted
         newdata = gdf.drop(columns="y")
         _, var_pred = res.predict(newdata, verbose=False)
-        pred = res.get_prediction(newdata, verbose=False)
+        pred = res.get_prediction(newdata, std="full", verbose=False)
         diag = np.diagonal(pred.Sigma_y_pred, axis1=0, axis2=1).T
         scale = np.abs(diag).max()
         np.testing.assert_allclose(var_pred, diag, rtol=1e-5, atol=1e-6 * scale)
@@ -733,7 +734,7 @@ class TestResultsLifecycle:
         # ...and the new results reflect the new fit: s2e = 2 in the noise
         # part of their prediction intervals.
         z = 1.959963984540054
-        var_b = np.diagonal(res_b.Sigma_y_hat, axis1=0, axis2=1).T + 2.0  # (p, T)
+        var_b = np.asarray(res_b.var_y_hat) + 2.0  # (p, T)
         lo_b, hi_b = res_b.conf_int_y(prediction=True)
         np.testing.assert_allclose(hi_b - lo_b, 2 * z * np.sqrt(var_b), rtol=1e-5)
 

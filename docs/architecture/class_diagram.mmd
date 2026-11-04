@@ -32,6 +32,7 @@ classDiagram
     }
     class StateSpaceResults {
         +y_obs, y_hat, Sigma_y_hat : ndarray, read-only
+        +var_y_hat : ndarray p x T, point-wise variances
         +x_filtered, P_filtered, x_pred, P_pred, K : ndarray or None
         +x_smoothed, P_smoothed, P_pred_smoothed : ndarray or None
         +S11, S10, S00 : ndarray
@@ -127,7 +128,7 @@ classDiagram
         +back_transform(g_invs) self
         +to_geo() GeoDataFrame
         +fitted_state : FittedState, read-only property
-        +y_obs, Xbeta, y_hat, Sigma_y_hat : property, views of fitted_state
+        +y_obs, Xbeta, y_hat, Sigma_y_hat, var_y_hat : property, views of fitted_state (Sigma only with std full)
         +x_smoothed, P_smoothed, P_pred_smoothed, S11, S10, S00 : property, views of fitted_state
         +in_support : property, view of fitted_state
         +get_hessian() tuple
@@ -138,11 +139,11 @@ classDiagram
     }
     class LRPredictionResults {
         +y_pred : ndarray p x T, read-only
-        +Sigma_y_pred : ndarray p x p x T or None
+        +Sigma_y_pred : ndarray p x p x T, only with std full
         +var_pred : ndarray p x T or None
         +points, block_p, timestamps, crs, tdelta
         +in_support : bool ndarray, prediction sites the latent field enters
-        +y_pred_back_list, Sigma_y_pred_back_list : set by back_transform
+        +y_pred_back_list, var_pred_back_list, Sigma_y_pred_back_list : set by back_transform
         +y_pred_list, var_pred_list, Sigma_y_pred_list : property
         +fitted_state, y_name : property
         +back_transform(g_invs) self
@@ -173,7 +174,7 @@ classDiagram
         +params : ModelParams
         +timestamps_hat : tuple~ndarray~
         +cov_sizes : tuple, checked before use
-        +y_obs, Xbeta, y_hat, Sigma_y_hat : ndarray, read-only (y_obs as fitted: NaN where masked)
+        +y_obs, Xbeta, y_hat, Sigma_y_hat, var_y_hat : ndarray, read-only (y_obs as fitted: NaN where masked)
         +in_support : bool ndarray, read-only
         +ARRAY_FIELDS : the arrays exposed by the results
     }
@@ -215,7 +216,7 @@ classDiagram
         +tol_relat = 1e-3 : float >= 0
         +verbose = None
         +force_iter = False
-        +std = True
+        +std = True : True, full or False
         +ks_tol = 1e-6 : relative gradient tolerance of the ks step
     }
 

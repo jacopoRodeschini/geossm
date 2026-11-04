@@ -15,7 +15,7 @@ import numpy as np
 import jax.numpy as jnp
 
 # inmport the state space model
-from geossm.ssm.statespace import StateSpaceModel, _filter_kernelJAX, _itype_for
+from geossm.ssm.statespace import StateSpaceModel, _compute_predict_var_kernel_JAX, _filter_kernelJAX, _itype_for
 from geossm.covmodel.covmodels import SPDEApproxCov
 from statsmodels.iolib.summary import Summary
 
@@ -799,24 +799,23 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
     @_on_device
     def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """
-        Core SSM prediction, stacked across all response variables -- the
-        single source of truth used both for in-sample fitted values
-        (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
-        result into per-variable views is a separate, explicit step (see
-        `geossm.utils.split_by_block`), left to the caller. With
-        `std=False` the predictive covariance is skipped and returned as
-        `None` (see `StateSpaceModel.predict`).
+        In-sample fitted values, stacked across all response variables
+        (splitting into per-variable views is left to the caller, see
+        `geossm.utils.split_by_block`). `std` is `FitOptions.std`: with
+        `True` the point-wise variances ``(p, T)`` are computed, with
+        ``"full"`` also the covariance ``(p, p, T)``, with `False` neither.
+        Returns ``(y_hat, Sigma_y_hat or None, var_y_hat or None, tdelta)``.
         """
         self._log("Start Prediction the SSM...")
 
-        # Compute the prediction of linear SSM
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=std)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=(std == "full"))
+        var_y_hat_full = _compute_predict_var_kernel_JAX(H, P_T) if std else None
         tdelta = time.time()- tStart
 
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
-        return y_hat_full, Sigma_y_hat_full, tdelta
+        return y_hat_full, Sigma_y_hat_full, var_y_hat_full, tdelta
 
     def _get_fitted_state(self, x_smoothed=None, P_smoothed=None, P_pred_smoothed=None,
                           S11=None, S10=None, S00=None, in_support=None):
@@ -1283,7 +1282,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
 
         # predict the respose variable using the fitted model parameters
         beta_est = est_params.beta.value
-        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(
+        y_hat_full, Sigma_y_hat_full, var_y_hat_full, tdelta_hat = self._predict(
             H, x_T, P_T, Xbeta, beta_est, std=std
         )
         y_hat_full = jnp.where(x_missing, jnp.nan, y_hat_full)  # no covariate, no fitted value
@@ -1313,6 +1312,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
             y_hat=y_hat_full,
             Sigma_y_hat=Sigma_y_hat_full,
+            var_y_hat=var_y_hat_full,
             tdelta_hat=tdelta_hat,
             # block_p: snapshotted here rather than left to be read live
             # off `self.block_p` -- that attribute is mutable and would go

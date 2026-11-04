@@ -196,7 +196,8 @@ def _compute_s2e_jax_kernel(err, H, P_T, block_p):
             Hp_valid = H_p * nna[:, None]
 
             err_term = ep_valid @ ep_valid
-            tr_term = jnp.trace(Hp_valid @ P_t_plus_1 @ Hp_valid.T)
+            # trace(H P H') without the (m_p, m_p) product: O(m_p q^2), not O(m_p^2 q)
+            tr_term = jnp.sum((Hp_valid @ P_t_plus_1) * Hp_valid)
 
             new_acc = carry_acc + err_term + tr_term
             return new_acc, None

@@ -891,8 +891,6 @@ class StateSpaceModel:
         self._order = "(1, 0)"  # Placeholder for ARMA order if needed
         self._today = date.today()
         self._params = None  # only the beta par.
-        self._params_names = None
-        self._params_dim = None
 
         # Set the initial state starting values if not provided
         if x0 is None and F is not None and Q is not None:
@@ -1139,8 +1137,6 @@ class StateSpaceModel:
 
         # update the params attributes
         self._params = self._beta
-        self._params_names = self._xbeta_names
-        self._params_dim = self._b
 
         return True
 
@@ -1997,21 +1993,6 @@ class StateSpaceModel:
         self._params = value
 
     @property
-    def params_names(self):
-        """list of str: Names corresponding to `params`; currently an
-        alias for `xbeta_names`."""
-        return self._params_names
-
-    @params_names.setter
-    def params_names(self, value):
-        self._params_names = value
-
-    @property
-    def params_dim(self):
-        """int: Dimension of `params`; currently an alias for `b`."""
-        return self._params_dim
-
-    @property
     def xbeta_names(self):
         """list of str: Human-readable names for the ``b`` regression
         terms in `Xbeta`/`beta`."""
@@ -2241,8 +2222,6 @@ class StateSpaceModel:
         self._xbeta_names = state.get("xbeta_names", None)
         self._y_t = None
         self._params = self._beta
-        self._params_names = self._xbeta_names
-        self._params_dim = self._b
 
         # Ensure other attributes exist with sensible defaults
         if not hasattr(self, "dtype"):

@@ -10,7 +10,7 @@ configures the EM stopping rule used by `fit`.
 """
 
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -95,12 +95,13 @@ class FitOptions:
         values make the log-likelihood oscillate at the start). A NaN/Inf
         log-likelihood always stops the algorithm and returns the
         highest-likelihood estimate seen.
-    std : bool, default True
-        If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
-        computed after the EM loop (left as `None`) -- useful when the
-        ``(p, p, T)`` array does not fit in device memory. ``std``
-        switches the whole covariance (the standard deviations are the
-        square roots of its diagonal).
+    std : {True, "full", False}, default True
+        Uncertainty of the in-sample fitted values computed after the EM
+        loop: `True` stores the point-wise variances `var_y_hat`
+        ``(p, T)``; ``"full"`` also stores the full covariance
+        `Sigma_y_hat` ``(p, p, T)`` (memory grows with ``p^2 T``: e.g.
+        1 GB at 1,600 sites and 100 time steps in float32); `False` stores
+        neither.
     ks_tol : float, default 1e-6
         Tolerance of the `ks` M-step (L-BFGS-B over ``log(ks)``): it stops
         when the gradient of its objective (the `ks`-dependent part of the
@@ -113,7 +114,7 @@ class FitOptions:
     tol_relat: float = 1e-3
     verbose: Optional[bool] = None
     force_iter: bool = False
-    std: bool = True
+    std: Union[bool, str] = True
     ks_tol: float = 1e-6
 
     def __post_init__(self):
@@ -123,6 +124,8 @@ class FitOptions:
         if not (isinstance(self.tol_relat, (int, float, np.number)) and np.isfinite(self.tol_relat)
                 and self.tol_relat >= 0):
             raise ValueError(f"tol_relat must be a finite number >= 0, got {self.tol_relat!r}.")
+        if not (self.std is True or self.std is False or self.std == "full"):
+            raise ValueError(f"std must be True, False or 'full', got {self.std!r}.")
         if not (isinstance(self.ks_tol, (int, float, np.number)) and np.isfinite(self.ks_tol)
                 and self.ks_tol > 0):
             raise ValueError(f"ks_tol must be a finite number > 0, got {self.ks_tol!r}.")

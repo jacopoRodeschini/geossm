@@ -169,11 +169,12 @@ def areal_weights(points, polygons, keep=None):
     return W, counts
 
 
-def delta_method(g_inv, mu, Sigma):
+def delta_method(g_inv, mu, var, Sigma=None):
     """
     Second-order delta method: back-transform a mean `mu` (shape
-    `(n, T)`) and its full covariance `Sigma` (shape `(n, n, T)`,
-    `Sigma[:, :, t]` symmetric) through `h = g_inv`, the inverse of the
+    `(n, T)`) and its point-wise variance `var` (shape `(n, T)`) -- and,
+    when given, the full covariance `Sigma` (shape `(n, n, T)`,
+    `Sigma[:, :, t]` symmetric) -- through `h = g_inv`, the inverse of the
     response transform applied by the model formula.
 
     `h` must be invertible with `h' != 0` everywhere it's evaluated
@@ -188,24 +189,29 @@ def delta_method(g_inv, mu, Sigma):
         E[h(Y)] ~= h(mu) + 0.5 * h''(mu) * Var(Y), a second-order Taylor
         expansion of h around mu (the first-order/naive term h(mu)
         alone is biased whenever h is curved).
-    Sigma_back : ndarray, shape (n, n, T)
-        Cov[h(Y)] ~= diag(h'(mu)) @ Sigma @ diag(h'(mu)), the standard
-        (first-order) multivariate delta method, applied per time step;
-        for the diagonal this is the familiar Var[h(Y)] ~= h'(mu)^2 * Var(Y).
+    var_back : ndarray, shape (n, T)
+        Var[h(Y)] ~= h'(mu)^2 * Var(Y) (first-order delta method).
+    Sigma_back : ndarray, shape (n, n, T), or None
+        Cov[h(Y)] ~= diag(h'(mu)) @ Sigma @ diag(h'(mu)), per time step
+        (`None` without `Sigma`).
+    h1 : ndarray, shape (n, T)
+        h'(mu), e.g. to propagate a linear combination of the predictions.
     """
     mu = jnp.asarray(mu)
-    Sigma = jnp.asarray(Sigma)
+    var = jnp.asarray(var)
     flat_mu = mu.ravel()
 
     h = jax.vmap(g_inv)(flat_mu).reshape(mu.shape)
     h1 = jax.vmap(jax.grad(g_inv))(flat_mu).reshape(mu.shape)
     h2 = jax.vmap(jax.grad(jax.grad(g_inv)))(flat_mu).reshape(mu.shape)
 
-    var_diag = jnp.diagonal(Sigma, axis1=0, axis2=1).T  # (T, n) -> (n, T)
-    mean_back = h + 0.5 * h2 * var_diag
-    Sigma_back = h1[:, None, :] * Sigma * h1[None, :, :]
-
-    return np.asarray(mean_back), np.asarray(Sigma_back)
+    mean_back = h + 0.5 * h2 * var
+    var_back = h1 ** 2 * var
+    Sigma_back = None
+    if Sigma is not None:
+        Sigma = jnp.asarray(Sigma)
+        Sigma_back = np.asarray(h1[:, None, :] * Sigma * h1[None, :, :])
+    return np.asarray(mean_back), np.asarray(var_back), Sigma_back, np.asarray(h1)
 
 
 def direct_transform(g_inv, y):

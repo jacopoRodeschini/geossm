@@ -28,9 +28,11 @@ class LRPredictionResults:
     y_pred : numpy.ndarray, shape (p, T)
         Predicted mean.
     Sigma_y_pred : numpy.ndarray, shape (p, p, T), or None
-        Predictive covariance (`None` with `std=False`).
+        Predictive covariance (only with ``get_prediction(df, std="full")``:
+        its memory grows with ``p^2 T``).
     var_pred : numpy.ndarray, shape (p, T), or None
-        Point-wise predictive variance, the diagonal of `Sigma_y_pred`.
+        Point-wise predictive variance, the diagonal of the covariance
+        (`None` with ``std=False``).
     points : list of numpy.ndarray
         Prediction sites of each response variable, shape ``(n_i, 2)``.
     block_p : numpy.ndarray
@@ -46,8 +48,9 @@ class LRPredictionResults:
         domains, with a non-empty basis). At the others the mean is
         `X beta` and the state-driven variance 0 (a warning is given when
         the predictions are computed): mask them with `in_support`.
-    y_pred_back_list, Sigma_y_pred_back_list : list of numpy.ndarray or None
-        Original-scale predictions (delta method), set by `back_transform`.
+    y_pred_back_list, var_pred_back_list, Sigma_y_pred_back_list : list of numpy.ndarray or None
+        Original-scale predictions (delta method), set by `back_transform`
+        (`Sigma_y_pred_back_list` only with the full covariance).
 
     Parameters
     ----------
@@ -57,6 +60,10 @@ class LRPredictionResults:
         Values of the attributes of the same name; `var_pred` defaults to
         the diagonal of `Sigma_y_pred`. Built by
         `LRStateSpaceResults.get_prediction`; not meant to be called directly.
+    H, state_cols : optional
+        Measurement matrix at the prediction sites and the columns of
+        `fitted_state.P_smoothed` of the prediction times, for the polygon
+        variances of `to_poly` without the ``(p, p, T)`` covariance.
 
     Examples
     --------
@@ -69,7 +76,7 @@ class LRPredictionResults:
     """
 
     def __init__(self, fitted_state, y_pred, Sigma_y_pred=None, var_pred=None, points=None, block_p=None,
-                 timestamps=None, crs=None, tdelta=None, in_support=None):
+                 timestamps=None, crs=None, tdelta=None, in_support=None, H=None, state_cols=None):
         dtype = fitted_state.dtype
         self._fitted_state = fitted_state
         self.y_pred = _read_only_array(y_pred, dtype)
@@ -83,8 +90,12 @@ class LRPredictionResults:
         self.crs = crs
         self.tdelta = tdelta
         self.in_support = _read_only_array(in_support, bool)
+        self._H = _read_only_array(H, dtype)
+        self._state_cols = None if state_cols is None else np.asarray(state_cols)
         self.y_pred_back_list = None
+        self.var_pred_back_list = None
         self.Sigma_y_pred_back_list = None
+        self._h1_back_list = None  # h'(mu) of the back-transformation, for to_poly
 
     @property
     def fitted_state(self):
@@ -126,7 +137,8 @@ class LRPredictionResults:
         """
         Map the predictions back to the response's original scale with the
         second-order delta method, per response variable, and store them as
-        `y_pred_back_list`/`Sigma_y_pred_back_list` (see
+        `y_pred_back_list`/`var_pred_back_list` (and `Sigma_y_pred_back_list`
+        with the full covariance) (see
         `LRStateSpaceResults.back_transform` for the method and what is
         estimated: the original-scale mean of the latent signal).
 
@@ -140,22 +152,22 @@ class LRPredictionResults:
         Returns
         -------
         LRPredictionResults
-            `self`. Without the covariance (`std=False`) the predictions are
-            not back-transformed (warning).
+            `self`. Without the variances (``std=False``) the predictions
+            are not back-transformed (warning).
         """
         g_invs = normalize_g_invs(g_invs, len(self._y_names))
-        if self.Sigma_y_pred is None:
-            warnings.warn("back_transform(): the predictions have no covariance (std=False), "
+        if self.var_pred is None:
+            warnings.warn("back_transform(): the predictions have no variances (std=False), "
                           "so they are not back-transformed; use get_prediction(df, std=True).",
                           RuntimeWarning, stacklevel=2)
             return self
-        y_back, Sigma_back = [], []
-        for mu_i, Sigma_i, g_i in zip(self.y_pred_list, self.Sigma_y_pred_list, g_invs):
-            m, S = delta_method(g_i, mu_i, Sigma_i)
-            y_back.append(m)
-            Sigma_back.append(S)
-        self.y_pred_back_list = y_back
-        self.Sigma_y_pred_back_list = Sigma_back
+        Sigma_lists = self.Sigma_y_pred_list or [None] * len(g_invs)
+        out = [delta_method(g_i, mu_i, var_i, Sigma_i)
+               for mu_i, var_i, Sigma_i, g_i in zip(self.y_pred_list, self.var_pred_list, Sigma_lists, g_invs)]
+        self.y_pred_back_list = [o[0] for o in out]
+        self.var_pred_back_list = [o[1] for o in out]
+        self.Sigma_y_pred_back_list = None if self.Sigma_y_pred is None else [o[2] for o in out]
+        self._h1_back_list = [o[3] for o in out]
         return self
 
     def to_geo(self):
@@ -173,8 +185,7 @@ class LRPredictionResults:
         -------
         geopandas.GeoDataFrame
         """
-        back_var = (None if self.Sigma_y_pred_back_list is None
-                    else [diag_variance(S) for S in self.Sigma_y_pred_back_list])
+        back_var = self.var_pred_back_list
         return build_geo_dataframe(
             self._y_names, self.points, self.timestamps, self.y_pred_list, self.var_pred_list, self.crs,
             prefix="pred", y_back_list=self.y_pred_back_list, var_back_list=back_var,
@@ -205,9 +216,11 @@ class LRPredictionResults:
             y_poly[:, t]       = W @ y_pred[:, t]
             Sigma_poly[:, :, t] = W @ Sigma_pred[:, :, t] @ W.T
 
-        The full point covariance is required for the areal variance: the
-        std of a polygon mean is `sqrt(w_k' Sigma w_k)`, which includes the
-        cross-covariances between points. Averaging the point stds instead
+        The areal variance involves the cross-covariances between points:
+        the std of a polygon mean is `sqrt(w_k' Sigma w_k)`. With
+        `Sigma_t = H P_t H'` it is computed as `diag((W H) P_t (W H)')`,
+        from the `(m, q)` matrix `W H`, so the `(p, p, T)` covariance is
+        not needed (it is not stored by default). Averaging the point stds instead
         assumes perfect correlation (overestimating it), and averaging the
         variances divided by `n_k` assumes independence (underestimating
         it, increasingly so for denser grids).
@@ -235,8 +248,8 @@ class LRPredictionResults:
         - Cross-variable covariance is dropped (as in `Sigma_y_pred_list`):
           each response variable is aggregated independently.
         - With `back_transform=True` the original-scale point predictions
-          (`y_pred_back_list`/`Sigma_y_pred_back_list`, from the delta
-          method) are averaged, i.e. the polygon mean of the original-scale
+          (`y_pred_back_list`, from the delta method; covariance
+          `D_t H P_t H' D_t` with `D_t = diag(h'(mu_t))`) are averaged, i.e. the polygon mean of the original-scale
           process -- not `g_inv` of the polygon mean on the model scale.
 
         Parameters
@@ -273,16 +286,28 @@ class LRPredictionResults:
                     "to_poly(back_transform=True) requires back-transformed "
                     "predictions: run `.back_transform(g_invs)` first."
                 )
-            y_list, Sigma_list, suffix = self.y_pred_back_list, self.Sigma_y_pred_back_list, "_back"
+            y_list, h1_list, Sigma_list, suffix = (self.y_pred_back_list, self._h1_back_list,
+                                                   self.Sigma_y_pred_back_list, "_back")
         else:
-            y_list, Sigma_list, suffix = self.y_pred_list, self.Sigma_y_pred_list, ""
+            y_list, h1_list, Sigma_list, suffix = (self.y_pred_list, [None] * len(self.y_pred_list),
+                                                   self.Sigma_y_pred_list, "")
 
+        # Areal variances from W H P_t H' W' (no (p, p, T) covariance needed);
+        # from the full covariance when the measurement matrix is not available
+        # (an object built directly with `Sigma_y_pred`)
+        use_H = self._H is not None and self._state_cols is not None
+        if std and not use_H and Sigma_list is None:
+            raise ValueError(
+                "to_poly(std=True) needs the measurement matrix or the covariance of the "
+                "predictions: use `results.get_prediction(df)`."
+            )
+        if std and use_H:
+            # state-driven covariances at the prediction times (column 0 is the prior)
+            P = np.asarray(self._fitted_state.P_smoothed, dtype=float)[:, :, self._state_cols[1:]]
+            H_list = np.split(np.asarray(self._H, dtype=float), self.block_p[1:-1])
+        else:
+            H_list = [None] * len(y_list)
         if Sigma_list is None:
-            if std:
-                raise ValueError(
-                    "to_poly(std=True) requires the prediction covariance: "
-                    "use `results.get_prediction(df, std=True)`."
-                )
             Sigma_list = [None] * len(y_list)
 
         y_names = self._y_names
@@ -304,7 +329,8 @@ class LRPredictionResults:
         out.insert(1, "timestamp", np.repeat(ts, m))
 
         support_list = self._support_list() or [None] * len(y_names)
-        for name, points, y, Sigma, keep in zip(y_names, self.points, y_list, Sigma_list, support_list):
+        for name, points, y, H_i, h1, Sigma, keep in zip(y_names, self.points, y_list, H_list, h1_list,
+                                                          Sigma_list, support_list):
             col = f"{name}{suffix}"
             W, counts = areal_weights(points, polygons, keep=keep)
             empty = counts == 0
@@ -324,13 +350,17 @@ class LRPredictionResults:
             out[col] = y_poly.T.ravel()
 
             if std:
-                # diag(W Sigma_t W') = rowsum(W * (W Sigma_t)), without
-                # forming the (m, m) cross-polygon covariance
-                Sigma = np.asarray(Sigma)
+                # diag(W Sigma_t W') with Sigma_t = D_t H P_t H' D_t (D_t = diag(h'(mu_t))
+                # after back_transform, else I): rowsum((A P_t) * A), A = W D_t H (m, q),
+                # without the (n, n) covariance (Section P)
                 var = np.empty((T, m))
                 for t in range(T):
-                    WS = W @ Sigma[:, :, t]  # (m, n)
-                    var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
+                    if use_H:
+                        A = W @ (H_i if h1 is None else H_i * np.asarray(h1)[:, t, None])
+                        var[t] = np.sum((A @ P[:, :, t]) * A, axis=1)
+                    else:  # diag(W Sigma_t W') = rowsum(W * (W Sigma_t))
+                        WS = W @ np.asarray(Sigma)[:, :, t]
+                        var[t] = np.asarray(W.multiply(WS).sum(axis=1)).ravel()
                 sd = _safe_sqrt_variance(var, context="to_poly")
                 sd[:, empty] = np.nan  # after the sqrt: already warned above
                 out[f"std_{col}"] = sd.ravel()

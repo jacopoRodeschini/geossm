@@ -68,7 +68,7 @@ def test_fit_without_options_equals_default_options(gdf, mesh):
     b = _model(gdf, mesh, dtype=jnp.float32).fit(options=FitOptions())
     assert a.llf == b.llf and len(a.llf_path) == len(b.llf_path)
     np.testing.assert_array_equal(np.asarray(a.params.beta.value), np.asarray(b.params.beta.value))
-    assert (a.Sigma_y_hat is None) == (b.Sigma_y_hat is None) is False  # std=True in both
+    assert (a.var_y_hat is None) == (b.var_y_hat is None) is False  # std=True in both
 
 
 def test_variance_report_is_returned_not_printed(gdf, mesh, capsys):
