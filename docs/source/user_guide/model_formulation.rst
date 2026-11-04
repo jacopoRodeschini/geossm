@@ -214,7 +214,9 @@ Inference
 
 :meth:`~geossm.stmodel.LRStateSpaceResults.compute_cov_params` computes the
 Hessian of :math:`\ell` with respect to the free parameters (excluding
-:math:`x_0, \Sigma_0`) by automatic differentiation, and
+:math:`x_0, \Sigma_0`) by automatic differentiation, one Hessian-vector
+product per free parameter (for its memory, see
+:doc:`jax_configuration`), and
 
 .. math::
 

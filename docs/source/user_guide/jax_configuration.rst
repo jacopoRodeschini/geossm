@@ -172,10 +172,73 @@ Within a process, every kernel is compiled once per array shape and dtype and
 reused by later fits, predictions and standard errors (``compute_cov_params``
 included).
 
+Memory of the standard errors (Hessian)
+---------------------------------------
+
+``compute_cov_params`` differentiates the observed log-likelihood twice. The
+reverse (gradient) pass through the Kalman filter keeps, for every one of the
+:math:`T` time steps, intermediates of size about
+:math:`8\,(4pq + 10q^2)` bytes in float64 (:math:`p` observed sites,
+:math:`q` latent nodes): the memory grows linearly with :math:`T` and roughly
+with :math:`q^2`, and is the same whatever the number :math:`k` of free
+parameters.
+
+The Hessian is built one column at a time, one Hessian-vector product per free
+parameter, so its peak is about two gradients. ``jax.hessian`` would instead
+push the :math:`k` tangents through the reverse pass at once and store the
+gradient's intermediates :math:`k+1` times: about 160 GiB for the bivariate
+GRINS model (PM10 and PM2.5, about 24 parameters), which does not fit on a
+96 GB GPU. Compile-time memory of the two approaches (synthetic problems,
+float64, JAX 0.10.1):
+
+.. list-table::
+   :header-rows: 1
+
+   * - :math:`p, q, T, k`
+     - one gradient
+     - ``jax.hessian``
+     - one column at a time
+   * - 200, 100, 200, 14
+     - 0.27 GiB
+     - 4.08 GiB
+     - 0.54 GiB
+   * - 200, 100, 200, 24
+     - 0.27 GiB
+     - 6.81 GiB
+     - 0.54 GiB
+   * - 200, 100, 400, 14
+     - 0.54 GiB
+     - 8.13 GiB
+     - 1.08 GiB
+   * - 200, 200, 200, 14
+     - 0.84 GiB
+     - 12.67 GiB
+     - 1.69 GiB
+
+The columns are computed one after the other, so on a GPU the Hessian can take
+longer than with ``jax.hessian`` (which batches them); the result is the same.
+
 Not implemented yet
 -------------------
 
-Two changes could save time on a GPU but are not implemented:
+**Checkpointing the filter scan.** If a model is too large even for the
+column-by-column Hessian (long series, many latent nodes), the next step is to
+wrap the Kalman step of the log-likelihood in ``jax.checkpoint``
+(rematerialisation). The reverse pass would then store only the scan carry
+per time step (the state :math:`x_t`, its covariance :math:`P_t` and, as the
+filter is written now, the gain :math:`K_t` of size :math:`q \times p`, which
+a log-likelihood-only filter does not need), and recompute the other
+intermediates of the step while differentiating it: roughly one :math:`q
+\times q` matrix per step instead of about ten :math:`q \times q` and four
+:math:`q \times p` ones, for about one extra forward pass of compute.
+Checkpointing blocks of :math:`\sqrt{T}` steps instead (a nested scan with
+``jax.checkpoint`` on the inner one) would store only :math:`\sqrt{T}`
+carries plus the intermediates of one block of :math:`\sqrt{T}` steps, at a
+similar cost. Either change belongs in a log-likelihood-only variant of
+``_filter_kernelJAX``, so that the filter used by the EM algorithm is not
+slowed down.
+
+Two other changes could save time on a GPU but are not implemented:
 
 * **Keeping the E-step on the device.** Every EM iteration copies the
   smoothed states, their covariances and the EM sufficient statistics to the
