@@ -8,7 +8,7 @@ The example is run on a GPU and CPU device.
 
 # %% Import the necessary libraries
 import os
-
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 msg = """
 JAX configuration (see the user guide page "JAX configuration"). These are
@@ -68,6 +68,10 @@ print("="*50)
 print("Loading the GRINS dataset...")
 grins, shape = df.load_dataset("aqclim_points")
 
+# Project the dataset and the shape into metric distances
+grins = grins.to_crs(epsg=32632)
+shape = shape.to_crs(epsg=32632)
+
 # %% fix the shape into a list of poligons
 
 from shapely.geometry import MultiLineString
@@ -90,74 +94,76 @@ domain = list(polygonize(italy_union))
 # %% Create a geopandas dataframe from training
 
 stpm10 = grins[np.isnan(grins["AQ_mean_PM10"]) == False]["AirQualityStation"].unique()
+stpm25 = grins[np.isnan(grins["AQ_mean_PM2.5"]) == False]["AirQualityStation"].unique()
 
 # extract the PM10 sub dataset
 gdfpm10_train = grins[grins["AirQualityStation"].isin(stpm10)].copy()
+gdfpm25_train = grins[grins["AirQualityStation"].isin(stpm25)].copy()
 
-# Create the shared mesh (both backends)
-points = np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
+# Create the shared mesh
+points = [np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()]),
+          np.array([geom.coords[0] for geom in gdfpm25_train.geometry.unique()])]
 
+# concatenate the two dataframes into a single dataframe
+gdf_train = grins[grins["AirQualityStation"].isin(np.concatenate([stpm10, stpm25]))].copy()
+
+print("="*50)
+print(f"#stations PM10: {len(points[0])}, #stations PM2.5: {len(points[1])}")
 # %% Create the mesh and the buffer for the SPDE approximation of the covariance function
 lowrank = [0.5]
-# lowrank = [1]
-cov_funcs = {lr: None for lr in lowrank}
+names = ["PM10", "PM2.5"]
+cov_funcs = {(lr, n): None for lr in lowrank for n in names}
 for lr in lowrank:
+    for n, pts in zip(names, points):
+        mesh_io, hull, info = buildMesh2d(pts, lowrank=lr, domain=domain,
+                                          eps=0.1, 
+                                          gradation=0.5,
+                                          bandwidth=0.1,
+                                          anchor_spacing=0.3, 
+                                          return_info=True)
 
-    mesh_io, hull, info = buildMesh2d(points, n_vertices=int(lr*len(points)), domain=domain,
-                                      eps=0.1, 
-                                      gradation=0.5,
-                                      bandwidth=0.1,
-                                      anchor_spacing=0.3, 
-                                      return_info=True)
+        # Create the covariance function used to simulate the "truth"
+        cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
+        cov_fun = cov_fun.setup(mesh_io, domain=domain)
+        cov_funcs[(lr, n)] = cov_fun
 
-
-
-    # Create the covariance function used to simulate the "truth"
-    cov_fun = matern_spde(latlon=False, nu=1, var=1, rescale=4)
-    cov_fun = cov_fun.setup(mesh_io, domain=domain)
-    cov_funcs[lr] = cov_fun
-
-# Plot the generated mesh and the observed points
+# %% Plot the generated mesh and the observed points
 fig, ax = plt.subplots(1, len(cov_funcs), figsize=(6 * len(cov_funcs), 6))
 
 if len(cov_funcs) == 1:
     ax = [ax]
 
-for i, (lr, cov_fun) in enumerate(cov_funcs.items()):
+for i, ((lr, n), cov_fun) in enumerate(cov_funcs.items()):
     cov_fun.fem_solver.plot_mesh(ax=ax[i])
-    ax[i].plot(points[:, 0], points[:, 1], "x", markersize=3)
-    ax[i].set_title(f"Mesh and points (lowrank={lr})")
+    ax[i].plot(points[i][:, 0], points[i][:, 1], "x", markersize=3)
+    ax[i].set_title(f"{n}: mesh and points (lowrank={lr})")
     ax[i].set_xlabel("Longitude")
     ax[i].set_ylabel("Latitude")
     ax[i].set_aspect('equal')
     ax[i].grid(True)
 
-for i, (lr, cov_fun) in enumerate(cov_funcs.items()):
+for i, ((lr, n), cov_fun) in enumerate(cov_funcs.items()):
     print(cov_fun)
 
 # %% Remove outliers os the .999 percentile of the PM10 values
-q999 = gdfpm10_train["AQ_mean_PM10"].quantile(0.999)
-q001 = gdfpm10_train["AQ_mean_PM10"].quantile(0.001)
+pm10_q999 = gdfpm10_train["AQ_mean_PM10"].quantile(0.999)
+pm10_q001 = gdfpm10_train["AQ_mean_PM10"].quantile(0.001)
+
+pm25_q999 = gdfpm25_train["AQ_mean_PM2.5"].quantile(0.999)
+pm25_q001 = gdfpm25_train["AQ_mean_PM2.5"].quantile(0.001)
 
 # Replace outlier values with nan
-inx = (gdfpm10_train["AQ_mean_PM10"] > q999) | (gdfpm10_train["AQ_mean_PM10"] < q001)
+inx = (gdfpm10_train["AQ_mean_PM10"] > pm10_q999) | (gdfpm10_train["AQ_mean_PM10"] < pm10_q001)
 gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
-# %% Standardise the covariates (CL_t2m, CL_windspeed, CL_rh) to have mean 0 and variance 1
-# fix, ax = plt.subplots(1, 4, figsize=(20, 5))
-# ax[0].hist(np.sqrt(gdfpm10_train["AQ_mean_PM10"]), bins=30, alpha=0.5, label="AQ_mean_PM10")
-# ax[1].hist(gdfpm10_train["CL_t2m"], bins=30, alpha=0.5, label="CL_t2m")
-# ax[2].hist(gdfpm10_train["CL_windspeed"], bins=30, alpha=0.5, label="CL_windspeed")
-# ax[3].hist(gdfpm10_train["CL_rh"], bins=30, alpha=0.5, label="CL_rh")
-# ax[0].legend()
-# ax[1].legend()
-# ax[2].legend()
-# ax[3].legend()
-# ax[0].set_title("Histograms of the covariates before standardisation")
-# plt.show()
+inx = (gdfpm25_train["AQ_mean_PM2.5"] > pm25_q999) | (gdfpm25_train["AQ_mean_PM2.5"] < pm25_q001)
+gdfpm25_train.loc[inx, "AQ_mean_PM2.5"] = np.nan
 
 
 # %% Define the formula used to define the fixed effects in the LRSSM model. 
+
+# rename the columns of the dataframe to avoid issues with the formula parser
+gdf_train = gdf_train.rename(columns={"AQ_mean_PM2.5": "AQ_mean_PM25"})
 
 # The formula is used to create the design matrices for the fixed effects.
 # Formula without the standardisation
@@ -168,25 +174,19 @@ formula_pm25 = "np.log(AQ_mean_PM25) ~ 1 + standardize(CL_t2m) + standardize(CL_
 backend = ["gpu"] if has_gpu else ["cpu"]
 
 # Set the options for the fitting procedure
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-3
-opt.verbose = True
-
-# Store the results in a list of dictionaries, one for each backend
-# lowrank = [0.25, 0.5, 0.75, 1.0]
+opt = FitOptions(max_iter=50, tol_relat=1e-3, verbose=True)
 
 # Create the LRSSM model with the specified backend and data
 domain = ops.unary_union(domain)
 model = lrssm(
-    df=gdfpm10_train, 
+    df=gdf_train, 
     formulas=[formula_pm10, formula_pm25], 
     domain=[domain, domain], 
-    verbose=False, backend=backend[0], dtype=jnp.float64)
+    verbose=True, backend=backend[0], dtype=jnp.float64)
 
 
 # Set up the model cov. 
-model = model.setup(cov_fun=[cov_funcs[0.75]])
+model = model.setup(cov_fun=[cov_funcs[(0.5, n)] for n in names])
 print(model)
 
 # Fit the model using the EM algorithm with the specified options
@@ -198,6 +198,17 @@ print(
     f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
 )
 
-# %% How to compute the model standard error?
+# %% Compute the model standard error
+results.compute_cov_params()
+print(results)
 
-# %% How to back transform the predicted values to the original scale?
+# %% Transform the predicted values to the original scale
+results = results.back_transform(g_invs=[jnp.exp, jnp.exp])
+print(results)
+
+# Compute the MSE and RMSE in back transformed scale
+y_obs = results.y_obs_back_list
+y_hat = results.y_hat_back_list
+
+mse = [jnp.nanmean((y_obs[i] - y_hat[i])**2) for i in range(len(y_obs))]
+rmse = [jnp.sqrt(mse[i]) for i in range(len(mse))]

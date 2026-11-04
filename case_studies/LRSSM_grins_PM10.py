@@ -7,7 +7,6 @@ The example is run on a GPU and CPU device.
 """
 
 # %% Import the necessary libraries
-from unittest import result
 import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -71,7 +70,6 @@ print("Loading the GRINS dataset...")
 grins, shape = df.load_dataset("aqclim_points")
 
 # %% Project the dataset and the shape into metric distances
-
 grins = grins.to_crs(epsg=32632)
 shape = shape.to_crs(epsg=32632)
 
@@ -107,7 +105,6 @@ points = np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
 
 # %% Create the mesh and the buffer for the SPDE approximation of the covariance function
 lowrank = [0.25, 0.5, 0.75]
-# lowrank = [1]
 cov_funcs = {lr: None for lr in lowrank}
 for lr in lowrank:
 
@@ -151,20 +148,6 @@ q001 = gdfpm10_train["AQ_mean_PM10"].quantile(0.001)
 inx = (gdfpm10_train["AQ_mean_PM10"] > q999) | (gdfpm10_train["AQ_mean_PM10"] < q001)
 gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
-# %% Standardise the covariates (CL_t2m, CL_windspeed, CL_rh) to have mean 0 and variance 1
-# fix, ax = plt.subplots(1, 4, figsize=(20, 5))
-# ax[0].hist(np.sqrt(gdfpm10_train["AQ_mean_PM10"]), bins=30, alpha=0.5, label="AQ_mean_PM10")
-# ax[1].hist(gdfpm10_train["CL_t2m"], bins=30, alpha=0.5, label="CL_t2m")
-# ax[2].hist(gdfpm10_train["CL_windspeed"], bins=30, alpha=0.5, label="CL_windspeed")
-# ax[3].hist(gdfpm10_train["CL_rh"], bins=30, alpha=0.5, label="CL_rh")
-# ax[0].legend()
-# ax[1].legend()
-# ax[2].legend()
-# ax[3].legend()
-# ax[0].set_title("Histograms of the covariates before standardisation")
-# plt.show()
-
-
 # %% Define the formula used to define the fixed effects in the LRSSM model. 
 
 # The formula is used to create the design matrices for the fixed effects.
@@ -181,7 +164,6 @@ opt = FitOptions(max_iter=50, tol_relat=1e-3, verbose=True)
 
 # Create the LRSSM model with the specified backend and data
 union = ops.unary_union(domain)
-
 results = {lr: {} for lr in lowrank}
 for lr in lowrank:
     model = lrssm(
@@ -206,13 +188,14 @@ for lr in lowrank:
     # %% add the resutls into the results dictionary
     results[lr] = dict({
         "backend": backend[0],
-        "lowrank": lr,
-        "tsim_estep": rs.runtime_tot_estep,
-        "tsim_mstep": rs.runtime_tot_mstep,
-        "ttot": rs.runtime_tot_estep + rs.runtime_tot_mstep,
-        "mse": rs.mse(),
-        "llf": rs.llf})
+        "lowrank": float(lr),
+        "tsim_estep": float(rs.runtime_tot_estep),
+        "tsim_mstep": float(rs.runtime_tot_mstep),
+        "ttot": float(rs.runtime_tot_estep + rs.runtime_tot_mstep),
+        "mse": float(rs.mse()),
+        "llf": float(rs.llf)
+    })
 
 # %% Make the results dictionary into a pandas dataframe
 import pandas as pd
-df_results = pd.DataFrame.from_dict(results, orient='index')
+df_results = pd.DataFrame.from_dict(results, orient='index').sort_index(ascending=False)
