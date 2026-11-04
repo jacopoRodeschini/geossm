@@ -143,7 +143,7 @@ gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
 # Define the formula used to define the fixed effects in the LRSSM model. 
 # The formula is used to create the design matrices for the fixed effects.
-formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + "
+formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh)"
 
 # Create the model
 backends = ["cpu", "gpu"] if has_gpu else ["cpu"]
@@ -208,7 +208,7 @@ timing_df = pd.DataFrame([item for sublist in records.values() for item in subli
 
 # %% 
 # Save the results in a pickle file for later analysis and plotting
-dtype = "float64"
+dtype = "float32"
 folderpath = Path().resolve() / "case_studies"
 path = folderpath / f"grins_PM10_timing_results_{dtype}.pkl"
 
