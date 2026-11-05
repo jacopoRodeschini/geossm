@@ -13,7 +13,7 @@ import jax
 import jax.numpy as jnp
 from dataclasses import dataclass, replace, fields
 from geossm.utils import _on_device, split_by_block, format_info_table, _summary_table_source
-from geossm.utils import _print_info
+from geossm.utils import _print_info, results_to_latex
 from geossm.stmodel._fitted import (FittedState, _observed_loglik_value, _read_only_copy, observed_loglik,
                                     predict_from_fit)
 from geossm.stmodel._output import build_geo_dataframe, delta_method, direct_transform, normalize_g_invs
@@ -1109,6 +1109,58 @@ class LRStateSpaceResults(StateSpaceResults):
             self.crs_hat, prefix="hat", y_back_list=self.y_hat_back_list, var_back_list=self.var_y_hat_back_list,
             support_list=None if self.in_support is None else np.split(self.in_support, self.block_p[1:-1]),
         )
+
+    def to_latex(self, response_labels=None, covariate_labels=None, component_labels=None,
+                 decimals=3, se_threshold=None, range_unit=None, align="c", caption=None, label=None):
+        """
+        Booktabs LaTeX table of the estimates, for papers and slides.
+
+        Sections: regression coefficients, measurement-error variances and
+        loadings (one column per response), latent components (``f_j``,
+        ``kappa_j``, range ``sqrt(8)/kappa_j``, number of inner vertices;
+        one column per component) and the in-sample RMSE per response (on
+        the original scale after `back_transform`). Cells are "estimate
+        (standard error)"; call `compute_cov_params` first, otherwise the
+        standard errors show as "--". Needs ``\\usepackage{booktabs}``.
+
+        Parameters
+        ----------
+        response_labels : dict, optional
+            Response name (e.g. ``"np.log(AQ_mean_PM10)"``) -> column label
+            (e.g. ``"$PM_{10}$"``). Unlisted names: the variable inside the
+            transformation, LaTeX-escaped.
+        covariate_labels : dict, optional
+            Covariate name (e.g. ``"standardize(CL_t2m)"``, ``"Intercept"``)
+            -> row label. Unlisted names as for `response_labels`.
+        component_labels : list of str, optional
+            Column labels of the latent components (default ``Component 1``, ...).
+        decimals : int, default 3
+            Decimal places of every number. A non-zero estimate that would
+            round to zero is written in scientific notation.
+        se_threshold : float, optional
+            Standard errors below it are shown as ``(<threshold)``. Default
+            ``10**-decimals``.
+        range_unit : str, optional
+            Unit of the range (the units of the data CRS), added to its row label.
+        align : str, default "c"
+            One character aligns every value column (the label column stays
+            ``l``); a longer string is the whole column specification, one
+            entry per column including the label column (e.g. ``"lrr"``).
+        caption, label : str, optional
+            Wrap the tabular in a ``table`` environment with this caption/label.
+
+        Returns
+        -------
+        str
+            The LaTeX code.
+
+        See Also
+        --------
+        geossm.utils.results_to_latex : The function this method calls.
+        """
+        return results_to_latex(self, response_labels=response_labels, covariate_labels=covariate_labels,
+                                component_labels=component_labels, decimals=decimals, se_threshold=se_threshold,
+                                range_unit=range_unit, align=align, caption=caption, label=label)
 
     def back_transform(self, g_invs):
         """

@@ -2,6 +2,7 @@
 General utility functions for GEOSSM.
 """
 
+import re
 import numpy as np
 import datetime
 import inspect
@@ -527,3 +528,200 @@ def format_info_table(items, indent=0):
         lines.append(f"{pad}{key:<{max_key_len + 1}} {value}")
 
     return "\n".join(lines)
+
+
+# %% [Utils] Latex results export
+
+def _default_label(name):
+    """`np.log(AQ_mean_PM10)` -> `AQ\\_mean\\_PM10`: drop the outer function calls, escape for LaTeX."""
+    while True:
+        m = re.fullmatch(r"[\w.]+\((.*)\)", name.strip())
+        if not m:
+            break
+        name = m.group(1)
+    return name.replace("_", r"\_")
+
+
+def _estimates_and_se(results):
+    """Per parameter name, `(value array, se array or None if fixed)`.
+
+    The standard errors are `results.bse_vector` (NaN until
+    `compute_cov_params()` has been called), mapped back to each parameter
+    through the flat layout of the free parameters."""
+    # Imported here, not at module level: geossm.stmodel imports geossm.utils
+    # while it loads, so a module-level import would be circular.
+    from geossm.stmodel.stmodel_results import _pack_params
+
+    params = results.params
+    _, meta = _pack_params(results._inference_params())
+    bse = np.asarray(results.bse_vector, dtype=float)
+    out = {}
+    for name in ("beta", "s2e", "f", "A", "ks"):
+        p = getattr(params, name)
+        out[name] = (np.asarray(p.value, dtype=float), None)
+    for name, shape, start, stop, _fixed in meta:
+        if name in out:
+            out[name] = (out[name][0], bse[start:stop].reshape(shape))
+    return out
+
+
+def results_to_latex(results, response_labels=None, covariate_labels=None, component_labels=None,
+                     decimals=3, se_threshold=None, range_unit=None, align="c", caption=None, label=None):
+    """
+    Booktabs LaTeX table of the estimates of an `LRStateSpaceResults`.
+
+    Sections: regression coefficients and the measurement-error variances
+    and loadings (one column per response), the latent components (AR
+    coefficient, SPDE scale, range, number of inner vertices; one column
+    per component), and the in-sample RMSE per response. Values are
+    "estimate (standard error)", both rounded to `decimals` decimal places;
+    a standard error below `se_threshold` is shown as ``(<0.001)``; "--"
+    where a value does not exist (a covariate absent from a response's
+    formula, standard errors before `results.compute_cov_params()`),
+    "fixed" for a fixed parameter.
+
+    Parameters
+    ----------
+    results : LRStateSpaceResults
+        Output of `LRStateSpaceModel.fit`.
+    response_labels : dict, optional
+        Response name (`results.y_name`, e.g. ``"np.log(AQ_mean_PM10)"``)
+        -> column label (e.g. ``"$PM_{10}$"``). Unlisted names: the variable
+        inside the transformation, LaTeX-escaped.
+    covariate_labels : dict, optional
+        Covariate name (e.g. ``"standardize(CL_t2m)"``, ``"Intercept"``) ->
+        row label. Unlisted names as for `response_labels`.
+    component_labels : list of str, optional
+        Column labels of the latent components (default ``Component 1``, ...).
+    decimals : int, default 3
+        Decimal places of estimates, standard errors, range and RMSE (the
+        same for all, so the columns align). A non-zero estimate that would
+        round to zero is written in scientific notation instead (e.g.
+        ``$2.4\times10^{-5}$``).
+    se_threshold : float, optional
+        Standard errors below it are shown as ``($<$threshold)``. Default
+        ``10**-decimals`` (``(<0.001)`` with 3 decimals), the smallest value
+        the rounding can show.
+    range_unit : str, optional
+        Unit of the range, appended to its row label (the range is in the
+        units of the data CRS, e.g. ``"km"`` or ``"deg"``).
+    align : str, default "c"
+        Column alignment. One character (``"c"``, ``"r"``, ``"l"``) aligns
+        every value column that way (the label column stays ``l``); a longer
+        string is used as the whole column specification, one entry per
+        column including the label column, e.g. ``"lrr"`` or ``"lp{3cm}c"``.
+    caption, label : str, optional
+        Wrap the tabular in a ``table`` environment with this caption/label.
+
+    Returns
+    -------
+    str
+        The LaTeX code.
+    """
+    response_labels = response_labels or {}
+    covariate_labels = covariate_labels or {}
+    state = results.fitted_state
+    y_names = list(state.y_name)
+    x_names = [list(names) for names in state.xbeta_names]
+    covs = list(state.cov_function)
+    nvar, nlat = len(y_names), len(covs)
+    ncol = max(nvar, nlat)
+    component_labels = component_labels or [f"Component {j + 1}" for j in range(nlat)]
+    est = _estimates_and_se(results)
+
+    threshold = 10.0 ** -decimals if se_threshold is None else float(se_threshold)
+
+    def num(v):
+        """`v` with `decimals` decimal places; scientific notation if a
+        non-zero value would round to zero; no negative zero."""
+        if v is None or not np.isfinite(v):
+            return "--"
+        v = float(v)
+        if v != 0 and abs(v) < 0.5 * 10.0 ** -decimals:
+            mantissa, exponent = f"{v:.1e}".split("e")
+            return rf"${mantissa}\times10^{{{int(exponent)}}}$"
+        text = f"{v:.{decimals}f}"
+        return text[1:] if text.startswith("-") and float(text) == 0 else text
+
+    def se_text(se):
+        if se is None or not np.isfinite(se):
+            return "--"
+        if se < threshold:
+            # math-mode "<": in text mode with the default OT1 font encoding it prints "¡"
+            return f"$<${np.format_float_positional(threshold, trim='-')}"
+        return num(se)
+
+    def cell(v, se):
+        if se is None:
+            return f"{num(v)} (fixed)"
+        return f"{num(v)} ({se_text(se)})"
+
+    def row(label, cells):
+        cells = list(cells) + [""] * (ncol - len(cells))
+        return " & ".join([label] + cells) + r" \\"
+
+    def header(text):
+        return rf"\multicolumn{{{ncol + 1}}}{{l}}{{\emph{{{text}}}}} \\"
+
+    if len(align) == 1:
+        colspec = "l" + align * ncol
+    elif len(re.sub(r"\{[^}]*\}", "", align).replace("|", "").replace("@", "")) == ncol + 1:
+        colspec = align
+    else:
+        raise ValueError(f"align={align!r}: give one character or a specification of {ncol + 1} columns "
+                         "(label column + one per value column).")
+
+    resp_cols = [response_labels.get(y, _default_label(y)) for y in y_names]
+    lines = [rf"\begin{{tabular}}{{{colspec}}}", r"\toprule", row("Parameter", resp_cols), r"\midrule"]
+
+    # --- Regression coefficients: rows = union of the covariates, in order of appearance
+    lines.append(header("Regression coefficients, estimate (standard error)"))
+    beta, beta_se = est["beta"]
+    offsets = np.cumsum([0] + [len(n) for n in x_names])
+    covariates = list(dict.fromkeys(n for names in x_names for n in names))
+    for cov_name in covariates:
+        cells = []
+        for i, names in enumerate(x_names):
+            if cov_name not in names:
+                cells.append("--")
+                continue
+            k = offsets[i] + names.index(cov_name)
+            cells.append(cell(beta[k], None if beta_se is None else beta_se[k]))
+        lines.append(row(covariate_labels.get(cov_name, _default_label(cov_name)), cells))
+
+    # --- Measurement-error variances and loadings (A: responses x components)
+    lines += [r"\addlinespace", header("Measurement error and loadings")]
+    s2e, s2e_se = est["s2e"]
+    lines.append(row(r"$\sigma^2_{e,i}$", [cell(s2e[i], None if s2e_se is None else s2e_se[i])
+                                           for i in range(nvar)]))
+    A, A_se = est["A"]
+    A, A_se = A.reshape(nvar, nlat), None if A_se is None else A_se.reshape(nvar, nlat)
+    for j in range(nlat):
+        lines.append(row(rf"$A_{{i{j + 1}}}$", [cell(A[i, j], None if A_se is None else A_se[i, j])
+                                               for i in range(nvar)]))
+
+    # --- Latent components (one column per component)
+    f, f_se = est["f"]
+    ks, ks_se = est["ks"]
+    unit = f" ({range_unit})" if range_unit else ""
+    lines += [r"\midrule", row("", component_labels), r"\midrule", header("Latent components")]
+    lines.append(row(r"$f_j$", [cell(f[j], None if f_se is None else f_se[j]) for j in range(nlat)]))
+    lines.append(row(r"$\kappa_j$", [cell(ks[j], None if ks_se is None else ks_se[j]) for j in range(nlat)]))
+    lines.append(row(rf"Range $\sqrt{{8}}/\kappa_j${unit}", [num(np.sqrt(8) / ks[j]) for j in range(nlat)]))
+    lines.append(row(r"Inner vertices $R_j$", [str(int(c.n_latent)) for c in covs]))
+
+    # --- In-sample RMSE per response, on the original scale after back_transform()
+    back = getattr(results, "y_obs_back_list", None) is not None
+    y_obs = results.y_obs_back_list if back else results.y_obs_list
+    y_hat = results.y_hat_back_list if back else results.y_hat_list
+    rmse = [np.sqrt(np.nanmean((np.asarray(o, float) - np.asarray(h, float)) ** 2)) for o, h in zip(y_obs, y_hat)]
+    scale = "original scale" if back else "model scale"
+    lines += [r"\midrule", header(f"Fit, on the {scale}"), row("", resp_cols), row("In-sample RMSE", [num(r) for r in rmse]),
+              r"\bottomrule", r"\end{tabular}"]
+
+    tex = "\n".join(lines)
+    if caption or label:
+        tex = "\n".join([r"\begin{table}[ht]", r"\centering", r"\small"]
+                        + ([rf"\caption{{{caption}}}"] if caption else []) + ([rf"\label{{{label}}}"] if label else [])
+                        + [tex, r"\end{table}"])
+    return tex
