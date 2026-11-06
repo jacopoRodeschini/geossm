@@ -83,7 +83,7 @@ def _compute_initial_values_jax_kernel(y_t, Xbeta, block_p, block_q):
     )
 
     # est_f: the same AR coefficient for every latent factor
-    est_f = jnp.repeat(0.8, nlat)
+    est_f = jnp.repeat(0.7, nlat)
 
     # est_x0: Initial state
     est_x0 = jnp.zeros((block_q[-1],), dtype=y_t.dtype)

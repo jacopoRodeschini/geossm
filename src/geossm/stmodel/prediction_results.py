@@ -118,6 +118,11 @@ class LRPredictionResults:
         return split_by_block(self.y_pred, self.block_p)
 
     @property
+    def in_support_list(self):
+        """list of ndarray or None: Per-response-variable view of `in_support`."""
+        return None if self.in_support is None else split_by_block(self.in_support, self.block_p)
+
+    @property
     def var_pred_list(self):
         """list of ndarray or None: Per-response-variable view of `var_pred`."""
         return None if self.var_pred is None else split_by_block(self.var_pred, self.block_p)

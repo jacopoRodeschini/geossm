@@ -362,6 +362,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             self._cov_matern.append(covi)
 
         # Latent dimension (rank), one block per latent factor -- needed by
+        # n_latent = n inner nodes of each mesh, not the number of sites in the support of each
         # sim()/fit() regardless of how _cov_matern was built.
         self.qdim = jnp.array([cov.n_latent for cov in self._cov_matern], dtype=self.itype)
         self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))

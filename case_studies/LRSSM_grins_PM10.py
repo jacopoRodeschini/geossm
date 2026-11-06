@@ -151,8 +151,7 @@ gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 # %% Define the formula used to define the fixed effects in the LRSSM model. 
 
 # The formula is used to create the design matrices for the fixed effects.
-# Formula without the standardisation
-formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh)"
+formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
 
 # Create the model
 backend = ["gpu"] if has_gpu else ["cpu"]

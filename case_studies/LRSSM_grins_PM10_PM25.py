@@ -7,6 +7,7 @@ The example is run on a GPU and CPU device.
 """
 
 # %% Import the necessary libraries
+from examples.example_LRSSM_prediction import index
 import os
 os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
@@ -38,16 +39,14 @@ import jax.numpy as jnp
 # any JAX array is created (geossm does not switch it on itself).
 jax.config.update("jax_enable_x64", True)
 
-import geossm
 from shapely import ops
 import matplotlib.pyplot as plt
 
-if geossm.__file__:
-    from geossm.covmodel import SPDEApproxCov as matern_spde
-    from geossm.stmodel import LRStateSpaceModel as lrssm
-    from geossm.stmodel import FitOptions
-    from geossm.covmodel import buildMesh2d
-    import geossm.datasets as df
+from geossm.covmodel import SPDEApproxCov as matern_spde
+from geossm.stmodel import LRStateSpaceModel as lrssm
+from geossm.stmodel import FitOptions
+from geossm.covmodel import buildMesh2d
+import geossm.datasets as df
 
 
 # Assert the presence of a GPU device
@@ -107,8 +106,27 @@ points = [np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
 # concatenate the two dataframes into a single dataframe
 gdf_train = grins[grins["AirQualityStation"].isin(np.concatenate([stpm10, stpm25]))].copy()
 
+# rename the columns of the dataframe to avoid issues with the formula parser
+gdf_train = gdf_train.rename(columns={"AQ_mean_PM2.5": "AQ_mean_PM25"})
+
+
 print("="*50)
 print(f"#stations PM10: {len(points[0])}, #stations PM2.5: {len(points[1])}")
+
+# %% Adding the season variable to the dataframe
+def getseason(date):
+    month = date.month
+    if month in [12, 1, 2]:
+        return "Winter"
+    elif month in [3, 4, 5]:
+        return "Spring"
+    elif month in [6, 7, 8]:
+        return "Summer"
+    else:
+        return "Autumn"
+
+gdf_train["season"] = gdf_train["time"].apply(getseason)
+
 # %% Create the mesh and the buffer for the SPDE approximation of the covariance function
 lowrank = [0.5]
 names = ["PM10", "PM2.5"]
@@ -153,28 +171,20 @@ pm25_q999 = gdfpm25_train["AQ_mean_PM2.5"].quantile(0.999)
 pm25_q001 = gdfpm25_train["AQ_mean_PM2.5"].quantile(0.001)
 
 # Replace outlier values with nan
-inx = (gdfpm10_train["AQ_mean_PM10"] > pm10_q999) | (gdfpm10_train["AQ_mean_PM10"] < pm10_q001)
-gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
+inx = (gdf_train["AQ_mean_PM10"] > pm10_q999) | (gdf_train["AQ_mean_PM10"] < pm10_q001)
+gdf_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
-inx = (gdfpm25_train["AQ_mean_PM2.5"] > pm25_q999) | (gdfpm25_train["AQ_mean_PM2.5"] < pm25_q001)
-gdfpm25_train.loc[inx, "AQ_mean_PM2.5"] = np.nan
-
+inx = (gdf_train["AQ_mean_PM25"] > pm25_q999) | (gdf_train["AQ_mean_PM25"] < pm25_q001)
+gdf_train.loc[inx, "AQ_mean_PM25"] = np.nan
 
 # %% Define the formula used to define the fixed effects in the LRSSM model. 
 
-# rename the columns of the dataframe to avoid issues with the formula parser
-gdf_train = gdf_train.rename(columns={"AQ_mean_PM2.5": "AQ_mean_PM25"})
-
 # The formula is used to create the design matrices for the fixed effects.
-# Formula without the standardisation
-formula_pm10 = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
-formula_pm25 = "np.log(AQ_mean_PM25) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
+formula_pm10 = "np.log(AQ_mean_PM10) ~ 1 + season + standardize(CL_lai_hv) + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
+formula_pm25 = "np.log(AQ_mean_PM25) ~ 1 + season + standardize(CL_lai_hv) + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
 
 # Create the model
 backend = ["gpu"] if has_gpu else ["cpu"]
-
-# Set the options for the fitting procedure
-opt = FitOptions(max_iter=50, tol_relat=1e-3, verbose=True)
 
 # Create the LRSSM model with the specified backend and data
 domain = ops.unary_union(domain)
@@ -189,6 +199,9 @@ model = lrssm(
 model = model.setup(cov_fun=[cov_funcs[(0.5, n)] for n in names])
 print(model)
 
+# Set the options for the fitting procedure
+opt = FitOptions(max_iter=50, tol_relat=1e-5, verbose=True)
+
 # Fit the model using the EM algorithm with the specified options
 results = model.fit(options=opt)
 
@@ -202,7 +215,7 @@ print(
 results.compute_cov_params()
 print(results)
 
-# %% Transform the predicted values to the original scale
+# %% back transform the results to the original scale 
 results = results.back_transform(g_invs=[jnp.exp, jnp.exp])
 print(results)
 
@@ -212,3 +225,9 @@ y_hat = results.y_hat_back_list
 
 mse = [jnp.nanmean((y_obs[i] - y_hat[i])**2) for i in range(len(y_obs))]
 rmse = [jnp.sqrt(mse[i]) for i in range(len(mse))]
+
+# print
+print("="*50)
+print("Back transformed results:")
+for i, n in enumerate(names):
+    print(f"{n}: mse={mse[i]:.4f}, rmse={rmse[i]:.4f}")
