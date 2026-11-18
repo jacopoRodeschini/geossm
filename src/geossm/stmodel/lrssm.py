@@ -1433,8 +1433,11 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             # Added the fix for the f update (Eq 3a)
             # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
             # tr(A B) = sum(A * B'), without forming the product
-            num = jnp.sum(invQ[s, s] * S10[s, s].T)
-            den = jnp.sum(invQ[s, s] * S00[s, s].T)
+            # num = jnp.sum(invQ[s, s] * S10[s, s].T)
+            # den = jnp.sum(invQ[s, s] * S00[s, s].T)
+            num = jnp.trace(S10[s, s])
+            den = jnp.trace(S00[s, s])
+            
             est_f = est_f.at[q].set(num / den)
 
         if fixed("f"):

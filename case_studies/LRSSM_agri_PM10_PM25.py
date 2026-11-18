@@ -18,11 +18,11 @@ os.environ.setdefault("JAX_COMPILATION_CACHE_DIR",
 import matplotlib.pyplot as plt
 from shapely.geometry import Point
 import numpy as np
+
 import pandas as pd
 import geopandas as geodf
 from geossm import datasets as df
 from geossm.stmodel import LRStateSpaceModel as lrssm
-from geossm.stmodel import FitOptions
 from geossm.covmodel import SPDEApproxCov
 from pathlib import Path
 
@@ -60,7 +60,7 @@ agri_points, shape = df.load_dataset("agrimonia")
 agri_points = agri_points.to_crs(epsg=32632)
 shape = shape.to_crs(epsg=32632)
 
-domain = list(shape.geometry[0].geoms)[0].buffer(27000)
+# domain = list(shape.geometry[0].geoms)[0].buffer(3.5e4)
 
 
 # %% Add season dummy 
@@ -75,8 +75,33 @@ def get_season(date):
     else:
         return "Autumn"
 
+def urban(land_use):
+    if land_use in [112, 141, 111, 121, 131]:
+        return 'Urban'
+    if land_use in [211, 242, 243, 231]:
+        return 'Agriculture'
+    if land_use in [311, 333]:
+        return 'Forest'
+
+def rain(precipitation):
+    if precipitation > 1:
+        return 'Rain'
+    else:
+        return 'No Rain'
+
+def mask_altitude(altitude, threshold):
+    return altitude <= threshold
+
 agri_points["season"] = agri_points["time"].apply(get_season)
-agri_grid["season"] = agri_grid["time"].apply(get_season)
+agri_points["month"] = agri_points["time"].apply(lambda x: x.month)
+agri_points["urban"] = agri_points["LA_land_use"].apply(urban)
+agri_points["rain"] = agri_points["WE_precipitation_t"].apply(rain)
+
+thr = agri_points['Altitude'].quantile(0.96)
+agri_points["mask_altitude"] = agri_points["Altitude"].apply(lambda x: mask_altitude(x, thr)) 
+
+# %% drop station altutude < thr
+agri_points = agri_points[agri_points["mask_altitude"]].copy()
 
 # %% Cut the dataset from 2019 to 2020
 tmin = np.datetime64("2019-01-01")
@@ -84,23 +109,31 @@ tmax = np.datetime64("2020-12-31")
 agri_points = agri_points[(agri_points["time"] >= tmin) & (agri_points["time"] <= tmax)].copy()
 
 # Avoid log-issues problems with the log transformation, we also remove the 0.1 percentile of the AQ_pm10 variable
-thr001 = agri_points["AQ_pm10"].quantile(0.001)
-index = agri_points[agri_points["AQ_pm10"] <= thr001].index
+index = agri_points[agri_points["AQ_pm10"] <= 1].index
 agri_points.loc[index, "AQ_pm10"] = np.nan
 
-thr001_pm2_5 = agri_points["AQ_pm25"].quantile(0.001)
-index_pm2_5 = agri_points[agri_points["AQ_pm25"] <= thr001_pm2_5].index
+index_pm2_5 = agri_points[agri_points["AQ_pm25"] <= 1].index
 agri_points.loc[index_pm2_5, "AQ_pm25"] = np.nan
+
+
+# %% define the domain
+from shapely.ops import unary_union
+
+domain = unary_union(agri_points["geometry"]).convex_hull.buffer(1e3)
 
 
 # %% Build the model
 import jax.numpy as jnp
-formulas = ["np.log(AQ_pm10) ~ 1 + standardize(Altitude) + season + standardize(WE_temp_2m) + standardize(WE_blh_layer_max) + standardize(WE_tot_precipitation) + standardize(EM_nh3_sum) + standardize(EM_nox_sum)", 
-"np.log(AQ_pm25) ~ 1 + standardize(Altitude) + season + standardize(WE_temp_2m) + standardize(WE_blh_layer_max) + standardize(WE_tot_precipitation) + standardize(EM_nh3_sum) + standardize(EM_nox_sum)"]
+
+rhs = """1 + Altitude + urban + season + rain + standardize(WE_temp_2m) + standardize(WE_wind_speed_10m_max) + 
+standardize(WE_blh_layer_max) + standardize(WE_rh_mean) + standardize(LA_hvi) +
+standardize(EM_nh3_sum) + standardize(EM_nox_sum)"""
+
+formulas = ["AQ_pm10 ~ " + rhs, "AQ_pm25 ~ " + rhs]
 
 model = lrssm(
     agri_points, formulas, 
-    verbose=True, domain=[domain, domain], dtype=jnp.float32, backend="cpu")
+    verbose=True, domain=[domain, domain], dtype=jnp.float32, backend="gpu")
 
 print(model)
 
@@ -113,8 +146,8 @@ cov_funs = {(name): None for name in names}
 infos = []
 for pt, n in zip(model.points, names):
     points = pt
-    mesh_io, poly, info = buildMesh2d(points, lowrank=0.75, gradation=1, 
-        domain = domain, offset=10000, anchor_spacing=.5, return_info=True)
+    mesh_io, poly, info = buildMesh2d(points, lowrank=0.75, gradation=1.5, 
+        domain = domain, offset=1e4, anchor_spacing=1, return_info=True, eps=0.05)
     print(mesh_io)
     infos.append(info)
 
@@ -122,7 +155,7 @@ for pt, n in zip(model.points, names):
     cov_fun = SPDEApproxCov(latlon=False).setup(mesh_io, domain=[domain])
     cov_funs[n] = cov_fun
 
-# %% plot the mesh (use the fem_solver utlities)
+# plot the mesh (use the fem_solver utlities)
 fig, ax = plt.subplots(1,2, figsize=(16, 8))
 cov_funs["AQ_pm10"].fem_solver.plot_mesh(ax=ax[0])
 ax[0].plot(model.points[0][:, 0], model.points[0][:, 1], "ro", label="Observation Points")
@@ -133,6 +166,8 @@ ax[1].plot(model.points[1][:, 0], model.points[1][:, 1], "ro", label="Observatio
 ax[1].set_title("Mesh for $PM_{2.5}$")
 
 # %% Estimate the Model (default estimation options)
+from geossm.stmodel import ModelParams, FitOptions, Param
+
 model = model.setup(cov_fun=[cov_funs["AQ_pm10"], cov_funs["AQ_pm25"]])
 
 opt = FitOptions(max_iter=50, tol_relat=1e-3)
@@ -152,13 +187,15 @@ import jax.numpy as jnp
 # Compute the prediction at the agri_grid points (pixel level)
 agri_grid = agri_grid.to_crs(epsg=32632)  # project to meters (EPSG:32632) for distance-based operations
 prediction = results.get_prediction(agri_grid, verbose=True)
-prediction = prediction.back_transform(g_invs=[jnp.exp, jnp.exp])  # back-transform the predicted values to the original scale
 
+# prediction = prediction.back_transform(g_invs=[inv])  # back-transform the predicted values to the original scale
+# results = results.back_transform(g_invs=[inv]) 
 print(prediction)  # prediction.summary()
 
 # %% histogram of the predicted value
 
-y_pred = prediction.y_pred_back_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+y_pred = prediction.y_pred_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+# y_pred = results.residuals_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
 
 fig, ax = plt.subplots(figsize=(8, 6))
 # Plot the histogram of the predicted values
@@ -166,12 +203,27 @@ ax.hist(y_pred, bins=30, color='skyblue', edgecolor='black')
 ax.set_title("Histogram of Predicted $PM_{10}$ Values")
 ax.set_xlabel("$PM_{10}$ (µg/m³)")
 ax.set_ylabel("Frequency")
+
+
+# 
+fig, ax = plt.subplots(figsize=(8, 6))
+ax.plot(model.y_train_list[0].flatten(order='F'), results.y_hat_list[0].flatten(order='F'), 'o', alpha=0.5)
+ax.set_xlabel("Observed $PM_{10}$ (µg/m³)")
+ax.set_ylabel("Predicted $PM_{10}$ (µg/m³)")
+ax.set_xlim([0, 200])
+ax.set_ylim([0, 200])
+ax.plot([0, 200], [0, 200], 'r--', label="1:1 Line")
+ax.legend()
+
+
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
 from pyproj import Transformer
 
-index = np.where(y_pred > np.nanquantile(y_pred, 0.999))  # Get indices of values above the 99.9th percentile
+index = np.where(y_pred > np.nanquantile(y_pred, 0.998))  # Get indices of values above the 99.9th percentile
+index_0 = np.where(y_pred <= 0)  # Get indices of values below the 0.1th percentile
 y_pred[index] = np.nan  # Replace values above the 99.9th percentile with NaN
+y_pred[index_0] = np.nan  # Replace values below the 0.1th percentile with NaN
 y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
 # y_pred = y_pred  # Apply the exponential transformation to revert the log transformation
   # Replace values above the 99.9th percentile with NaN
@@ -191,7 +243,7 @@ month_ranges = [
     (243, 273, "September"),
     (273, 304, "October"),
     (304, 334, "November"),
-    (334, 365, "December")
+    (334, 365, "December"),
 ]
 
 # Calculate monthly averages
@@ -243,7 +295,7 @@ X_e, Y_e = to_xy.transform(*np.meshgrid(lon_e, lat_e))
 import shapely
 
 X_c, Y_c = to_xy.transform(*np.meshgrid(lon_c, lat_c))
-domain_geom = shape.to_crs(pred_crs).geometry.union_all()
+domain_geom = shape.buffer(27000).to_crs(pred_crs).geometry.union_all()
 outside = ~shapely.contains_xy(domain_geom, X_c, Y_c)  # shape (n_lat, n_lon)
 
 # Plot with white background for NaN values

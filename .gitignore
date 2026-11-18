@@ -1,6 +1,9 @@
 # Audit
 docs/design_audit/
 
+#Diagnostics
+diagnostics/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
