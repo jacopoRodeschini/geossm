@@ -8,6 +8,7 @@ The example is run on a GPU and CPU device.
 
 # %% Import the necessary libraries
 import os
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 
 msg = """
@@ -22,8 +23,8 @@ os.environ["JAX_PLATFORMS"] = "cpu"
 GPU: allocate memory on demand instead of reserving 75 % of it upfront
 (Agrimonia, float32: 1.3 GB after fitting, 9.0 GB peak with standard
 errors, same speed), or cap the reserved fraction instead.
-os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = ".30"
+os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
 
 Reuse compiled kernels across runs (the first fit is mostly compilation).
 os.environ["JAX_COMPILATION_CACHE_DIR"] = os.path.expanduser("~/.cache/jax")
@@ -68,6 +69,10 @@ print("="*50)
 print("Loading the GRINS dataset...")
 grins, shape = df.load_dataset("aqclim_points")
 
+# %% Project the dataset and the shape into metric distances
+grins = grins.to_crs(epsg=32632)
+shape = shape.to_crs(epsg=32632)
+
 # %% fix the shape into a list of poligons
 
 from shapely.geometry import MultiLineString
@@ -97,9 +102,9 @@ gdfpm10_train = grins[grins["AirQualityStation"].isin(stpm10)].copy()
 # Create the shared mesh (both backends)
 points = np.array([geom.coords[0] for geom in gdfpm10_train.geometry.unique()])
 
+
 # %% Create the mesh and the buffer for the SPDE approximation of the covariance function
-lowrank = [0.5, 0.75]
-# lowrank = [1]
+lowrank = [0.25, 0.5, 0.75]
 cov_funcs = {lr: None for lr in lowrank}
 for lr in lowrank:
 
@@ -117,7 +122,7 @@ for lr in lowrank:
     cov_fun = cov_fun.setup(mesh_io, domain=domain)
     cov_funcs[lr] = cov_fun
 
-# Plot the generated mesh and the observed points
+# %% Plot the generated mesh and the observed points
 fig, ax = plt.subplots(1, len(cov_funcs), figsize=(6 * len(cov_funcs), 6))
 
 if len(cov_funcs) == 1:
@@ -143,59 +148,53 @@ q001 = gdfpm10_train["AQ_mean_PM10"].quantile(0.001)
 inx = (gdfpm10_train["AQ_mean_PM10"] > q999) | (gdfpm10_train["AQ_mean_PM10"] < q001)
 gdfpm10_train.loc[inx, "AQ_mean_PM10"] = np.nan
 
-# %% Standardise the covariates (CL_t2m, CL_windspeed, CL_rh) to have mean 0 and variance 1
-# fix, ax = plt.subplots(1, 4, figsize=(20, 5))
-# ax[0].hist(np.sqrt(gdfpm10_train["AQ_mean_PM10"]), bins=30, alpha=0.5, label="AQ_mean_PM10")
-# ax[1].hist(gdfpm10_train["CL_t2m"], bins=30, alpha=0.5, label="CL_t2m")
-# ax[2].hist(gdfpm10_train["CL_windspeed"], bins=30, alpha=0.5, label="CL_windspeed")
-# ax[3].hist(gdfpm10_train["CL_rh"], bins=30, alpha=0.5, label="CL_rh")
-# ax[0].legend()
-# ax[1].legend()
-# ax[2].legend()
-# ax[3].legend()
-# ax[0].set_title("Histograms of the covariates before standardisation")
-# plt.show()
-
-
 # %% Define the formula used to define the fixed effects in the LRSSM model. 
 
 # The formula is used to create the design matrices for the fixed effects.
-# Formula without the standardisation
-formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh)"
+formula = "np.log(AQ_mean_PM10) ~ 1 + standardize(CL_t2m) + standardize(CL_windspeed) + standardize(CL_rh) + standardize(CL_blh)"
 
 # Create the model
 backend = ["gpu"] if has_gpu else ["cpu"]
 
 # Set the options for the fitting procedure
-opt = FitOptions()
-opt.max_iter = 50
-opt.tol_relat = 1e-3
-opt.verbose = True
-
+opt = FitOptions(max_iter=50, tol_relat=1e-3, verbose=True)
 # Store the results in a list of dictionaries, one for each backend
 # lowrank = [0.25, 0.5, 0.75, 1.0]
 
 # Create the LRSSM model with the specified backend and data
-model = lrssm(
-    df=gdfpm10_train, 
-    formulas=[formula], 
-    domain=[ops.unary_union(domain)], 
-    verbose=False, backend=backend[0], dtype=jnp.float64)
+union = ops.unary_union(domain)
+results = {lr: {} for lr in lowrank}
+for lr in lowrank:
+    model = lrssm(
+        df=gdfpm10_train, 
+        formulas=[formula], 
+        domain=[union], 
+        verbose=False, backend=backend[0], dtype=jnp.float64)
 
+    # Set up the model cov. 
+    model = model.setup(cov_fun=[cov_funcs[lr]])
+    print(model)
 
-# Set up the model cov. 
-model = model.setup(cov_fun=[cov_funcs[0.75]])
-print(model)
+    # Fit the model using the EM algorithm with the specified options
+    rs = model.fit(options=opt)
 
-# Fit the model using the EM algorithm with the specified options
-results = model.fit(options=opt)
+    # Print the results of the fitting procedure for the current backend
+    print(
+        f"lowrank={lr:.2f}, backend={backend[0]:>3s}, mse: {rs.mse():.4f} - "
+        f"tsim_estep(s)={rs.runtime_tot_estep:.4f} tsim_mstep(s)={rs.runtime_tot_mstep:.4f}"
+    )
 
-# Print the results of the fitting procedure for the current backend
-print(
-    f"backend={backend[0]:>3s}, mse: {results.mse():.4f} - "
-    f"tsim_estep(s)={results.runtime_tot_estep:.4f} tsim_mstep(s)={results.runtime_tot_mstep:.4f}"
-)
+    # %% add the resutls into the results dictionary
+    results[lr] = dict({
+        "backend": backend[0],
+        "lowrank": float(lr),
+        "tsim_estep": float(rs.runtime_tot_estep),
+        "tsim_mstep": float(rs.runtime_tot_mstep),
+        "ttot": float(rs.runtime_tot_estep + rs.runtime_tot_mstep),
+        "mse": float(rs.mse()),
+        "llf": float(rs.llf)
+    })
 
-# %% How to compute the model standard error?
-
-# %% How to back transform the predicted values to the original scale?
+# %% Make the results dictionary into a pandas dataframe
+import pandas as pd
+df_results = pd.DataFrame.from_dict(results, orient='index').sort_index(ascending=False)

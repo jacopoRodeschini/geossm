@@ -15,7 +15,7 @@ import numpy as np
 import jax.numpy as jnp
 
 # inmport the state space model
-from geossm.ssm.statespace import StateSpaceModel, _filter_kernelJAX, _itype_for
+from geossm.ssm.statespace import StateSpaceModel, _compute_predict_var_kernel_JAX, _filter_kernelJAX, _itype_for
 from geossm.covmodel.covmodels import SPDEApproxCov
 from statsmodels.iolib.summary import Summary
 
@@ -362,6 +362,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             self._cov_matern.append(covi)
 
         # Latent dimension (rank), one block per latent factor -- needed by
+        # n_latent = n inner nodes of each mesh, not the number of sites in the support of each
         # sim()/fit() regardless of how _cov_matern was built.
         self.qdim = jnp.array([cov.n_latent for cov in self._cov_matern], dtype=self.itype)
         self.block_q = jnp.hstack((0, jnp.cumsum(self.qdim)))
@@ -799,24 +800,23 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
     @_on_device
     def _predict(self, H, x_T, P_T=None, Xbeta=None, beta=None, std=True):
         """
-        Core SSM prediction, stacked across all response variables -- the
-        single source of truth used both for in-sample fitted values
-        (`fit()`) and out-of-sample predictions (`predict()`). Splitting the
-        result into per-variable views is a separate, explicit step (see
-        `geossm.utils.split_by_block`), left to the caller. With
-        `std=False` the predictive covariance is skipped and returned as
-        `None` (see `StateSpaceModel.predict`).
+        In-sample fitted values, stacked across all response variables
+        (splitting into per-variable views is left to the caller, see
+        `geossm.utils.split_by_block`). `std` is `FitOptions.std`: with
+        `True` the point-wise variances ``(p, T)`` are computed, with
+        ``"full"`` also the covariance ``(p, p, T)``, with `False` neither.
+        Returns ``(y_hat, Sigma_y_hat or None, var_y_hat or None, tdelta)``.
         """
         self._log("Start Prediction the SSM...")
 
-        # Compute the prediction of linear SSM
         tStart = time.time()
-        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=std)
+        y_hat_full, Sigma_y_hat_full = super().predict(H, x_T, P_T, Xbeta, beta, std=(std == "full"))
+        var_y_hat_full = _compute_predict_var_kernel_JAX(H, P_T) if std else None
         tdelta = time.time()- tStart
 
         self._log("Prediction done. Time elapsed: {}.".format(tdelta))
 
-        return y_hat_full, Sigma_y_hat_full, tdelta
+        return y_hat_full, Sigma_y_hat_full, var_y_hat_full, tdelta
 
     def _get_fitted_state(self, x_smoothed=None, P_smoothed=None, P_pred_smoothed=None,
                           S11=None, S10=None, S00=None, in_support=None):
@@ -1016,6 +1016,10 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         force_iter = options.force_iter
         std = options.std
         ks_tol = options.ks_tol
+        f_update = options.f_update
+        # the weighted f update makes EM an ECM (likelihood ascent, ML fixed
+        # point); the unweighted one does not (see FitOptions.f_update)
+        ml_step = f_update == "weighted"
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1158,6 +1162,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
                 ks_value_and_grad,
                 params=est_params,
                 ks_tol=ks_tol,
+                f_update=f_update,
             )
 
             # Log-likelihood change, absolute and per observation
@@ -1174,9 +1179,12 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             #   oscillate on the plateau.
             # - A larger decrease stops unless force_iter is True.
             # Every stop on a decrease or NaN/Inf returns the best iterate so far.
+            
+            # With f_update="unweighted" the EM stops when
+            # |delta_lik| / n_obs <= tol_relat (NaN/Inf still stops).
             if niter > 1:
                 invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
-                decreased = bool(delta_lik < 0)
+                decreased = ml_step and bool(delta_lik < 0)
                 within_tol = not invalid and abs(float(relat_lik)) <= tol_relat
                 if decreased and not within_tol and force_iter:
                     msg = self._log_warning_emstep(delta_lik, niter)
@@ -1251,15 +1259,17 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         # Make every returned quantity refer to the same parameters. On a
         # normal stop est_params is the output of the last M-step, which no
         # E-step has evaluated yet: run a final E-step at it, unless it is not
-        # better than the best evaluated iterate. On a restore, `best` already
-        # holds its E-step outputs. Either way the model's matrices (and the
-        # covariance functions' rescale) are left at the returned parameters.
+        # better than the best evaluated iterate (with the unweighted f update
+        # the last iterate, the fixed point, is kept whenever its log-likelihood
+        # is finite). On a restore, `best` already holds its E-step outputs.
+        # Either way the model's matrices (and the covariance functions'
+        # rescale) are left at the returned parameters.
         if not restored:
             self._log("Final E-step at the estimated parameters...")
             H, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
             final = self._E_step(y_obs)
             logL_final = final[6]
-            if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
+            if bool(jnp.isfinite(logL_final)) and (logL_final >= best[-1] or not ml_step):
                 _, x_T, P_T, S11, S10, S00, logL_cur, _ = final
             else:
                 if not bool(jnp.isfinite(logL_final)):
@@ -1283,7 +1293,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
 
         # predict the respose variable using the fitted model parameters
         beta_est = est_params.beta.value
-        y_hat_full, Sigma_y_hat_full, tdelta_hat = self._predict(
+        y_hat_full, Sigma_y_hat_full, var_y_hat_full, tdelta_hat = self._predict(
             H, x_T, P_T, Xbeta, beta_est, std=std
         )
         y_hat_full = jnp.where(x_missing, jnp.nan, y_hat_full)  # no covariate, no fitted value
@@ -1313,6 +1323,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             # StateSpaceResults class: conf_int_y, coverage_probability, ...)
             y_hat=y_hat_full,
             Sigma_y_hat=Sigma_y_hat_full,
+            var_y_hat=var_y_hat_full,
             tdelta_hat=tdelta_hat,
             # block_p: snapshotted here rather than left to be read live
             # off `self.block_p` -- that attribute is mutable and would go
@@ -1393,6 +1404,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         ks_value_and_grad,
         params=None,
         ks_tol=1e-6,
+        f_update="unweighted",
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1410,7 +1422,11 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         current `ModelParams`) keeps its current value, and the later steps
         use that value (F42; with a fixed `beta`, `A` used the discarded
         estimate before). `ks_tol` is the relative gradient tolerance of the
-        `ks` step (see `FitOptions.ks_tol`).
+        `ks` step (see `FitOptions.ks_tol`). `f_update` selects the `f` step
+        (see `FitOptions.f_update`): "weighted" is the conditional maximiser
+        above; "unweighted" (tr(S10)/tr(S00)) is not, so with it the
+        algorithm is no longer an ECM (the `ks` step is still exact given
+        the new `f`).
         """
         def fixed(name):
             return params is not None and getattr(params, name).fixed
@@ -1429,11 +1445,18 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         for q in range(0 if fixed("f") else nlat):
             s = slice(block_q[q], block_q[q + 1])
 
-            # Added the fix for the f update (Eq 3a)
-            # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
-            # tr(A B) = sum(A * B'), without forming the product
-            num = jnp.sum(invQ[s, s] * S10[s, s].T)
-            den = jnp.sum(invQ[s, s] * S00[s, s].T)
+            if f_update == "weighted":
+                # Exact conditional maximiser (Eq 3a): F = diag(f) with
+                # Q != I, so the traces are weighted by Q^-1;
+                # tr(A B) = sum(A * B'), without forming the product
+                num = jnp.sum(invQ[s, s] * S10[s, s].T)
+                den = jnp.sum(invQ[s, s] * S00[s, s].T)
+            else:
+                # Unweighted estimating equation tr(S10 - f S00) = 0
+                # (persistence of the large-scale modes, not an ECM step)
+                num = jnp.trace(S10[s, s])
+                den = jnp.trace(S00[s, s])
+
             est_f = est_f.at[q].set(num / den)
 
         if fixed("f"):

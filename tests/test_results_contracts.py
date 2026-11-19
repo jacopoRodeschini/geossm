@@ -112,7 +112,7 @@ class TestStateSpaceResults:
 class TestLRResultsAfterFit:
     def test_stored_arrays_are_read_only(self, lr_fit):
         _, res = lr_fit
-        for name in ("y_obs", "y_hat", "Sigma_y_hat", "x_smoothed", "P_smoothed", "theta_hat"):
+        for name in ("y_obs", "y_hat", "var_y_hat", "x_smoothed", "P_smoothed", "theta_hat"):
             arr = getattr(res, name)
             assert not arr.flags.writeable, name
 
@@ -142,8 +142,9 @@ class TestLRResultsAfterFit:
             for i, v in enumerate(views):
                 np.testing.assert_array_equal(v, stacked[bp[i]:bp[i + 1]])
                 assert np.shares_memory(v, stacked), name  # documented as views
-        (S,) = res.Sigma_y_hat_list
-        assert S.shape == (bp[1] - bp[0], bp[1] - bp[0], res.y_hat.shape[1])
+        (V,) = res.var_y_hat_list
+        assert V.shape == (bp[1] - bp[0], res.y_hat.shape[1]) and np.shares_memory(V, res.var_y_hat)
+        assert res.Sigma_y_hat_list is None  # full covariance only with FitOptions(std="full")
 
     def test_coverage_is_over_observed_values(self, lr_fit):
         # F44: missing observations were counted as outside their interval.
@@ -183,7 +184,7 @@ class TestLRPredictLifecycle:
         # F45: JAX arrays, and y_pred float64 in a float32 fit under x64.
         _, res = _fresh_fit(gdf, mesh, dtype=jnp.float32)
         newdata = gdf.drop(columns="y")
-        pred = res.get_prediction(newdata, verbose=False)
+        pred = res.get_prediction(newdata, std="full", verbose=False)
         y_pred, var_pred = res.predict(newdata, verbose=False)
         for name, value in (("y_pred", pred.y_pred), ("Sigma_y_pred", pred.Sigma_y_pred),
                             ("var_pred", pred.var_pred), ("predict mean", y_pred), ("predict variance", var_pred)):
@@ -267,7 +268,7 @@ def test_model_summary_full_adds_grid_and_latent_sections(lr_fit):
 def test_back_transform_without_prediction_covariance_warns(gdf, mesh):
     _, res = _fresh_fit(gdf, mesh)
     pred = res.get_prediction(gdf.drop(columns="y"), std=False, verbose=False)
-    with pytest.warns(RuntimeWarning, match="predictions have no covariance"):
+    with pytest.warns(RuntimeWarning, match="predictions have no variances"):
         assert pred.back_transform(lambda v: v) is pred
     assert pred.y_pred_back_list is None
 
@@ -339,3 +340,58 @@ def test_latlon_disagreeing_with_the_data_crs_warns(gdf, mesh):
     cov = SPDEApproxCov(latlon=True, verbose=False).setup(mesh, domain=[DOMAIN], stats=False)
     with pytest.warns(UserWarning, match="latlon=True"):
         model.setup([cov])
+
+
+
+def test_ssm_results_have_no_duplicate_parameter_names(problem):
+    # F23: params_names/params_dim duplicated xbeta_names/b on the SSM;
+    # LRStateSpaceResults.param_names (all parameters) is a different thing.
+    res = _ssm(problem, jnp.float32).smoother(np.asarray(problem.y))
+    assert not hasattr(res, "params_names") and not hasattr(res, "params_dim")
+
+
+# --- Section P (P-c): point-wise variances by default -------------------------
+
+@pytest.mark.usefixtures("x64")
+def test_variances_by_default_full_covariance_on_request(gdf, mesh):
+    from shapely.geometry import Polygon
+    from geossm.stmodel import FitOptions
+    model = _build_model(gdf, mesh, dtype=jnp.float64)
+    diag = model.fit(options=_options(max_iter=2))
+    full = _build_model(gdf, mesh, dtype=jnp.float64).fit(options=_options(max_iter=2, std="full"))
+    assert diag.Sigma_y_hat is None and full.Sigma_y_hat.shape[0] == full.Sigma_y_hat.shape[1]
+    np.testing.assert_allclose(diag.var_y_hat, np.diagonal(full.Sigma_y_hat, axis1=0, axis2=1).T, rtol=1e-10)
+    for a, b in zip(diag.conf_int_y(prediction=True), full.conf_int_y(prediction=True)):
+        np.testing.assert_allclose(a, b, rtol=1e-10)
+    new = gdf.drop(columns="y")
+    pd_, pf = diag.get_prediction(new), diag.get_prediction(new, std="full")
+    assert pd_.Sigma_y_pred is None and pf.Sigma_y_pred is not None
+    np.testing.assert_allclose(pd_.var_pred, pf.var_pred, rtol=1e-10, atol=1e-14)
+    # to_poly(std=True) without the (p, p, T) covariance equals W Sigma W'
+    polys = [Polygon([(0, 0), (5, 0), (5, 5), (0, 5)]), Polygon([(5, 0), (10, 0), (10, 10), (5, 10)])]
+    a, b = pd_.to_poly(polys, std=True), pf.to_poly(polys, std=True)
+    np.testing.assert_allclose(a["std_y"].to_numpy(), b["std_y"].to_numpy(), rtol=1e-10)
+    from geossm.stmodel._output import areal_weights, as_polygon_gdf
+    W = areal_weights(pf.points[0], as_polygon_gdf(polys, pf.crs), keep=pf.in_support)[0]
+    ref = np.sqrt(np.stack([np.diag(W @ pf.Sigma_y_pred[:, :, t] @ W.T) for t in range(pf.Sigma_y_pred.shape[2])]))
+    np.testing.assert_allclose(a["std_y"].to_numpy(), ref.ravel(), rtol=1e-10)
+
+
+def test_fit_and_prediction_reject_invalid_std(gdf, lr_fit):
+    from geossm.stmodel import FitOptions
+    with pytest.raises(ValueError, match="std must be"):
+        FitOptions(std="diag")
+    _, res = lr_fit
+    with pytest.raises(ValueError, match="std must be"):
+        res.get_prediction(gdf.drop(columns="y"), std="cov")
+
+
+@pytest.mark.usefixtures("x64")
+def test_ssm_intervals_from_an_attached_covariance(problem):
+    # The plain-SSM pattern of examples/example_SSM_filter.py: attach the
+    # covariance from StateSpaceModel.predict, then use conf_int_y.
+    m = _ssm(problem, jnp.float64)
+    res = m.filter(np.asarray(problem.y))
+    _, res.Sigma_y_hat = m.predict(m.H, res.x_filtered, res.P_filtered, m.Xbeta, m.beta)
+    lo, hi = res.conf_int_y(prediction=True)
+    assert lo.shape == res.y_hat.shape and np.all(hi >= lo) and 0 <= res.coverage_probability() <= 1

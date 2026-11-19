@@ -194,6 +194,15 @@ class FEMSolver(_Verbose):
         # Store mesh
         self._mesh = mesh
 
+        # Element connectivity and DOF vertices, read once from the mesh (it is
+        # not modified afterwards): `vertex` and `elements` used to loop over
+        # every element in Python on each access (F32).
+        self._elements = np.array([mesh.GetElementVertices(i) for i in range(mesh.GetNE())])
+        all_mesh_vertices = np.array(mesh.GetVertexArray())
+        self._vertex = all_mesh_vertices[np.unique(self._elements)]
+        self._elements.setflags(write=False)
+        self._vertex.setflags(write=False)
+
         # Fall back to the convex hull of the mesh vertices so every vertex
         # is treated as inner (no marginalisation) when no domain is given.
         self._domain = domain if domain is not None else (MultiPoint(self.vertex[:, :2]).convex_hull,)
@@ -563,40 +572,12 @@ class FEMSolver(_Verbose):
     @property
     def vertex(self):
         """
-        Returns the coordinates of mesh vertices that have a DOF associated
-        with them in the given H1_FECollection(1, dim) finite element space.
+        (nvertex, dim) ndarray, read-only: coordinates of the mesh vertices
+        that have a DOF associated with them in the H1_FECollection(1, dim)
+        finite element space (the vertices of the mesh elements, in
+        increasing vertex index). Computed once at construction (F32).
         """
-        # Get total number of unique vertices in the mesh
-        all_mesh_vertices = np.array(self._mesh.GetVertexArray())
-
-        # Get the mapping from element-local DOFs to global DOFs
-        # For H1 degree 1, local DOFs are vertex indices within the element
-        # Global DOFs are what we are interested in.
-
-        # We can get the *global* vertex indices that correspond to DOFs
-        # The fespace.GetVSize() is the total number of DOFs.
-        # For H1 degree 1, each DOF corresponds to a unique vertex.
-
-        dof_map_vertices = []
-
-        # Iterate through all elements in the mesh
-        for i in range(self._mesh.GetNE()):
-            # Get the global vertex indices for the current element
-            element_vertex_indices = self._mesh.GetElementVertices(
-                i
-            )  # This should return a Python list
-
-            # Add these to our set of unique DOF-associated vertex indices
-            for v_idx in element_vertex_indices:
-                dof_map_vertices.append(v_idx)
-
-        # Get unique vertex indices
-        unique_dof_vertex_indices = sorted(list(set(dof_map_vertices)))
-
-        # Now, retrieve the coordinates for these unique vertices
-        dof_associated_vertex_coords = all_mesh_vertices[unique_dof_vertex_indices]
-
-        return dof_associated_vertex_coords
+        return self._vertex
 
     @property
     def nvertex(self):
@@ -610,19 +591,10 @@ class FEMSolver(_Verbose):
 
     @property
     def elements(self):
-        """(nelements, 3) ndarray of int -- vertex indices (into `vertex`)
-        making up each mesh triangle."""
-        triangles = []
-
-        for i in range(self.mesh.GetNE()):
-            # Get the list of vertex IDs for element 'i'
-            # For a triangle mesh, this will always return 3 integers
-            triangles.append(self.mesh.GetElementVertices(i))
-
-        # 3. Convert to a structured NumPy array
-        triangles_array = np.array(triangles)
-
-        return triangles_array
+        """(nelements, 3) ndarray of int, read-only -- vertex indices (into
+        `vertex`) making up each mesh triangle. Computed once at
+        construction (F32)."""
+        return self._elements
 
     @property
     def box(self):
@@ -689,16 +661,6 @@ class FEMSolver(_Verbose):
             boundaryEdge.append(self.mesh.GetBdrElementVertices(i))
 
         return np.array(boundaryEdge)
-
-    @property
-    def boundary_vertex(self, boolean=True):
-        """(n_boundary_elements, 2) ndarray of int -- vertex-index pairs of the
-        boundary elements (see `n_boundary_elements`)."""
-        bdr_vertex = []
-        for i in range(self.mesh.GetNBE()):
-            bdr_vertex.append(self.mesh.GetBdrElement(i).GetVerticesArray())
-
-        return np.array(bdr_vertex)
 
     @property
     def fespace(self):
@@ -828,8 +790,8 @@ class FEMSolver(_Verbose):
 
     def compute_stats(self):
         """
-        Interior angles and areas of every mesh triangle (via
-        `compute_angles`/`compute_area`); used by `angles`/`areas` (on
+        Interior angles and areas of every mesh triangle (the formulas of
+        `compute_angles`/`compute_area`, for all triangles at once); used by `angles`/`areas` (on
         first access) and by `__init__` with ``stats=True``, which also logs
         them and a note about poor-quality (small-angle) meshes.
 
@@ -841,12 +803,20 @@ class FEMSolver(_Verbose):
             Area of each triangle.
         """
 
-        # compute angles for all triangles
-        angles = np.array([self.compute_angles(self.vertex, tri) for tri in self.elements])
-        
-        # compute areas for all triangles
-        areas = np.array([self.compute_area(self.vertex, tri) for tri in self.elements])
+        # All triangles at once (F32), with the formulas of `compute_angles`
+        # and `compute_area`
+        A, B, C = (self.vertex[self.elements[:, k]] for k in range(3))
 
+        def angle(a, b, c):
+            ab = np.linalg.norm(b - a, axis=1)
+            ac = np.linalg.norm(c - a, axis=1)
+            bc = np.linalg.norm(c - b, axis=1)
+            cos_theta = (ab**2 + ac**2 - bc**2) / (2 * ab * ac)
+            return np.degrees(np.arccos(np.clip(cos_theta, -1, 1)))
+
+        angles = np.stack([angle(A, B, C), angle(B, C, A), angle(C, A, B)], axis=1)
+        areas = 0.5 * np.abs(A[:, 0] * (B[:, 1] - C[:, 1]) + B[:, 0] * (C[:, 1] - A[:, 1])
+                             + C[:, 0] * (A[:, 1] - B[:, 1]))
         return angles, areas
 
     
