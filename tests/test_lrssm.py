@@ -593,8 +593,7 @@ def _state_G(model, f, ks, T, S11, S10, S00, ldim):
     return -0.5 * (-T * np.linalg.slogdet(P)[1] + np.trace(P @ Omega))
 
 
-@pytest.fixture(scope="module")
-def m_step_call(gdf, mesh):
+def _m_step_call(gdf, mesh, **fit_options):
     """Arguments and result of the sixth M-step of a float64 fit (ks moves from its
     starting value only from the fourth one, see F54)."""
     before = jax.config.jax_enable_x64
@@ -611,7 +610,7 @@ def m_step_call(gdf, mesh):
             return out
 
         model._M_step = spy
-        model.fit(options=_options(max_iter=6))
+        model.fit(options=_options(max_iter=6, **fit_options))
     finally:
         jax.config.update("jax_enable_x64", before)
     bound, ks_cur, new = calls[-1]
@@ -619,6 +618,16 @@ def m_step_call(gdf, mesh):
     bq = np.asarray(bound["block_q"])
     return dict(model=model, orig=orig, bound=bound, ks_cur=np.array(ks_cur), new=new, ldim=bq[1:] - bq[:-1],
                 T=bound["y_t"].shape[1], f_cur=a["F"][bq[:-1]], **{k: a[k] for k in ("S11", "S10", "S00", "invQ")})
+
+
+@pytest.fixture(scope="module")
+def m_step_call(gdf, mesh):
+    return _m_step_call(gdf, mesh)  # default f_update="weighted"
+
+
+@pytest.fixture(scope="module")
+def m_step_call_unweighted(gdf, mesh):
+    return _m_step_call(gdf, mesh, f_update="unweighted", force_iter=True)
 
 
 @pytest.mark.usefixtures("x64")
@@ -675,6 +684,41 @@ class TestMStepF40:
         _, res = converged
         llf = np.asarray(res.llf_path[1:])  # [0] is nan: no E-step at iteration 0 (F41)
         assert np.all(np.diff(llf) >= -1e-9 * np.abs(llf[1:]))
+
+
+@pytest.mark.usefixtures("x64")
+class TestMStepUnweightedF:
+    """FitOptions(f_update="unweighted"): f = tr(S10)/tr(S00), not a maximiser
+    of the expected complete-data log-likelihood G (no ECM guarantee for the f
+    step), while ks is still the exact maximiser given the new f."""
+
+    def test_default_is_weighted(self):
+        assert FitOptions().f_update == "weighted"
+
+    def test_f_update_is_the_unweighted_ratio(self, m_step_call_unweighted):
+        c = m_step_call_unweighted
+        f_new = float(np.asarray(c["new"].f.value)[0])
+        assert f_new == pytest.approx(np.trace(c["S10"]) / np.trace(c["S00"]), rel=1e-10)
+        f_weighted = np.trace(c["invQ"] @ c["S10"]) / np.trace(c["invQ"] @ c["S00"])
+        assert abs(f_new - f_weighted) > 1e-3  # a non-trivial check: the two differ here
+
+    def test_f_step_does_not_maximise_G_but_ks_step_does(self, m_step_call_unweighted):
+        c = m_step_call_unweighted
+        G = lambda f, ks: _state_G(c["model"], f, ks, c["T"], c["S11"], c["S10"], c["S00"], c["ldim"])  # noqa: E731
+        f_new, ks_new = np.asarray(c["new"].f.value), np.asarray(c["new"].ks.value)
+        f_weighted = np.array([np.trace(c["invQ"] @ c["S10"]) / np.trace(c["invQ"] @ c["S00"])])
+        # the weighted f is the conditional maximiser, the unweighted one is not
+        assert G(f_weighted, c["ks_cur"]) > G(f_new, c["ks_cur"])
+        # ks given the new f is still a conditional maximisation (ECM step)
+        assert G(f_new, ks_new) >= G(f_new, c["ks_cur"])
+
+    def test_fit_reaches_the_unweighted_fixed_point(self, gdf, mesh):
+        # at convergence f solves its estimating equation tr(S10 - f S00) = 0
+        res = _build_model(gdf, mesh, dtype=jnp.float64).fit(
+            options=_options(max_iter=200, tol_relat=1e-10, f_update="unweighted", force_iter=True))
+        f = float(np.asarray(res.params.f.value)[0])
+        assert f == pytest.approx(np.trace(res.S10) / np.trace(res.S00), rel=1e-4)
+        assert res.options.f_update == "unweighted"
 
 
 class TestCompilation:

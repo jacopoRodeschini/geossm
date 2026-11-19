@@ -93,8 +93,6 @@ def mask_altitude(altitude, threshold):
     return altitude <= threshold
 
 agri_points["season"] = agri_points["time"].apply(get_season)
-agri_points["month"] = agri_points["time"].apply(lambda x: x.month)
-agri_points["urban"] = agri_points["LA_land_use"].apply(urban)
 agri_points["rain"] = agri_points["WE_precipitation_t"].apply(rain)
 
 thr = agri_points['Altitude'].quantile(0.96)
@@ -118,18 +116,17 @@ agri_points.loc[index_pm2_5, "AQ_pm25"] = np.nan
 
 # %% define the domain
 from shapely.ops import unary_union
-
 domain = unary_union(agri_points["geometry"]).convex_hull.buffer(1e3)
 
 
 # %% Build the model
 import jax.numpy as jnp
 
-rhs = """1 + Altitude + urban + season + rain + standardize(WE_temp_2m) + standardize(WE_wind_speed_10m_max) + 
+rhs = """1 + Altitude + season + rain + standardize(WE_temp_2m) + standardize(WE_wind_speed_10m_max) + 
 standardize(WE_blh_layer_max) + standardize(WE_rh_mean) + standardize(LA_hvi) +
-standardize(EM_nh3_sum) + standardize(EM_nox_sum)"""
+standardize(EM_nh3_sum) + standardize(EM_nox_sum) + standardize(WE_precipitation_t)"""
 
-formulas = ["AQ_pm10 ~ " + rhs, "AQ_pm25 ~ " + rhs]
+formulas = ["np.log(AQ_pm10) ~ " + rhs, "np.log(AQ_pm25) ~ " + rhs]
 
 model = lrssm(
     agri_points, formulas, 
@@ -143,13 +140,10 @@ from geossm.covmodel import buildMesh2d
 names = ["AQ_pm10", "AQ_pm25"]
 cov_funs = {(name): None for name in names}
 
-infos = []
 for pt, n in zip(model.points, names):
     points = pt
     mesh_io, poly, info = buildMesh2d(points, lowrank=0.75, gradation=1.5, 
-        domain = domain, offset=1e4, anchor_spacing=1, return_info=True, eps=0.05)
-    print(mesh_io)
-    infos.append(info)
+        domain = domain, offset=1e4, anchor_spacing=1, eps=0.05)
 
     # build the latent covariance function on the mesh, then attach it to the model
     cov_fun = SPDEApproxCov(latlon=False).setup(mesh_io, domain=[domain])
@@ -160,10 +154,16 @@ fig, ax = plt.subplots(1,2, figsize=(16, 8))
 cov_funs["AQ_pm10"].fem_solver.plot_mesh(ax=ax[0])
 ax[0].plot(model.points[0][:, 0], model.points[0][:, 1], "ro", label="Observation Points")
 ax[0].set_title("Mesh for $PM_{10}$")
+shape.boundary.plot(ax=ax[0], color="black", linewidth=1)
+ax[0].set_aspect("equal")
+ax[0].grid(True, linestyle="--", alpha=0.8)
 
 cov_funs["AQ_pm25"].fem_solver.plot_mesh(ax=ax[1])
 ax[1].plot(model.points[1][:, 0], model.points[1][:, 1], "ro", label="Observation Points")
 ax[1].set_title("Mesh for $PM_{2.5}$")
+shape.boundary.plot(ax=ax[1], color="black", linewidth=1)
+ax[1].set_aspect("equal")
+ax[1].grid(True, linestyle="--", alpha=0.8)
 
 # %% Estimate the Model (default estimation options)
 from geossm.stmodel import ModelParams, FitOptions, Param
@@ -186,45 +186,60 @@ print(results.to_latex())
 import jax.numpy as jnp
 # Compute the prediction at the agri_grid points (pixel level)
 agri_grid = agri_grid.to_crs(epsg=32632)  # project to meters (EPSG:32632) for distance-based operations
+agri_grid['rain'] = agri_grid['WE_precipitation_t'].apply(rain)
+agri_grid['urban'] = agri_grid['LA_land_use'].apply(urban)
+agri_grid['season'] = agri_grid['time'].apply(get_season)
+agri_grid['mask_altitude'] = agri_grid['Altitude'].apply(lambda x: mask_altitude(x, thr))  # apply the altitude mask
+agri_grid = agri_grid[agri_grid['mask_altitude']].copy()  # apply the altitude mask
+
 prediction = results.get_prediction(agri_grid, verbose=True)
 
-# prediction = prediction.back_transform(g_invs=[inv])  # back-transform the predicted values to the original scale
-# results = results.back_transform(g_invs=[inv]) 
+prediction = prediction.back_transform(g_invs=[jnp.exp, jnp.exp ])  # back-transform the predicted values to the original scale
+results = results.back_transform(g_invs=[jnp.exp,jnp.exp ]) 
 print(prediction)  # prediction.summary()
 
 # %% histogram of the predicted value
 
-y_pred = prediction.y_pred_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+# y_pred = prediction.y_pred_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+y_pred = prediction.y_pred_back_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
 # y_pred = results.residuals_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+T = len(prediction.timestamps[0])
+n0 = len(prediction.points[0])
+mask = np.repeat(prediction.in_support[:n0], T)
 
 fig, ax = plt.subplots(figsize=(8, 6))
 # Plot the histogram of the predicted values
-ax.hist(y_pred, bins=30, color='skyblue', edgecolor='black')
+ax.hist(y_pred[mask], bins=30, color='skyblue', edgecolor='black')
 ax.set_title("Histogram of Predicted $PM_{10}$ Values")
 ax.set_xlabel("$PM_{10}$ (µg/m³)")
 ax.set_ylabel("Frequency")
 
-
-# 
 fig, ax = plt.subplots(figsize=(8, 6))
 ax.plot(model.y_train_list[0].flatten(order='F'), results.y_hat_list[0].flatten(order='F'), 'o', alpha=0.5)
 ax.set_xlabel("Observed $PM_{10}$ (µg/m³)")
 ax.set_ylabel("Predicted $PM_{10}$ (µg/m³)")
-ax.set_xlim([0, 200])
-ax.set_ylim([0, 200])
-ax.plot([0, 200], [0, 200], 'r--', label="1:1 Line")
+ax.plot([-1, 5], [-1, 5], 'r--', label="1:1 Line")
 ax.legend()
-
 
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
 from pyproj import Transformer
 
-index = np.where(y_pred > np.nanquantile(y_pred, 0.998))  # Get indices of values above the 99.9th percentile
-index_0 = np.where(y_pred <= 0)  # Get indices of values below the 0.1th percentile
-y_pred[index] = np.nan  # Replace values above the 99.9th percentile with NaN
-y_pred[index_0] = np.nan  # Replace values below the 0.1th percentile with NaN
+T = len(prediction.timestamps[0])
+n0 = len(prediction.points[0])
+mask = np.tile(prediction.in_support[:n0], T)
+
+y_pred = prediction.y_pred_back_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+y_pred[~mask] = np.nan
 y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
+
+# remove exp artefacts by replacing values above the 99.9th percentile with NaN
+index = np.where(y_pred > np.nanquantile(y_pred, 0.999))  # Get indices of values above the 99.9th percentile
+y_pred[index] = np.nan  # Replace values above the 99.9th percentile with NaN
+
+# index_0 = np.where(y_pred <= 0)  # Get indices of values below the 0.1th percentile
+# y_pred[index_0] = np.nan  # Replace values below the 0.1th percentile with NaN
+# y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
 # y_pred = y_pred  # Apply the exponential transformation to revert the log transformation
   # Replace values above the 99.9th percentile with NaN
 # Define month boundaries (assuming daily data for a year)
@@ -253,7 +268,6 @@ for start, end, name in month_ranges:
     avg = np.nanmean(y_pred[:, start:end], axis=1)
     monthly_avg.append(avg)
     month_names.append(name)
-
 # Plot
 fig, axs = plt.subplots(3, 4, figsize=(14, 10))
 

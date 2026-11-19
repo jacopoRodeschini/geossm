@@ -1016,6 +1016,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         force_iter = options.force_iter
         std = options.std
         ks_tol = options.ks_tol
+        f_update = options.f_update
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1158,6 +1159,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
                 ks_value_and_grad,
                 params=est_params,
                 ks_tol=ks_tol,
+                f_update=f_update,
             )
 
             # Log-likelihood change, absolute and per observation
@@ -1394,6 +1396,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         ks_value_and_grad,
         params=None,
         ks_tol=1e-6,
+        f_update="weighted",
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,
@@ -1411,7 +1414,11 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         current `ModelParams`) keeps its current value, and the later steps
         use that value (F42; with a fixed `beta`, `A` used the discarded
         estimate before). `ks_tol` is the relative gradient tolerance of the
-        `ks` step (see `FitOptions.ks_tol`).
+        `ks` step (see `FitOptions.ks_tol`). `f_update` selects the `f` step
+        (see `FitOptions.f_update`): "weighted" is the conditional maximiser
+        above; "unweighted" (tr(S10)/tr(S00)) is not, so with it the
+        algorithm is no longer an ECM (the `ks` step is still exact given
+        the new `f`).
         """
         def fixed(name):
             return params is not None and getattr(params, name).fixed
@@ -1430,14 +1437,18 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         for q in range(0 if fixed("f") else nlat):
             s = slice(block_q[q], block_q[q + 1])
 
-            # Added the fix for the f update (Eq 3a)
-            # [F is parametrized as diagonal, and so we need to weight the trace by Q^{-1}]
-            # tr(A B) = sum(A * B'), without forming the product
-            # num = jnp.sum(invQ[s, s] * S10[s, s].T)
-            # den = jnp.sum(invQ[s, s] * S00[s, s].T)
-            num = jnp.trace(S10[s, s])
-            den = jnp.trace(S00[s, s])
-            
+            if f_update == "weighted":
+                # Exact conditional maximiser (Eq 3a): F = diag(f) with
+                # Q != I, so the traces are weighted by Q^-1;
+                # tr(A B) = sum(A * B'), without forming the product
+                num = jnp.sum(invQ[s, s] * S10[s, s].T)
+                den = jnp.sum(invQ[s, s] * S00[s, s].T)
+            else:
+                # Unweighted estimating equation tr(S10 - f S00) = 0
+                # (persistence of the large-scale modes, not an ECM step)
+                num = jnp.trace(S10[s, s])
+                den = jnp.trace(S00[s, s])
+
             est_f = est_f.at[q].set(num / den)
 
         if fixed("f"):

@@ -156,7 +156,8 @@ covariances, hence the sufficient statistics
 
 **M-step.** Each update maximises the expected complete-data
 log-likelihood given the latest values of the others (an ECM algorithm, so
-:math:`\ell` does not decrease). A parameter fixed in ``params0`` keeps its
+:math:`\ell` does not decrease; with ``f_update="unweighted"`` the
+:math:`f` step is not a maximiser, see below). A parameter fixed in ``params0`` keeps its
 value, and the later steps use it.
 
 - AR coefficients, given the current :math:`\kappa`, for each factor
@@ -166,6 +167,16 @@ value, and the later steps use it.
 
      f_j = \frac{\operatorname{tr}\bigl(\Lambda_j\, S_{10,jj}\bigr)}{\operatorname{tr}\bigl(\Lambda_j\, S_{00,jj}\bigr)},
      \qquad \Lambda_j = \Lambda(\kappa_j).
+
+  This is the default, ``FitOptions(f_update="weighted")``. With
+  ``f_update="unweighted"`` the update is
+  :math:`f_j = \operatorname{tr}(S_{10,jj}) / \operatorname{tr}(S_{00,jj})`,
+  the lag-one autocorrelation pooled over the nodes. It solves the unbiased
+  estimating equation :math:`\operatorname{tr}(S_{10,jj} - f_j S_{00,jj}) = 0`
+  and measures the persistence of the large-scale modes. It is not a
+  conditional maximiser, so with it :math:`\ell` can decrease and the fixed
+  point is not the maximum likelihood estimate. See
+  :class:`~geossm.stmodel.FitOptions` for when to use each.
 
 - SPDE scales, given the new :math:`f`: with
   :math:`\Omega = S_{11} - S_{10} F^\top - F S_{10}^\top + F S_{00} F^\top`,

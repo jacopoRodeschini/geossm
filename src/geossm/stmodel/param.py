@@ -108,6 +108,38 @@ class FitOptions:
         expected complete-data log-likelihood) is below `ks_tol` times the
         objective's magnitude at the start of the M-step, so the tolerance
         does not depend on the size of the problem.
+    f_update : {"weighted", "unweighted"}, default "weighted"
+        M-step of the autoregressive coefficients ``F = diag(f)``. For each
+        latent factor, given the smoothed moments ``S10`` and ``S00`` on its
+        nodes and its SPDE precision ``Q^-1(ks)``:
+
+        - ``"weighted"``: ``f = tr(Q^-1 S10) / tr(Q^-1 S00)``. This is the
+          exact maximiser of the expected complete-data log-likelihood, so
+          the algorithm is an ECM: the log-likelihood does not decrease, the
+          fixed point is the maximum likelihood estimate, and the
+          Hessian-based standard errors and the likelihood-based comparisons
+          (AIC, likelihood ratio) are valid. In the eigenbasis of ``Q^-1``
+          it weights every spatial mode equally, so ``f`` is dominated by
+          the many short-wavelength modes.
+        - ``"unweighted"``: ``f = tr(S10) / tr(S00)``, the lag-one
+          autocorrelation of the latent field pooled over its nodes. Each
+          mode is weighted by its variance, so ``f`` measures the
+          persistence of the smooth, large-scale component. It solves an
+          unbiased estimating equation, ``tr{S10 - f S00} = 0``, so it is
+          consistent when the model is correct, but it is less efficient
+          than ``"weighted"``. .
+
+        Use ``"weighted"`` when the separable AR(1) dynamics are a credible
+        description of the data, and whenever likelihood-based inference
+        is needed; it is the reference fit. Use ``"unweighted"`` when the
+        model is misspecified in a way that the weighted update absorbs
+        into the dynamics. E.g. time-invariant, small-scale component (e.g.
+        unmodelled station effects) that the monitoring network does not
+        resolve is carried by the short-wavelength modes. ``"unweighted"``
+        then targets the regional persistence, which usually predicts
+        better at new sites and at longer forecast horizons. A large gap
+        between the two estimates of ``f`` is itself a sign of
+        misspecification: under the model they agree.
     """
 
     max_iter: int = 20
@@ -116,6 +148,7 @@ class FitOptions:
     force_iter: bool = False
     std: Union[bool, str] = True
     ks_tol: float = 1e-6
+    f_update: str = "weighted"
 
     def __post_init__(self):
         if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
@@ -129,6 +162,8 @@ class FitOptions:
         if not (isinstance(self.ks_tol, (int, float, np.number)) and np.isfinite(self.ks_tol)
                 and self.ks_tol > 0):
             raise ValueError(f"ks_tol must be a finite number > 0, got {self.ks_tol!r}.")
+        if self.f_update not in ("weighted", "unweighted"):
+            raise ValueError(f"f_update must be 'weighted' or 'unweighted', got {self.f_update!r}.")
 
     def __str__(self):
         lines = ["FitOptions:"]
