@@ -85,3 +85,14 @@ def test_renamed_api_has_no_old_names(owner, old, new):
     module, _, cls = owner.rpartition(".")
     obj = getattr(importlib.import_module(module), cls) if cls[0].isupper() else importlib.import_module(owner)
     assert not hasattr(obj, old) and hasattr(obj, new)
+
+
+
+@pytest.mark.parametrize("owner, name", [
+    ("geossm.ssm.StateSpaceModel", "params_names"),  # = xbeta_names (F23)
+    ("geossm.ssm.StateSpaceModel", "params_dim"),    # = b (F23)
+    ("geossm.covmodel.FEMSolver", "boundary_vertex"),  # = boundary_edges (F23)
+])
+def test_removed_duplicate_names(owner, name):
+    module, _, cls = owner.rpartition(".")
+    assert not hasattr(getattr(importlib.import_module(module), cls), name)

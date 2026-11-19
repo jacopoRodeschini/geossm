@@ -10,7 +10,7 @@ configures the EM stopping rule used by `fit`.
 """
 
 from dataclasses import dataclass, replace
-from typing import Optional
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -82,7 +82,9 @@ class FitOptions:
         it is reached (before `max_iter`), including when the change is a
         decrease of that size (iterates oscillating on the plateau). Unlike
         a change relative to ``|llf|``, it does not depend on additive
-        constants in the log-likelihood.
+        constants in the log-likelihood. With ``f_update="unweighted"`` it
+        is the only stopping rule besides `max_iter`: decreases of any size
+        are allowed and EM stops at the last iterate.
     verbose : bool or None, default None
         If `True`, print the model summary and the per-iteration progress
         during `fit`, if `False` nothing; `None` uses the model's `verbose`.
@@ -94,27 +96,68 @@ class FitOptions:
         warning and the EM iterations continue (useful when poor initial
         values make the log-likelihood oscillate at the start). A NaN/Inf
         log-likelihood always stops the algorithm and returns the
-        highest-likelihood estimate seen.
-    std : bool, default True
-        If `False`, skip the in-sample predictive covariance `Sigma_y_hat`
-        computed after the EM loop (left as `None`) -- useful when the
-        ``(p, p, T)`` array does not fit in device memory. ``std``
-        switches the whole covariance (the standard deviations are the
-        square roots of its diagonal).
+        highest-likelihood estimate seen. Only used with
+        ``f_update="weighted"``: with ``"unweighted"`` a decrease is
+        expected (the iterations are not likelihood steps), so it is
+        neither a warning nor a stop.
+    std : {True, "full", False}, default True
+        Uncertainty of the in-sample fitted values computed after the EM
+        loop: `True` stores the point-wise variances `var_y_hat`
+        ``(p, T)``; ``"full"`` also stores the full covariance
+        `Sigma_y_hat` ``(p, p, T)`` (memory grows with ``p^2 T``: e.g.
+        1 GB at 1,600 sites and 100 time steps in float32); `False` stores
+        neither.
     ks_tol : float, default 1e-6
         Tolerance of the `ks` M-step (L-BFGS-B over ``log(ks)``): it stops
         when the gradient of its objective (the `ks`-dependent part of the
         expected complete-data log-likelihood) is below `ks_tol` times the
         objective's magnitude at the start of the M-step, so the tolerance
         does not depend on the size of the problem.
+    f_update : {"weighted", "unweighted"}, default "unweighted"
+        M-step of the autoregressive coefficients ``F = diag(f)``. For each
+        latent factor, given the smoothed moments ``S10`` and ``S00`` on its
+        nodes and its SPDE precision ``Q^-1(ks)``:
+
+        - ``"weighted"``: ``f = tr(Q^-1 S10) / tr(Q^-1 S00)``. This is the
+          exact maximiser of the expected complete-data log-likelihood, so
+          the algorithm is an ECM: the log-likelihood does not decrease, the
+          fixed point is the maximum likelihood estimate, and the
+          Hessian-based standard errors and the likelihood-based comparisons
+          (AIC, likelihood ratio) are valid. In the eigenbasis of ``Q^-1``
+          it weights every spatial mode equally, so ``f`` is dominated by
+          the many short-wavelength modes.
+        - ``"unweighted"``: ``f = tr(S10) / tr(S00)``, the lag-one
+          autocorrelation of the latent field pooled over its nodes. Each
+          mode is weighted by its variance, so ``f`` measures the
+          persistence of the smooth, large-scale component. It solves an
+          unbiased estimating equation, ``tr{S10 - f S00} = 0``, so it is
+          consistent when the model is correct, but it is less efficient
+          than ``"weighted"``. It is not a likelihood step: the
+          log-likelihood can decrease along the iterations, EM stops at the
+          fixed point when ``|llf_k - llf_{k-1}| / n_obs <= tol_relat``
+          (not at the highest-likelihood iterate), and the Hessian-based
+          standard errors and likelihood comparisons are not valid for it.
+
+        Use ``"weighted"`` when the separable AR(1) dynamics are a credible
+        description of the data, and whenever likelihood-based inference
+        is needed; it is the reference fit. Use ``"unweighted"`` when the
+        model is misspecified in a way that the weighted update absorbs
+        into the dynamics. E.g. time-invariant, small-scale component (e.g.
+        unmodelled station effects) that the monitoring network does not
+        resolve is carried by the short-wavelength modes. ``"unweighted"``
+        then targets the regional persistence, which usually predicts
+        better at new sites and at longer forecast horizons. A large gap
+        between the two estimates of ``f`` is itself a sign of
+        misspecification: under the model they agree.
     """
 
     max_iter: int = 20
     tol_relat: float = 1e-3
     verbose: Optional[bool] = None
     force_iter: bool = False
-    std: bool = True
+    std: Union[bool, str] = True
     ks_tol: float = 1e-6
+    f_update: str = "unweighted"
 
     def __post_init__(self):
         if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
@@ -123,9 +166,13 @@ class FitOptions:
         if not (isinstance(self.tol_relat, (int, float, np.number)) and np.isfinite(self.tol_relat)
                 and self.tol_relat >= 0):
             raise ValueError(f"tol_relat must be a finite number >= 0, got {self.tol_relat!r}.")
+        if not (self.std is True or self.std is False or self.std == "full"):
+            raise ValueError(f"std must be True, False or 'full', got {self.std!r}.")
         if not (isinstance(self.ks_tol, (int, float, np.number)) and np.isfinite(self.ks_tol)
                 and self.ks_tol > 0):
             raise ValueError(f"ks_tol must be a finite number > 0, got {self.ks_tol!r}.")
+        if self.f_update not in ("weighted", "unweighted"):
+            raise ValueError(f"f_update must be 'weighted' or 'unweighted', got {self.f_update!r}.")
 
     def __str__(self):
         lines = ["FitOptions:"]

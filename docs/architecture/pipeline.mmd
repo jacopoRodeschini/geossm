@@ -43,7 +43,7 @@ flowchart TD
 
     subgraph POST["Post-fit (from the fitted state only)"]
         HESS["compute_cov_params: Hessian of observed_loglik(fitted_state)<br/>[JIT, compiled once per shape, J2]; no definiteness check (Section I decision)"]
-        PREDICT["predict(df) -> arrays; get_prediction(df) -> LRPredictionResults:<br/>formula builders + basis -> mean/cov, in_support;<br/>other CRS reprojected with a warning; out-of-period times dropped, warned"]
+        PREDICT["predict(df) -> arrays; get_prediction(df) -> LRPredictionResults:<br/>formula builders + basis -> mean, point-wise variances (full covariance with std='full'), in_support;<br/>other CRS reprojected with a warning; out-of-period times dropped, warned"]
         BACK["back_transform (delta method, latent mean, F50)"]
         GEO["to_geo (in_support columns) / to_poly (in-support points)"]
     end

@@ -95,6 +95,9 @@ class StateSpaceResults:
         State-driven predictive covariance of ``y_hat`` (excludes
         observation noise ``R``); see
         `geossm.ssm.statespace._compute_predict_sigma_kernel_JAX`.
+    var_y_hat : numpy.ndarray, shape (p, T) or None
+        Its diagonal, the point-wise variances (available without the
+        full covariance, Section P).
     x_filtered, P_filtered : numpy.ndarray or None
         Filtered state means/covariances (``None`` when unavailable, e.g.
         after ``smoother(..., light=True)``).
@@ -129,10 +132,9 @@ class StateSpaceResults:
         y_hat,
         Sigma_y_hat=None,
         tdelta_hat=None,
+        var_y_hat=None,
         # optional metadata
         params=None,
-        params_names=None,
-        params_dim=None,
         y_obs=None,
         y_name=None,
         Xbeta=None,
@@ -169,7 +171,7 @@ class StateSpaceResults:
         model : object or None
             The fitted `geossm.ssm.statespace.StateSpaceModel` (or
             subclass) instance, read once and not stored. When given,
-            ``params``, ``params_names``, ``params_dim``, ``y_name``,
+            ``params``, ``y_name``,
             ``y_obs`` (from ``model.y_t``), ``Xbeta``, ``backend`` and
             ``dtype`` default to the corresponding model attributes unless
             overridden below; its observation-noise variances, shape,
@@ -179,12 +181,14 @@ class StateSpaceResults:
             Predicted/fitted observation means.
         Sigma_y_hat : array_like, shape (p, p, T), optional
             State-driven predictive covariance of ``y_hat``.
+        var_y_hat : array_like, shape (p, T), optional
+            Point-wise variances of ``y_hat`` (the diagonal of
+            ``Sigma_y_hat``, taken from it when not given).
         tdelta_hat : float, optional
             Wall-clock time spent computing ``y_hat``/``Sigma_y_hat``
             (currently for informational/metadata purposes).
-        params, params_names, params_dim : optional
-            Overrides for the model's `params`/`params_names`/
-            `params_dim`.
+        params : optional
+            Override for the model's `params`.
         y_obs : array_like, shape (p, T), optional
             Override for the observed data (defaults to ``model.y_t``).
         y_name : str or sequence of str, optional
@@ -246,8 +250,6 @@ class StateSpaceResults:
         # get the observed data from the model if available
         if model is not None:
             self.params = getattr(model, "params", None)
-            self.params_names = getattr(model, "params_names", None)
-            self.params_dim = getattr(model, "params_dim", None)
             names = getattr(model, "y_name", None)
             self.y_name = tuple(names) if isinstance(names, list) else names
             # observed data and regressors default to the model's
@@ -258,10 +260,6 @@ class StateSpaceResults:
             self.y_name = y_name
         if params is not None:
             self.params = params
-        if params_names is not None:
-            self.params_names = params_names
-        if params_dim is not None:
-            self.params_dim = params_dim
 
         # ---- likelihood (a Python float, not a 0-d array) ----
         self.llf = None if llf is None else float(llf)
@@ -279,8 +277,10 @@ class StateSpaceResults:
         self.K = K
         # ---- data, fitted values, smoothed states and sufficient stats (kept
         # elsewhere by a subclass for the names in `_DELEGATED_FIELDS`) ----
+        if var_y_hat is None and Sigma_y_hat is not None:
+            var_y_hat = np.diagonal(np.asarray(Sigma_y_hat), axis1=0, axis2=1).T
         for name, value in (("y_obs", y_obs), ("Xbeta", Xbeta), ("y_hat", y_hat),
-                            ("Sigma_y_hat", Sigma_y_hat),
+                            ("Sigma_y_hat", Sigma_y_hat), ("var_y_hat", var_y_hat),
                             ("x_smoothed", x_smoothed), ("P_smoothed", P_smoothed),
                             ("P_pred_smoothed", P_pred_smoothed),
                             ("S11", S11), ("S10", S10), ("S00", S00)):
@@ -341,6 +341,7 @@ class StateSpaceResults:
             "Xbeta",
             "y_hat",
             "Sigma_y_hat",
+            "var_y_hat",
             "x_filtered",
             "P_filtered",
             "x_pred",
@@ -584,8 +585,8 @@ class StateSpaceResults:
 
         For each time step, uses :math:`\\hat y_t \\pm z_{1-\\alpha/2}
         \\sqrt{\\mathrm{diag}(\\Sigma_{\\hat y, t})}`, where
-        :math:`\\Sigma_{\\hat y, t}` is `Sigma_y_hat` (the state-driven
-        predictive covariance, excluding observation noise) plus, when
+        :math:`\\mathrm{diag}(\\Sigma_{\\hat y, t})` is `var_y_hat` (the
+        state-driven predictive variances, excluding observation noise) plus, when
         ``prediction=True``, the observation noise covariance ``R`` of the
         parameters these results were computed with (recorded when they
         were created, so a later fit of the model does not change them) -
@@ -600,9 +601,9 @@ class StateSpaceResults:
             Significance level; the interval has nominal coverage
             ``1 - alpha``.
         prediction : bool, default False
-            If True, add the model's observation noise covariance ``R``
-            to ``Sigma_y_hat`` before computing the interval (prediction
-            interval); if False, use ``Sigma_y_hat`` alone (confidence
+            If True, add the model's observation noise variances ``R``
+            to ``var_y_hat`` before computing the interval (prediction
+            interval); if False, use ``var_y_hat`` alone (confidence
             interval for the mean).
 
         Returns
@@ -631,30 +632,33 @@ class StateSpaceResults:
         # `fit()` call/iteration, so rebuilding from it here could silently
         # use a stale H that no longer matches this particular results
         # object.
-        Sigma_y_hat = getattr(self, "Sigma_y_hat", None)
-        if Sigma_y_hat is None:
+        var_y_hat = self._point_variances()
+        if var_y_hat is None:
             raise ValueError(
-                "Cannot compute y confidence intervals: Sigma_y_hat is not "
-                "available on this results object."
+                "Cannot compute y confidence intervals: the variances of y_hat "
+                "(var_y_hat, or Sigma_y_hat) are not available on this results object."
             )
 
         # Observation-noise variances of the parameters these results were
         # computed with (snapshotted at construction), not the model's current R
         R = getattr(self, "_R", None)
-        R_diag_matrix = np.diag(R) if (prediction and R is not None and R.ndim > 0) else None
-
-        lower = np.zeros((p, T), dtype=self.dtype)
-        upper = np.zeros((p, T), dtype=self.dtype)
-        for t in range(T):
-            var_y = np.asarray(Sigma_y_hat[:, :, t])
-            if prediction and R_diag_matrix is not None:
-                var_y = var_y + R_diag_matrix
-
-            std_t = _safe_sqrt_variance(np.diag(var_y), context="conf_int_y")
-            lower[:, t] = y_hat[:, t] - z * std_t
-            upper[:, t] = y_hat[:, t] + z * std_t
+        var_y = np.asarray(var_y_hat)
+        if prediction and R is not None and np.ndim(R) > 0:
+            var_y = var_y + np.asarray(R)[:, None]
+        std = _safe_sqrt_variance(var_y, context="conf_int_y").astype(self.dtype)
+        lower = (np.asarray(y_hat) - z * std).astype(self.dtype)
+        upper = (np.asarray(y_hat) + z * std).astype(self.dtype)
         return lower, upper
         
+    def _point_variances(self):
+        """`var_y_hat`, or the diagonal of `Sigma_y_hat` when only the
+        covariance is set (e.g. attached from `StateSpaceModel.predict`),
+        or `None`."""
+        var = getattr(self, "var_y_hat", None)
+        if var is None and getattr(self, "Sigma_y_hat", None) is not None:
+            var = np.diagonal(np.asarray(self.Sigma_y_hat), axis1=0, axis2=1).T
+        return var
+
     def coverage_probability(self, alpha: float = 0.05, which="global"):
         """Empirical coverage probability of the `conf_int_y` prediction
         intervals.
@@ -871,7 +875,7 @@ class StateSpaceResults:
                 ("RMSE:", lambda: [f"{self.rmse():.2f}"]),
                 ("Coverage Prob.:", lambda a=alpha_cov: [
                     f"{self._coverage_probability(a):.2f} ({1 - a:.2f}*, alpha = {a})"
-                    if getattr(self, "Sigma_y_hat", None) is not None
+                    if self._point_variances() is not None
                     else "N/A"
                 ]),
                 ("Jarque-Bera:", lambda: [f"{stats['jb']:.2f} (0*) (pvalue: {stats['jb_pvalue']:.2f})"]),
@@ -1002,7 +1006,7 @@ class StateSpaceResults:
         Returns
         -------
         dict
-            Keys: ``y_obs``, ``y_hat``, ``Sigma_y_hat``, ``x_filtered``,
+            Keys: ``y_obs``, ``y_hat``, ``Sigma_y_hat``, ``var_y_hat``, ``x_filtered``,
             ``P_filtered``, ``x_smoothed``, ``P_smoothed``, ``llf``,
             ``mse`` (global), ``rmse`` (global), ``diagnostics`` (see
             `diagnostics`), ``S11``, ``S10``, ``S00``.
@@ -1012,6 +1016,7 @@ class StateSpaceResults:
             "y_obs": self.y_obs,
             "y_hat": self.y_hat,
             "Sigma_y_hat": self.Sigma_y_hat,
+            "var_y_hat": self.var_y_hat,
             "x_filtered": self.x_filtered,
             "P_filtered": self.P_filtered,
             "x_smoothed": self.x_smoothed,

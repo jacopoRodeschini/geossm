@@ -90,6 +90,41 @@ variables (each with its own spatial domain and covariance model) can
 be modeled jointly, as separate "blocks" sharing the same latent
 state-space machinery.
 
+Computational cost and the size of the mesh
+----------------------------------------------
+
+The latent field lives on the inner nodes of the mesh, so its dimension
+``q`` (``model.block_q[-1]``) sets the cost of a fit. The Kalman filter and
+smoother work with dense ``q x q`` covariances at every time step, so an EM
+iteration grows roughly with ``T q^3``; the ``ks`` update and the SPDE
+precision work with dense matrices on all the mesh nodes. The number of
+sites ``p`` matters much less: the filter uses the Woodbury identity, so its
+cost is nearly flat in ``p``. Measured per EM iteration (CPU, float32,
+``T = 100``, 100 sites, synthetic data):
+
+.. list-table::
+   :header-rows: 1
+
+   * - latent nodes ``q`` (mesh nodes)
+     - filter + smoother
+     - ``ks`` update + system matrices
+   * - 53 (171)
+     - 0.2 s
+     - 0.2 s
+   * - 217 (623)
+     - 4.4 s
+     - 3.8 s
+   * - 482 (1,265)
+     - 12.8 s
+     - 4.5 s
+
+From 100 to 1,600 sites (``q = 53``) the filter went from 0.20 s to
+0.27 s. The time grows linearly with ``T``. Choose the mesh (e.g. the
+``lowrank`` or ``n_vertices`` budget of
+:func:`~geossm.covmodel.utils.buildMesh2d`) with this cost in mind: a few
+hundred latent nodes are practical, thousands are not with the current dense
+formulation.
+
 Results, inference, and prediction
 --------------------------------------
 
@@ -113,7 +148,9 @@ Results, inference, and prediction
   and point-wise variance at new locations/times, as arrays.
 - :meth:`~geossm.stmodel.LRStateSpaceResults.get_prediction` -- the same
   prediction as a :class:`~geossm.stmodel.LRPredictionResults` object, with
-  the predictive covariance, back-transformation, export to a
+  the point-wise predictive variances (the full ``(p, p, T)`` covariance only
+  with ``std="full"``: its memory grows with ``p^2 T``), back-transformation,
+  export to a
   :class:`geopandas.GeoDataFrame` (``to_geo``) and change of support to
   polygons (``to_poly``).
 - :meth:`~geossm.stmodel.LRStateSpaceResults.to_geo` -- export the fitted

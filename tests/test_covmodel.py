@@ -73,6 +73,23 @@ class TestFEMSolver:
     def test_covers_domain(self, fem):
         assert fem.covers_domain()
 
+    def test_vertex_and_elements_are_cached_and_read_only(self, fem):
+        # F32: computed once at construction (they looped over every element
+        # in Python on each access)
+        assert fem.vertex is fem.vertex and fem.elements is fem.elements
+        assert not fem.vertex.flags.writeable and not fem.elements.flags.writeable
+        assert fem.elements.shape == (fem.nelements, 3)
+        assert np.array_equal(np.unique(fem.elements), np.arange(fem.nvertex))
+
+    def test_mesh_statistics_match_the_per_triangle_formulas(self, fem):
+        angles, areas = fem.compute_stats()
+        ref_angles = np.array([fem.compute_angles(fem.vertex, tri) for tri in fem.elements])
+        ref_areas = np.array([fem.compute_area(fem.vertex, tri) for tri in fem.elements])
+        np.testing.assert_allclose(angles, ref_angles, rtol=0, atol=1e-10)
+        np.testing.assert_allclose(areas, ref_areas, rtol=1e-14, atol=0)
+        np.testing.assert_allclose(angles.sum(axis=1), 180.0, atol=1e-9)
+        assert areas.sum() == pytest.approx((HI - LO) ** 2, rel=1e-12)
+
     def test_mesh_not_covering_the_domain_warns(self, mesh):
         wider = Polygon([(-5, -5), (20, -5), (20, 20), (-5, 20)])
         with pytest.warns(UserWarning, match="does not fully cover"):
