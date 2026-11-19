@@ -205,11 +205,3 @@ for cov_fun, lr in zip(cov_funcs, lowrank):
 
 # Convert the list of dict to a pandas dataframe and add a column with the total simulation time
 timing_df = pd.DataFrame([item for sublist in records.values() for item in sublist.values()])
-
-# %% 
-# Save the results in a pickle file for later analysis and plotting
-dtype = "float32"
-folderpath = Path().resolve() / "case_studies"
-path = folderpath / f"grins_PM10_timing_results_{dtype}.pkl"
-
-timing_df.to_pickle(path)

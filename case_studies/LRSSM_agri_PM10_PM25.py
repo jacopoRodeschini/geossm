@@ -60,9 +60,6 @@ agri_points, shape = df.load_dataset("agrimonia")
 agri_points = agri_points.to_crs(epsg=32632)
 shape = shape.to_crs(epsg=32632)
 
-# domain = list(shape.geometry[0].geoms)[0].buffer(3.5e4)
-
-
 # %% Add season dummy 
 def get_season(date):
     month = date.month
@@ -98,7 +95,7 @@ agri_points["rain"] = agri_points["WE_precipitation_t"].apply(rain)
 thr = agri_points['Altitude'].quantile(0.96)
 agri_points["mask_altitude"] = agri_points["Altitude"].apply(lambda x: mask_altitude(x, thr)) 
 
-# %% drop station altutude < thr
+# %% drop station altitude < thr
 agri_points = agri_points[agri_points["mask_altitude"]].copy()
 
 # %% Cut the dataset from 2019 to 2020
@@ -142,7 +139,7 @@ cov_funs = {(name): None for name in names}
 
 for pt, n in zip(model.points, names):
     points = pt
-    mesh_io, poly, info = buildMesh2d(points, lowrank=0.75, gradation=1.5, 
+    mesh_io, poly = buildMesh2d(points, lowrank=0.75, gradation=1.5, 
         domain = domain, offset=1e4, anchor_spacing=1, eps=0.05)
 
     # build the latent covariance function on the mesh, then attach it to the model
@@ -166,7 +163,7 @@ ax[1].set_aspect("equal")
 ax[1].grid(True, linestyle="--", alpha=0.8)
 
 # %% Estimate the Model (default estimation options)
-from geossm.stmodel import ModelParams, FitOptions, Param
+from geossm.stmodel import FitOptions
 
 model = model.setup(cov_fun=[cov_funs["AQ_pm10"], cov_funs["AQ_pm25"]])
 
@@ -182,44 +179,23 @@ results.compute_cov_params()
 print(results)  # results.summary()
 print(results.to_latex())
 
-# %% Model prediction 
-import jax.numpy as jnp
-# Compute the prediction at the agri_grid points (pixel level)
-agri_grid = agri_grid.to_crs(epsg=32632)  # project to meters (EPSG:32632) for distance-based operations
+# %% Set the agri_grid dataset for prediction
+
+# project to meters (EPSG:32632) for distance-based operations 
+agri_grid = agri_grid.to_crs(epsg=32632)  
 agri_grid['rain'] = agri_grid['WE_precipitation_t'].apply(rain)
 agri_grid['urban'] = agri_grid['LA_land_use'].apply(urban)
 agri_grid['season'] = agri_grid['time'].apply(get_season)
 agri_grid['mask_altitude'] = agri_grid['Altitude'].apply(lambda x: mask_altitude(x, thr))  # apply the altitude mask
-agri_grid = agri_grid[agri_grid['mask_altitude']].copy()  # apply the altitude mask
-
+agri_grid = agri_grid[agri_grid['mask_altitude']].copy()  
+# %% Model prediction 
+# Compute the prediction at the agri_grid points (pixel level)
+import jax.numpy as jnp
 prediction = results.get_prediction(agri_grid, verbose=True)
 
 prediction = prediction.back_transform(g_invs=[jnp.exp, jnp.exp ])  # back-transform the predicted values to the original scale
 results = results.back_transform(g_invs=[jnp.exp,jnp.exp ]) 
-print(prediction)  # prediction.summary()
-
-# %% histogram of the predicted value
-
-# y_pred = prediction.y_pred_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
-y_pred = prediction.y_pred_back_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
-# y_pred = results.residuals_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
-T = len(prediction.timestamps[0])
-n0 = len(prediction.points[0])
-mask = np.repeat(prediction.in_support[:n0], T)
-
-fig, ax = plt.subplots(figsize=(8, 6))
-# Plot the histogram of the predicted values
-ax.hist(y_pred[mask], bins=30, color='skyblue', edgecolor='black')
-ax.set_title("Histogram of Predicted $PM_{10}$ Values")
-ax.set_xlabel("$PM_{10}$ (µg/m³)")
-ax.set_ylabel("Frequency")
-
-fig, ax = plt.subplots(figsize=(8, 6))
-ax.plot(model.y_train_list[0].flatten(order='F'), results.y_hat_list[0].flatten(order='F'), 'o', alpha=0.5)
-ax.set_xlabel("Observed $PM_{10}$ (µg/m³)")
-ax.set_ylabel("Predicted $PM_{10}$ (µg/m³)")
-ax.plot([-1, 5], [-1, 5], 'r--', label="1:1 Line")
-ax.legend()
+print(prediction)
 
 # %% Plot the results using imshow (for each time step)
 from matplotlib.colors import Normalize
@@ -227,24 +203,18 @@ from pyproj import Transformer
 
 T = len(prediction.timestamps[0])
 n0 = len(prediction.points[0])
+
+# Get the mask of the points that are inside the domain for each time step
 mask = np.tile(prediction.in_support[:n0], T)
 
-y_pred = prediction.y_pred_back_list[0].flatten(order='F')  # shape (n_points, n_time_steps)
+# Applt the mask to the predicted values and reshape to (n_points, n_time_steps)
+y_pred = prediction.y_pred_back_list[0].flatten(order='F') 
 y_pred[~mask] = np.nan
 y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
 
 # remove exp artefacts by replacing values above the 99.9th percentile with NaN
-index = np.where(y_pred > np.nanquantile(y_pred, 0.999))  # Get indices of values above the 99.9th percentile
-y_pred[index] = np.nan  # Replace values above the 99.9th percentile with NaN
-
-# index_0 = np.where(y_pred <= 0)  # Get indices of values below the 0.1th percentile
-# y_pred[index_0] = np.nan  # Replace values below the 0.1th percentile with NaN
-# y_pred = y_pred.reshape(prediction.y_pred_list[0].shape, order='F')  # Reshape back to (n_points, n_time_steps)
-# y_pred = y_pred  # Apply the exponential transformation to revert the log transformation
-  # Replace values above the 99.9th percentile with NaN
-# Define month boundaries (assuming daily data for a year)
-# Days: Jan(31), Feb(28), Mar(31), Apr(30), May(31), Jun(30), 
-#       Jul(31), Aug(31), Sep(30), Oct(31), Nov(30), Dec(31)
+index = np.where(y_pred > np.nanquantile(y_pred, 0.999)) 
+y_pred[index] = np.nan 
 
 month_ranges = [
     (0, 31, "January"),
