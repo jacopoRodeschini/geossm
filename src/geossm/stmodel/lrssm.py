@@ -1017,6 +1017,9 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         std = options.std
         ks_tol = options.ks_tol
         f_update = options.f_update
+        # the weighted f update makes EM an ECM (likelihood ascent, ML fixed
+        # point); the unweighted one does not (see FitOptions.f_update)
+        ml_step = f_update == "weighted"
 
         # Get the initial parameters (if not provided, they will be set to None and the model will use default initial values)
         # Create the est_params object, filling in the provided values and leaving the rest as None (or default) for the model to handle
@@ -1176,9 +1179,12 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
             #   oscillate on the plateau.
             # - A larger decrease stops unless force_iter is True.
             # Every stop on a decrease or NaN/Inf returns the best iterate so far.
+            
+            # With f_update="unweighted" the EM stops when
+            # |delta_lik| / n_obs <= tol_relat (NaN/Inf still stops).
             if niter > 1:
                 invalid = bool(jnp.isnan(delta_lik) or jnp.isinf(delta_lik))
-                decreased = bool(delta_lik < 0)
+                decreased = ml_step and bool(delta_lik < 0)
                 within_tol = not invalid and abs(float(relat_lik)) <= tol_relat
                 if decreased and not within_tol and force_iter:
                     msg = self._log_warning_emstep(delta_lik, niter)
@@ -1253,15 +1259,17 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         # Make every returned quantity refer to the same parameters. On a
         # normal stop est_params is the output of the last M-step, which no
         # E-step has evaluated yet: run a final E-step at it, unless it is not
-        # better than the best evaluated iterate. On a restore, `best` already
-        # holds its E-step outputs. Either way the model's matrices (and the
-        # covariance functions' rescale) are left at the returned parameters.
+        # better than the best evaluated iterate (with the unweighted f update
+        # the last iterate, the fixed point, is kept whenever its log-likelihood
+        # is finite). On a restore, `best` already holds its E-step outputs.
+        # Either way the model's matrices (and the covariance functions'
+        # rescale) are left at the returned parameters.
         if not restored:
             self._log("Final E-step at the estimated parameters...")
             H, _ = self._set_system_matrices(est_params, basis, pdim, qdim)
             final = self._E_step(y_obs)
             logL_final = final[6]
-            if bool(jnp.isfinite(logL_final)) and logL_final >= best[-1]:
+            if bool(jnp.isfinite(logL_final)) and (logL_final >= best[-1] or not ml_step):
                 _, x_T, P_T, S11, S10, S00, logL_cur, _ = final
             else:
                 if not bool(jnp.isfinite(logL_final)):
@@ -1396,7 +1404,7 @@ class LRStateSpaceModel(_Verbose, StateSpaceModel):
         ks_value_and_grad,
         params=None,
         ks_tol=1e-6,
-        f_update="weighted",
+        f_update="unweighted",
     ):
         """
         EM M-step: given the E-step's smoothed states/sufficient statistics,

@@ -7,6 +7,7 @@ import dataclasses
 import gc
 import inspect
 import types
+import warnings
 import weakref
 
 import jax
@@ -327,6 +328,9 @@ class TestStoppingRule:
         return install
 
     def _fit(self, model, **kw):
+        # the ML stopping rule (decreases checked, best iterate returned) is
+        # that of f_update="weighted"; the unweighted one is tested at the end
+        kw = {"f_update": "weighted", **kw}
         return model.fit(options=_options(tol_relat=self.TOL, **kw))
 
     @pytest.fixture
@@ -392,6 +396,27 @@ class TestStoppingRule:
         assert any("NaN" in m for m in messages)
         assert (res.termination, res.convergence) == ("invalid", False)
         assert res.llf == -500.0
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
+
+    @pytest.mark.parametrize("force_iter", [False, True])
+    def test_unweighted_ignores_decreases_and_returns_the_last_iterate(self, model, scripted, n_obs, force_iter):
+        # f_update="unweighted": a large decrease neither warns nor stops; EM
+        # stops on |delta llf| / n_obs <= tol_relat and returns the fixed
+        # point (the final E-step, -600 + small), not the best iterate (-500).
+        small = 0.5 * self.TOL * n_obs
+        beta_seen = scripted([-1e3, -500.0, -600.0, -600.0 + small])
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", RuntimeWarning)
+            res = self._fit(model, max_iter=10, f_update="unweighted", force_iter=force_iter)
+        assert (res.termination, res.convergence, res.iterations) == ("tolerance", True, 4)
+        assert res.llf == pytest.approx(-600.0 + small)
+        np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[4])
+
+    def test_unweighted_nan_still_restores_best(self, model, scripted):
+        beta_seen = scripted([-1e3, -500.0, -600.0, float("nan")])
+        with pytest.warns(RuntimeWarning, match="NaN"):
+            res = self._fit(model, max_iter=5, f_update="unweighted")
+        assert (res.termination, res.convergence, res.llf) == ("invalid", False, -500.0)
         np.testing.assert_array_equal(np.asarray(res.params.beta.value), beta_seen[1])
 
 
@@ -464,7 +489,7 @@ def converged(gdf, mesh):
     jax.config.update("jax_enable_x64", True)
     try:
         model = _build_model(gdf, mesh, dtype=jnp.float64)
-        res = model.fit(options=_options(max_iter=30))
+        res = model.fit(options=_options(max_iter=30, f_update="weighted"))  # ML: ECM, valid Hessian
         res.compute_cov_params()
     finally:
         jax.config.update("jax_enable_x64", before)
@@ -622,7 +647,7 @@ def _m_step_call(gdf, mesh, **fit_options):
 
 @pytest.fixture(scope="module")
 def m_step_call(gdf, mesh):
-    return _m_step_call(gdf, mesh)  # default f_update="weighted"
+    return _m_step_call(gdf, mesh, f_update="weighted")
 
 
 @pytest.fixture(scope="module")
@@ -692,8 +717,8 @@ class TestMStepUnweightedF:
     of the expected complete-data log-likelihood G (no ECM guarantee for the f
     step), while ks is still the exact maximiser given the new f."""
 
-    def test_default_is_weighted(self):
-        assert FitOptions().f_update == "weighted"
+    def test_default_is_unweighted(self):
+        assert FitOptions().f_update == "unweighted"
 
     def test_f_update_is_the_unweighted_ratio(self, m_step_call_unweighted):
         c = m_step_call_unweighted
@@ -719,6 +744,31 @@ class TestMStepUnweightedF:
         f = float(np.asarray(res.params.f.value)[0])
         assert f == pytest.approx(np.trace(res.S10) / np.trace(res.S00), rel=1e-4)
         assert res.options.f_update == "unweighted"
+
+    def test_decreases_do_not_stop_the_fit(self, gdf, mesh):
+        # Started at the weighted MLE, every unweighted step lowers the
+        # log-likelihood. The fit is not stopped (no warning, force_iter
+        # irrelevant), stops on |delta llf| / n_obs <= tol_relat, and returns
+        # the fixed point, not the highest-likelihood iterate.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # max_iter
+            res_w = _build_model(gdf, mesh, dtype=jnp.float64).fit(
+                options=_options(max_iter=200, tol_relat=1e-10, f_update="weighted"))
+        fits = []
+        for force_iter in (False, True):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", RuntimeWarning)
+                fits.append(_build_model(gdf, mesh, dtype=jnp.float64).fit(
+                    params0=res_w.params,
+                    options=_options(max_iter=300, tol_relat=1e-9, f_update="unweighted", force_iter=force_iter)))
+        res, res_forced = fits
+        llf = np.asarray(res.llf_path[1:])
+        assert np.sum(np.diff(llf) < 0) > 10  # a non-trivial check: many decreases
+        assert res.termination == "tolerance"
+        assert float(res.llf) < np.nanmax(llf)  # the fixed point, not the best iterate
+        f = float(np.asarray(res.params.f.value)[0])
+        assert f == pytest.approx(np.trace(res.S10) / np.trace(res.S00), rel=1e-4)
+        np.testing.assert_array_equal(np.asarray(res_forced.llf_path), np.asarray(res.llf_path))
 
 
 class TestCompilation:

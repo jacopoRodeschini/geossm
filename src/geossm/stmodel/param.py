@@ -82,7 +82,9 @@ class FitOptions:
         it is reached (before `max_iter`), including when the change is a
         decrease of that size (iterates oscillating on the plateau). Unlike
         a change relative to ``|llf|``, it does not depend on additive
-        constants in the log-likelihood.
+        constants in the log-likelihood. With ``f_update="unweighted"`` it
+        is the only stopping rule besides `max_iter`: decreases of any size
+        are allowed and EM stops at the last iterate.
     verbose : bool or None, default None
         If `True`, print the model summary and the per-iteration progress
         during `fit`, if `False` nothing; `None` uses the model's `verbose`.
@@ -94,7 +96,10 @@ class FitOptions:
         warning and the EM iterations continue (useful when poor initial
         values make the log-likelihood oscillate at the start). A NaN/Inf
         log-likelihood always stops the algorithm and returns the
-        highest-likelihood estimate seen.
+        highest-likelihood estimate seen. Only used with
+        ``f_update="weighted"``: with ``"unweighted"`` a decrease is
+        expected (the iterations are not likelihood steps), so it is
+        neither a warning nor a stop.
     std : {True, "full", False}, default True
         Uncertainty of the in-sample fitted values computed after the EM
         loop: `True` stores the point-wise variances `var_y_hat`
@@ -108,7 +113,7 @@ class FitOptions:
         expected complete-data log-likelihood) is below `ks_tol` times the
         objective's magnitude at the start of the M-step, so the tolerance
         does not depend on the size of the problem.
-    f_update : {"weighted", "unweighted"}, default "weighted"
+    f_update : {"weighted", "unweighted"}, default "unweighted"
         M-step of the autoregressive coefficients ``F = diag(f)``. For each
         latent factor, given the smoothed moments ``S10`` and ``S00`` on its
         nodes and its SPDE precision ``Q^-1(ks)``:
@@ -127,7 +132,11 @@ class FitOptions:
           persistence of the smooth, large-scale component. It solves an
           unbiased estimating equation, ``tr{S10 - f S00} = 0``, so it is
           consistent when the model is correct, but it is less efficient
-          than ``"weighted"``. .
+          than ``"weighted"``. It is not a likelihood step: the
+          log-likelihood can decrease along the iterations, EM stops at the
+          fixed point when ``|llf_k - llf_{k-1}| / n_obs <= tol_relat``
+          (not at the highest-likelihood iterate), and the Hessian-based
+          standard errors and likelihood comparisons are not valid for it.
 
         Use ``"weighted"`` when the separable AR(1) dynamics are a credible
         description of the data, and whenever likelihood-based inference
@@ -148,7 +157,7 @@ class FitOptions:
     force_iter: bool = False
     std: Union[bool, str] = True
     ks_tol: float = 1e-6
-    f_update: str = "weighted"
+    f_update: str = "unweighted"
 
     def __post_init__(self):
         if isinstance(self.max_iter, bool) or not isinstance(self.max_iter, (int, np.integer)) \
